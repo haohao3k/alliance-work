@@ -1,0 +1,136 @@
+{
+  "repository": "https://github.com/sting9k/seatwork.git",
+  "revision": "fa540f47efb4344396a1eb532d3d6164a7056b9c",
+  "skills": [
+    "hq/slp-portfolio-digest",
+    "hq/slp-project-onboard",
+    "hq/slp-room-notebook",
+    "lead/slp-accept-candidate",
+    "lead/slp-decompose-outcome",
+    "lead/slp-dispose-challenge",
+    "lead/slp-exec-plan",
+    "lead/slp-lens",
+    "lead/slp-ultra-review",
+    "lead/slp-write-brief",
+    "peer/slp-candidate-handoff",
+    "peer/slp-challenge-premise",
+    "peer/slp-evidence-report",
+    "peer/slp-frontend-design",
+    "peer/slp-test-proof-debt-audit",
+    "supervisor/slp-intent-record",
+    "supervisor/slp-lead-handoff",
+    "supervisor/slp-decision-brief"
+  ],
+  "files": [
+    {
+      "path": "vendor/seatwork/skills/hq/slp-portfolio-digest/SKILL.md",
+      "source": "slp-room/room/skills/hq/slp-portfolio-digest/SKILL.md",
+      "sha256": "69aa97ee222e5c0ca18081a8344a6b97a071008018d5a2cb0e698590b5c85901"
+    },
+    {
+      "path": "vendor/seatwork/skills/hq/slp-project-onboard/SKILL.md",
+      "source": "slp-room/room/skills/hq/slp-project-onboard/SKILL.md",
+      "sha256": "6788f6eeab7ea1c437a2babb43ed44c8dc0e5b443322d5360727cb84bfd21413"
+    },
+    {
+      "path": "vendor/seatwork/skills/hq/slp-room-notebook/SKILL.md",
+      "source": "slp-room/room/skills/hq/slp-room-notebook/SKILL.md",
+      "sha256": "2233a775a9471794ab9a6be87be956d20a7d21c1a0c420cdbc0fdf70b1c75d44"
+    },
+    {
+      "path": "vendor/seatwork/skills/lead/slp-accept-candidate/SKILL.md",
+      "source": "slp-room/room/skills/lead/slp-accept-candidate/SKILL.md",
+      "sha256": "557ac92364fb744730b5b16b404689516b48e69edaf3e6435adce6f6131d4f60"
+    },
+    {
+      "path": "vendor/seatwork/skills/lead/slp-decompose-outcome/SKILL.md",
+      "source": "slp-room/room/skills/lead/slp-decompose-outcome/SKILL.md",
+      "sha256": "2276fb7e97105db4ede869b42cc9c47ddb173164ac9c37b268ea5aadd67c7835"
+    },
+    {
+      "path": "vendor/seatwork/skills/lead/slp-dispose-challenge/SKILL.md",
+      "source": "slp-room/room/skills/lead/slp-dispose-challenge/SKILL.md",
+      "sha256": "7f5e1183a2112dbe53fae743dd8cc19d3317fa479897ab6bfb4be85d8ee78a26"
+    },
+    {
+      "path": "vendor/seatwork/skills/lead/slp-exec-plan/SKILL.md",
+      "source": "slp-room/room/skills/lead/slp-exec-plan/SKILL.md",
+      "sha256": "ad90c6659a47ec38cfc42de96cc9335d562a0dc88c0a5a133950c286c950610c"
+    },
+    {
+      "path": "vendor/seatwork/skills/lead/slp-lens/SKILL.md",
+      "source": "slp-room/room/skills/lead/slp-lens/SKILL.md",
+      "sha256": "3fce34f4249d97cd3d8c297bc52c0b5b1be1b3ba7bdf1aaa1da7d32f7d285fc3"
+    },
+    {
+      "path": "vendor/seatwork/skills/lead/slp-lens/references/report-format.md",
+      "source": "slp-room/room/skills/lead/slp-lens/references/report-format.md",
+      "sha256": "f0d2edf5e029d665008b15968ff535c2ffb60107c3b29fdd277de46fadb33527"
+    },
+    {
+      "path": "vendor/seatwork/skills/lead/slp-ultra-review/SKILL.md",
+      "source": "slp-room/room/skills/lead/slp-ultra-review/SKILL.md",
+      "sha256": "8fe18368e081beaf31b577820ee1c2bee08ccd1eab2dd2222d581a5efb0b3413"
+    },
+    {
+      "path": "vendor/seatwork/skills/lead/slp-write-brief/SKILL.md",
+      "source": "slp-room/room/skills/lead/slp-write-brief/SKILL.md",
+      "sha256": "607ae32ff1c2582ec3b85768b1b35bd6c32db1e5b1ee23ad352e6d762599fdc4"
+    },
+    {
+      "path": "vendor/seatwork/skills/lead/slp-write-brief/references/brief-template.md",
+      "source": "slp-room/room/skills/lead/slp-write-brief/references/brief-template.md",
+      "sha256": "04f880bf5c34eb13977253f7aeef6dcf2ebf64f3ba82b16c69a8646d81b26f55"
+    },
+    {
+      "path": "vendor/seatwork/skills/peer/slp-candidate-handoff/SKILL.md",
+      "source": "slp-room/room/skills/peer/slp-candidate-handoff/SKILL.md",
+      "sha256": "bb45f250c1a61ab3fde1595691c14da9625a2cedf27c80d04e3a0d4cbde0dd74"
+    },
+    {
+      "path": "vendor/seatwork/skills/peer/slp-challenge-premise/SKILL.md",
+      "source": "slp-room/room/skills/peer/slp-challenge-premise/SKILL.md",
+      "sha256": "8bfb663c7a06ff91fb8cb65ef6164b883ba1a3bf15dfcb4b3aa01d9202221ccd"
+    },
+    {
+      "path": "vendor/seatwork/skills/peer/slp-evidence-report/SKILL.md",
+      "source": "slp-room/room/skills/peer/slp-evidence-report/SKILL.md",
+      "sha256": "c8d5efc80af6534aa684e50c86973fd52439ecc76799a9b143cdf6330fd9a357"
+    },
+    {
+      "path": "vendor/seatwork/skills/peer/slp-frontend-design/SKILL.md",
+      "source": "slp-room/room/skills/peer/slp-frontend-design/SKILL.md",
+      "sha256": "e3e027a579753ff366bee9642ecccf3b7ca7890aafcafe44750edd32eb884d53"
+    },
+    {
+      "path": "vendor/seatwork/skills/peer/slp-test-proof-debt-audit/SKILL.md",
+      "source": "slp-room/room/skills/peer/slp-test-proof-debt-audit/SKILL.md",
+      "sha256": "f54916ebe1b0839ac984af1fb0dc181c75728bb1f0217beddce715d4e47acad7"
+    },
+    {
+      "path": "vendor/seatwork/skills/peer/slp-test-proof-debt-audit/references/catalog.md",
+      "source": "slp-room/room/skills/peer/slp-test-proof-debt-audit/references/catalog.md",
+      "sha256": "4b1cb8a85502bd139f744488a85d55e86316f20ed12c29d55c32286b76ed9afd"
+    },
+    {
+      "path": "vendor/seatwork/skills/supervisor/slp-intent-record/SKILL.md",
+      "source": "slp-room/room/skills/supervisor/slp-intent-record/SKILL.md",
+      "sha256": "f7b9a581795a81e26c95da1c12d098b1d6500050b61af579da4f91ab938bbaf4"
+    },
+    {
+      "path": "vendor/seatwork/skills/supervisor/slp-intent-record/references/status-and-report.md",
+      "source": "slp-room/room/skills/supervisor/slp-intent-record/references/status-and-report.md",
+      "sha256": "76374c1e7f10799f9169cb76db73c5f578ecaf50a698af7b7d6681dcfed82d3b"
+    },
+    {
+      "path": "vendor/seatwork/skills/supervisor/slp-lead-handoff/SKILL.md",
+      "source": "slp-room/room/skills/supervisor/slp-lead-handoff/SKILL.md",
+      "sha256": "576742defa1a474d782d393576e4b8bdc03ac50bbb6a7a7384868ab39dcfb4e6"
+    },
+    {
+      "path": "vendor/seatwork/skills/supervisor/slp-decision-brief/SKILL.md",
+      "source": "slp-room/room/skills/supervisor/slp-decision-brief/SKILL.md",
+      "sha256": "90bc200eab55418bdcd95a4b52ba22de1c1a27e290fc50fe296bf7478f9fa41a"
+    }
+  ]
+}

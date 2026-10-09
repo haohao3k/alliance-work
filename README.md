@@ -4,7 +4,7 @@ Autonomous agent rooms on native Paseo, with separate Codex, Claude Code and Pi 
 HQ, Supervisor, Lead, Peer and Lens. Roles define responsibility; agents retain their native
 reasoning and tools. Start with one Supervisor and let the work determine the team.
 
-[Hướng dẫn sử dụng tiếng Việt](docs/quickstart.vi.md) · [Installation, auth and updates](docs/operations.md)
+[Hướng dẫn sử dụng tiếng Việt](docs/quickstart.vi.md) · [Installation, auth and updates](docs/operations.md) · [Video demo](https://github.com/haohao3k/alliance-work/releases/download/v0.1.3/alliance-work-demo.mp4)
 
 ## Install
 

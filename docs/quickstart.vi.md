@@ -57,6 +57,8 @@ Trở lại room để xem các thành viên; **Open chat** mở cuộc hội th
 
 **Resume → Continue assignment** dùng khi agent đã dừng hoặc đang idle và còn việc phải làm. Nếu có yêu cầu quyền đang chờ, xử lý trong chat trước. Khi agent còn chạy, dùng chat để chủ động điều chỉnh; không gửi lặp cùng một assignment.
 
+Paseo có thể hiện yêu cầu quyền chạy tool hoặc lệnh trong chat. Kiểm tra thao tác và phạm vi assignment rồi chọn **Accept** cho lượt đó. Nếu Supervisor dùng `respond_to_permission` để xử lý quyền của Peer, có thể mở chat Peer để xem yêu cầu gốc.
+
 Agent kết thúc một lượt chưa có nghĩa sản phẩm đã đạt yêu cầu. Đọc phần bàn giao, kiểm tra candidate và chạy các kiểm tra phù hợp với project.
 
 ## 5. Nghiệm thu đúng candidate
@@ -68,6 +70,8 @@ Mở **Disposition** ở thành viên chịu trách nhiệm bàn giao:
 3. Chọn **Accept candidate** khi đạt; chọn **Reject candidate** nếu cần làm tiếp.
 
 Một lượt làm việc mới mở lại trạng thái acceptance; quyết định trước vẫn được giữ trong artifact của room. Assignment, kết quả lượt chạy và quyết định nằm dưới `~/.alliance-work/rooms/<room-id>/`.
+
+![Supervisor và Peer đã được nghiệm thu riêng](assets/room-accepted.jpg)
 
 ## Cập nhật
 
@@ -81,10 +85,28 @@ Kết thúc agent và workspace script đang chạy trước khi update. Room, a
 giữ lại. Dùng `alliance-work setup --refresh` khi cần nạp lại asset từ phiên bản đang cài;
 `alliance-work rollback` quay về bản cài trước. Xem [hướng dẫn vận hành](operations.md#updates-and-recovery).
 
-## Demo Focus Board
+## Demo Focus Board đã nghiệm thu
 
 Project mẫu ở `~/Desktop/Projects-AI/Paseo/alliance-work-demo`, room **Focus Board · demo**.
-Assignment yêu cầu thêm/chuyển/lọc/xóa task, lưu qua reload và dùng được bằng bàn phím.
-Các ảnh trên được chụp từ UI thật. Video setup ghi thao tác theo từng đoạn, cắt thời gian chờ.
-Lượt model đã tạo được Supervisor và Peer; demo chưa được nghiệm thu đầy đủ, nên video setup
-không phải bằng chứng hoàn tất delegation → candidate → acceptance.
+Supervisor đã giao việc qua native Paseo cho Peer, nhận candidate, review và chạy lại **11/11 test**;
+`npm start` cũng đã được kiểm tra. Host đã thao tác trên UI thật: thêm task, từ chối nội dung rỗng,
+đổi trạng thái, lọc/xóa, reload giữ dữ liệu, dùng bàn phím và kiểm tra bố cục 390px/1280px.
+
+- Candidate triển khai: `f20ebfb14bb9e95523ef28375012bfe84f17c76d`.
+- Commit có `HANDOFF.md` hoàn chỉnh: `a589487e056efa30e0b3d35dd0f1e99fbea9b79f`; code ứng dụng giữ nguyên.
+- Cả Peer và Supervisor đều **accepted** bằng Disposition riêng; trạng thái vẫn còn sau reload.
+
+![Focus Board do Peer triển khai](assets/focus-board.jpg)
+
+[Xem hoặc tải video demo](https://github.com/haohao3k/alliance-work/releases/download/v0.1.3/alliance-work-demo.mp4) · [Phụ đề tiếng Việt](https://github.com/haohao3k/alliance-work/releases/download/v0.1.3/alliance-work-demo.vi.vtt).
+Video dùng các frame UI chụp thật, có phụ đề tiếng Việt; đã cắt thời gian chờ và các lượt cấp quyền lặp,
+làm chậm một số thao tác ngắn để dễ theo dõi. Không phải bản ghi liên tục toàn phiên.
+Repo private nên cần tài khoản GitHub có quyền truy cập. Có thể tải bằng CLI:
+
+```sh
+gh release download v0.1.3 --repo haohao3k/alliance-work --pattern alliance-work-demo.mp4
+```
+
+Bài này chạy model thật bằng **Codex Supervisor và Peer**. Claude/Pi đã được kiểm tra native home và
+skill discovery, chưa chạy bài model acceptance này. Các kiểm tra UI không thay thế một audit
+accessibility hoặc kiểm tra mọi trình duyệt. Auth và giới hạn refresh nằm trong [operations](operations.md#authentication).

@@ -1,37 +1,23 @@
-import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, readdir, readFile, rename, rmdir, unlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, rename, rmdir, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  assertNoLinks,
+  codexTrust,
+  digest,
+  managedDigest,
+  nativeTrustFile,
+} from "../server/profile-integrity.mjs";
+
+export { assertNoLinks, digest, managedDigest, verifyProfile } from "../server/profile-integrity.mjs";
+
 export const roles = ["hq", "supervisor", "lead", "peer", "lens"];
 export const harnesses = ["codex", "claude", "pi"];
 export const projectRoot = fileURLToPath(new URL("../", import.meta.url));
-export const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
-// Native Codex records per-project trust after an approved interaction. Preserve only these
-// native trust tables; every other managed config change still requires reconciliation.
-const codexTrust =
-  /(?:^|\n)[ \t]*\[projects\.(?:"(?:[^"\\\r\n]|\\.)*"|'[^'\r\n]*')\][ \t]*\r?\n[ \t]*trust_level[ \t]*=[ \t]*"(?:trusted|untrusted)"[ \t]*(?:\r?\n|$)/g;
-function nativeTrustFile(profile, path) {
-  return profile.harness === "codex" && path === join(profile.home, "config.toml");
-}
-export function managedDigest(profile, path, bytes) {
-  if (nativeTrustFile(profile, path))
-    return digest(bytes.toString().replace(codexTrust, "\n").trimEnd() + "\n");
-  return digest(bytes);
-}
 /** @typedef {{harness:string,role:string,home:string,osHome:string,executable:string,files:Record<string,string>,skillDirectories:string[],skillEntries:string[]}} Profile */
-export async function assertNoLinks(path) {
-  const full = resolve(path);
-  for (let current = full; current !== dirname(current); current = dirname(current)) {
-    try {
-      if ((await lstat(current)).isSymbolicLink())
-        throw new Error(`Symlink is not an Alliance home: ${current}`);
-    } catch (e) {
-      if (e.code !== "ENOENT") throw e;
-    }
-  }
-}
 export async function atomicWrite(path, value) {
   await assertNoLinks(path);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
@@ -42,22 +28,6 @@ export async function atomicWrite(path, value) {
 export async function loadManifest(home) {
   await assertNoLinks(home);
   return JSON.parse(await readFile(join(home, "profiles.json"), "utf8"));
-}
-export async function verifyProfile(profile) {
-  await assertNoLinks(profile.home);
-  await assertNoLinks(profile.osHome);
-  for (const [path, expected] of Object.entries(profile.files)) {
-    await assertNoLinks(path);
-    if (managedDigest(profile, path, await readFile(path)) !== expected)
-      throw new Error(`Managed profile file changed: ${path}. Reconcile before launch.`);
-  }
-  // A new untracked skill must not silently become part of an existing role.
-  const known = new Set(profile.skillDirectories);
-  for (const item of await readdir(join(profile.home, "skills"), { withFileTypes: true })) {
-    if (item.name === ".system" && profile.harness === "codex") continue;
-    const path = join(profile.home, "skills", item.name);
-    if (item.isSymbolicLink() || !known.has(path)) throw new Error(`Unmanaged skill in role home: ${path}`);
-  }
 }
 /** @param {{home: string, executables: Record<string,string>, isolatedRoot?: string, root?: string}} options */
 export async function prepareProfiles({ home, executables, isolatedRoot = undefined, root = projectRoot }) {

@@ -9,6 +9,7 @@ import type { RpcInput } from "@getpaseo/plugin";
 import type { PluginHookAgent, PluginTurnOutcome } from "@getpaseo/plugin/server";
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
 import type { memberLaunch, RoleName, RoomRecord } from "../shared/contracts";
+import { verifyProfile } from "./profile-integrity.mjs";
 import { RoomStore } from "./store";
 
 interface Profile {
@@ -80,16 +81,7 @@ export class AllianceRuntime {
     if (!identity) throw new Error(`Not an Alliance provider: ${provider}`);
     const profile = this.manifest.profiles[identity.id];
     if (!profile) throw new Error(`Profile ${identity.id} is not prepared`);
-    await noLinks(profile.home);
-    for (const [path, expected] of Object.entries(profile.files)) {
-      await noLinks(path);
-      if (
-        createHash("sha256")
-          .update(await readFile(path))
-          .digest("hex") !== expected
-      )
-        throw new Error(`Managed profile changed: ${path}`);
-    }
+    await verifyProfile(profile);
     return profile;
   }
   profiles() {

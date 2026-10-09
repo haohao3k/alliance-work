@@ -1,6 +1,6 @@
 {
   "name": "alliance-work",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "type": "module",
   "description": "Autonomous rooms and isolated agent homes on native Paseo",

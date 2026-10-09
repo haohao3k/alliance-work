@@ -431,7 +431,8 @@ export function Rooms({ theme, layout, navigation }: PluginSurfaceProps) {
               )}
             </View>
             <Text style={label}>
-              Uses the role’s independent home. Sign in there before the first model run.
+              Uses the role’s independent home. Configure shared Codex auth or sign in to this role before
+              starting.
             </Text>
           </View>
         </>

@@ -8,6 +8,7 @@ import { isNewerRelease, verifyChecksum } from "../scripts/distribution.mjs";
 import { restore, snapshot } from "../scripts/maintenance.mjs";
 import { requireIdleState } from "../scripts/paseo.mjs";
 import { loadManifest, prepareProfiles, projectRoot, verifyProfile } from "../scripts/profiles.mjs";
+import { AllianceRuntime } from "../server/runtime";
 import { temporary } from "./temp";
 
 const executables = { codex: "/usr/bin/false", claude: "/usr/bin/false", pi: "/usr/bin/false" };
@@ -122,6 +123,12 @@ test("native Codex project trust survives profile verification and refresh witho
     (await readFile(path, "utf8")) + '\n[projects."/temporary/demo"]\ntrust_level = "trusted"\n';
   await writeFile(path, nativeConfig);
   await verifyProfile(profile);
+  const runtime = await new AllianceRuntime(f.home).ready();
+  try {
+    await runtime.profile("alliance-codex-peer");
+  } finally {
+    runtime.close();
+  }
   const refreshed = await prepareProfiles({ home: f.home, executables });
   assert.equal(await readFile(path, "utf8"), nativeConfig);
   await verifyProfile(refreshed.profiles["codex-peer"]);

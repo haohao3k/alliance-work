@@ -2,3 +2,4 @@ node_modules/
 .runtime/
 *.log
 .DS_Store
+dist/

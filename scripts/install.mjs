@@ -1,23 +1,15 @@
-import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import { atomicWrite, loadManifest } from "./profiles.mjs";
+import { instanceState, paseo, requireIdle, verifyRuntime } from "./paseo.mjs";
+import { atomicWrite, loadManifest, projectRoot } from "./profiles.mjs";
 
-const root = fileURLToPath(new URL("../", import.meta.url));
-const args = process.argv.slice(2);
-const option = (name) => {
-  const at = args.indexOf(name);
-  return at < 0 ? undefined : args[at + 1];
-};
-try {
-  if (!option("--paseo-home") || !option("--home"))
-    throw new Error(
-      "Usage: install.mjs --home ALLIANCE_HOME --paseo-home PASEO_HOME [--port 6771]. Both homes must be explicit.",
-    );
-  const home = resolve(option("--home"));
-  const paseoHome = resolve(option("--paseo-home"));
+export async function install({ home, paseoHome, port = 6771, root = projectRoot, previousRoot = root }) {
+  home = resolve(home);
+  paseoHome = resolve(paseoHome);
+  if (!Number.isInteger(Number(port)) || Number(port) < 1024 || Number(port) > 65535)
+    throw new Error("Port must be an integer from 1024 to 65535.");
   await loadManifest(home);
   const providers = JSON.parse(await readFile(join(home, "providers.json"), "utf8"));
   const path = join(paseoHome, "config.json");
@@ -27,18 +19,16 @@ try {
     config = JSON.parse(await readFile(path, "utf8"));
     const owner = JSON.parse(
       await readFile(ownerPath, "utf8").catch(() => {
-        throw new Error(
-          "This installer only manages a dedicated Alliance Paseo home. The existing instance was not changed.",
-        );
+        throw new Error("Existing Paseo home has no Alliance ownership marker. It was not changed.");
       }),
     );
-    if (owner.allianceHome !== home) throw new Error("Paseo home belongs to another Alliance installation");
-  } catch (e) {
-    if (e.code !== "ENOENT") throw e;
+    if (owner.allianceHome !== home) throw new Error("Paseo home belongs to another Alliance installation.");
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
     config = {
       version: 1,
       daemon: {
-        listen: `127.0.0.1:${option("--port") ?? "6771"}`,
+        listen: `127.0.0.1:${port}`,
         relay: { enabled: false },
         mcp: { enabled: true, injectIntoAgents: true },
       },
@@ -49,37 +39,41 @@ try {
         ),
       },
     };
-    await atomicWrite(ownerPath, JSON.stringify({ allianceHome: home }) + "\n");
   }
   const installed = config.plugins?.["alliance-work"];
-  if (installed && (installed.source !== "directory" || resolve(installed.path ?? "") !== resolve(root)))
-    throw new Error("Alliance plugin ID is already owned by another source");
-  // This installer never restarts a daemon or rewrites existing listen/relay/UI/auth settings.
+  if (
+    installed &&
+    (installed.source !== "directory" ||
+      ![resolve(root), resolve(previousRoot)].includes(resolve(installed.path ?? "")))
+  )
+    throw new Error("Alliance plugin ID belongs to another source.");
   const existing = config.agents?.providers ?? {};
-  for (const id of Object.keys(providers))
-    if (existing[id] && JSON.stringify(existing[id].command) !== JSON.stringify(providers[id].command))
-      throw new Error(`Provider ID already belongs to another installation: ${id}`);
+  for (const [id, provider] of Object.entries(providers)) {
+    if (!existing[id]) continue;
+    const expectedOld = [...provider.command];
+    expectedOld[1] = join(previousRoot, "scripts/launch.mjs");
+    if (
+      ![JSON.stringify(provider.command), JSON.stringify(expectedOld)].includes(
+        JSON.stringify(existing[id].command),
+      )
+    )
+      throw new Error(`Provider ID belongs to another installation: ${id}`);
+  }
+  const state = await instanceState(paseoHome, root);
+  if (state?.localDaemon === "running") requireIdle(paseoHome, root);
+  else if (state && state.localDaemon !== "stopped")
+    throw new Error("Daemon state unknown; installation refused.");
   config.agents = { ...config.agents, providers: { ...existing, ...providers } };
   config.pluginsEnabled = true;
-  config.daemon = {
-    ...config.daemon,
-    mcp: { ...config.daemon?.mcp, enabled: true, injectIntoAgents: true },
-  };
+  config.daemon = { ...config.daemon, mcp: { ...config.daemon?.mcp, enabled: true, injectIntoAgents: true } };
+  if (installed) config.plugins["alliance-work"] = { ...installed, path: root };
+  await atomicWrite(ownerPath, JSON.stringify({ allianceHome: home, root }) + "\n");
   await atomicWrite(path, JSON.stringify(config, null, 2) + "\n");
-  const cli = join(root, "node_modules/@getpaseo/cli/bin/paseo");
-  const env = { ...process.env, ALLIANCE_WORK_HOME: home };
-  const run = (command) => {
-    const result = spawnSync(process.execPath, [cli, ...command, "--home", paseoHome, "--json"], {
-      env,
-      stdio: "inherit",
-    });
-    if (result.status !== 0) throw new Error(`Paseo ${command.join(" ")} failed`);
-  };
-  run(["daemon", "start"]);
-  run(["daemon", "reload"]);
-  if (installed) run(["plugin", "reload", "alliance-work"]);
-  else run(["plugin", "install", root, "--id", "alliance-work"]);
-  // Native plugin settings survive a daemon restart that does not inherit this installer environment.
+  // Native start is idempotent. Source/config updates use hot reload, never daemon restart.
+  paseo(["daemon", "start"], paseoHome, root);
+  paseo(["daemon", "reload"], paseoHome, root);
+  if (installed) paseo(["plugin", "reload", "alliance-work"], paseoHome, root);
+  else paseo(["plugin", "install", root, "--id", "alliance-work"], paseoHome, root);
   const client = new DaemonClient({
     url: `ws://${config.daemon.listen}/ws`,
     clientId: "alliance-installer",
@@ -100,8 +94,28 @@ try {
   } finally {
     await client.close();
   }
-  console.log(`Alliance Work installed into ${paseoHome}. Profile home: ${home}.`);
-} catch (error) {
-  console.error(error.message);
-  process.exitCode = 1;
+  return verifyRuntime(paseoHome, root);
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const args = process.argv.slice(2);
+  const option = (name) => args[args.indexOf(name) + 1];
+  try {
+    if (!args.includes("--home") || !args.includes("--paseo-home"))
+      throw new Error("Both --home and --paseo-home are required. Prefer alliance-work install.");
+    console.log(
+      JSON.stringify(
+        await install({
+          home: option("--home"),
+          paseoHome: option("--paseo-home"),
+          port: args.includes("--port") ? option("--port") : 6771,
+        }),
+        null,
+        2,
+      ),
+    );
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = 1;
+  }
 }

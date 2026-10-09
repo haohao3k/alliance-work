@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, rename, rmdir, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +8,18 @@ export const roles = ["hq", "supervisor", "lead", "peer", "lens"];
 export const harnesses = ["codex", "claude", "pi"];
 export const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 export const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+// Native Codex records per-project trust after an approved interaction. Preserve only these
+// native trust tables; every other managed config change still requires reconciliation.
+const codexTrust =
+  /(?:^|\n)[ \t]*\[projects\.(?:"(?:[^"\\\r\n]|\\.)*"|'[^'\r\n]*')\][ \t]*\r?\n[ \t]*trust_level[ \t]*=[ \t]*"(?:trusted|untrusted)"[ \t]*(?:\r?\n|$)/g;
+function nativeTrustFile(profile, path) {
+  return profile.harness === "codex" && path === join(profile.home, "config.toml");
+}
+export function managedDigest(profile, path, bytes) {
+  if (nativeTrustFile(profile, path))
+    return digest(bytes.toString().replace(codexTrust, "\n").trimEnd() + "\n");
+  return digest(bytes);
+}
 /** @typedef {{harness:string,role:string,home:string,osHome:string,executable:string,files:Record<string,string>,skillDirectories:string[],skillEntries:string[]}} Profile */
 export async function assertNoLinks(path) {
   const full = resolve(path);
@@ -36,7 +48,7 @@ export async function verifyProfile(profile) {
   await assertNoLinks(profile.osHome);
   for (const [path, expected] of Object.entries(profile.files)) {
     await assertNoLinks(path);
-    if (digest(await readFile(path)) !== expected)
+    if (managedDigest(profile, path, await readFile(path)) !== expected)
       throw new Error(`Managed profile file changed: ${path}. Reconcile before launch.`);
   }
   // A new untracked skill must not silently become part of an existing role.
@@ -47,7 +59,8 @@ export async function verifyProfile(profile) {
     if (item.isSymbolicLink() || !known.has(path)) throw new Error(`Unmanaged skill in role home: ${path}`);
   }
 }
-export async function prepareProfiles({ home, executables, isolatedRoot, root = projectRoot }) {
+/** @param {{home: string, executables: Record<string,string>, isolatedRoot?: string, root?: string}} options */
+export async function prepareProfiles({ home, executables, isolatedRoot = undefined, root = projectRoot }) {
   home = resolve(home);
   if (!isAbsolute(home)) throw new Error("Alliance home must be absolute");
   await assertNoLinks(home);
@@ -55,6 +68,9 @@ export async function prepareProfiles({ home, executables, isolatedRoot, root = 
     if (e.code === "ENOENT") return null;
     throw e;
   });
+  isolatedRoot ??= prior?.isolatedRoot;
+  const writes = new Map();
+  const removals = [];
   const provenance = JSON.parse(await readFile(join(root, "vendor/seatwork/provenance.json"), "utf8"));
   const ownership = await readFile(join(root, "room/policies/agent-ownership.md"), "utf8");
   const operating = await readFile(join(root, "room/policies/operating-contract.md"), "utf8");
@@ -83,16 +99,29 @@ export async function prepareProfiles({ home, executables, isolatedRoot, root = 
         skillEntries: [],
       };
       await assertNoLinks(roleHome);
-      await mkdir(profile.osHome, { recursive: true, mode: 0o700 });
+
       const manage = async (path, bytes) => {
         const old = await readFile(path).catch((e) => {
           if (e.code === "ENOENT") return null;
           throw e;
         });
-        if (old && digest(old) !== digest(bytes) && digest(old) !== prior?.profiles[id]?.files[path])
+        if (
+          old &&
+          managedDigest(profile, path, old) !== managedDigest(profile, path, bytes) &&
+          managedDigest(profile, path, old) !== prior?.profiles[id]?.files[path]
+        )
           throw new Error(`Refusing to overwrite unowned file: ${path}`);
-        await atomicWrite(path, bytes);
-        profile.files[path] = digest(bytes);
+        await assertNoLinks(path);
+        if (old && nativeTrustFile(profile, path)) {
+          bytes =
+            managedDigest(profile, path, old) === managedDigest(profile, path, bytes)
+              ? old
+              : Buffer.from(
+                  bytes.toString().trimEnd() + "\n" + (old.toString().match(codexTrust) ?? []).join("\n"),
+                );
+        }
+        writes.set(path, bytes);
+        profile.files[path] = managedDigest(profile, path, bytes);
       };
       const selected = provenance.files.filter((file) =>
         role === "lens"
@@ -145,7 +174,36 @@ export async function prepareProfiles({ home, executables, isolatedRoot, root = 
       profiles[id] = profile;
     }
   }
-  const manifest = { version: 1, root, home, profiles };
+  // Validate the whole update before touching any managed file.
+  for (const old of Object.values(prior?.profiles ?? {})) {
+    for (const [path, hash] of Object.entries(old.files)) {
+      if (Object.values(profiles).some((profile) => path in profile.files)) continue;
+      await assertNoLinks(path);
+      const bytes = await readFile(path).catch((error) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      if (bytes && managedDigest(old, path, bytes) !== hash)
+        throw new Error(`Refusing to remove modified managed file: ${path}`);
+      if (bytes) removals.push(path);
+    }
+  }
+  for (const profile of Object.values(profiles))
+    await mkdir(profile.osHome, { recursive: true, mode: 0o700 });
+  for (const [path, bytes] of writes) await atomicWrite(path, bytes);
+  for (const path of removals) {
+    await unlink(path);
+    let parent = dirname(path);
+    while (parent !== dirname(parent)) {
+      try {
+        await rmdir(parent);
+      } catch {
+        break;
+      }
+      parent = dirname(parent);
+    }
+  }
+  const manifest = { version: 1, root, home, isolatedRoot, profiles };
   await atomicWrite(join(home, "profiles.json"), JSON.stringify(manifest, null, 2) + "\n");
   const providers = Object.fromEntries(
     Object.entries(profiles).map(([id, profile]) => [

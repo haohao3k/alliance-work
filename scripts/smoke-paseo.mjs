@@ -1,6 +1,8 @@
 // Run against an explicitly selected isolated daemon. No prompts or model turns.
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, realpath } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createPaseoApi } from "@getpaseo/client";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -15,7 +17,7 @@ try {
   await client.connect();
   const profiles = await client.invokePluginRpc("alliance-work", "profiles.status", {});
   receipt.profiles = profiles.profiles.length;
-  const cwd = await mkdtemp("/private/tmp/alliance-paseo-smoke-");
+  const cwd = await mkdtemp(join(await realpath(tmpdir()), "alliance-paseo-smoke-"));
   const room = await client.invokePluginRpc("alliance-work", "rooms.create", {
     title: "Native lifecycle smoke",
     cwd,

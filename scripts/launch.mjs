@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { authSource, authStatus, bridgeCodexAuth } from "./auth.mjs";
 import { discoverCodex } from "./codex-discovery.mjs";
 import { loadManifest, verifyProfile } from "./profiles.mjs";
 
@@ -56,6 +58,7 @@ function toml(value) {
   if (Array.isArray(value)) return `[${value.map(toml).join(",")}]`;
   if (value && typeof value === "object")
     return `{${Object.entries(value)
+      .filter(([, item]) => item !== null && item !== undefined)
       .map(([key, item]) => `${JSON.stringify(key)}=${toml(item)}`)
       .join(",")}}`;
   return JSON.stringify(value);
@@ -73,6 +76,7 @@ export async function launchPlan(home, id, args, ambient = process.env, cwd = pr
       throw e;
     });
   const env = profileEnvironment(profile, home, ambient, credentials);
+  const source = profile.harness === "codex" ? await authSource(home) : undefined;
   // Account/setup/help commands still use the isolated home, but need no session flags.
   const metadataCommand = args.some((arg) => ["--version", "--help", "-h"].includes(arg));
   const accountCommand = ["login", "logout", "auth", "setup-token"].includes(args[0]);
@@ -81,7 +85,7 @@ export async function launchPlan(home, id, args, ambient = process.env, cwd = pr
       "Alliance plugin did not bind this session to a room. Enable the plugin before launching.",
     );
   if ((metadataCommand && profile.harness !== "pi") || accountCommand)
-    return { executable: profile.executable, args, env };
+    return { executable: profile.executable, args, env, authSource: source };
   if (profile.harness === "claude") {
     args = replaceFlag(args, "--setting-sources", "user");
     args = replaceFlag(args, "--settings", join(profile.home, "settings.json"));
@@ -114,12 +118,13 @@ export async function launchPlan(home, id, args, ambient = process.env, cwd = pr
     args = replaceFlag(args, "--session-dir", join(profile.home, "sessions"));
   } else {
     const configArgs = [];
+    if (source) configArgs.push("-c", 'cli_auth_credentials_store="ephemeral"');
     for (let i = 0; i < args.length; i++) {
       if (args[i] === "-c" || args[i] === "--config") configArgs.push("-c", args[++i]);
       else if (args[i].startsWith("--config=")) configArgs.push("-c", args[i].slice(9));
     }
     // Skip project-native config, preserving repository task instructions and native capabilities.
-    const trust = `projects.${JSON.stringify(resolve(cwd))}.trust_level="untrusted"`;
+    const trust = `projects=${toml({ [resolve(cwd)]: { trust_level: "untrusted" } })}`;
     configArgs.push("-c", trust);
     const discovered = await discoverCodex(profile.executable, env, cwd, configArgs);
     const selected = new Set(profile.skillDirectories.map((path) => resolve(path)));
@@ -127,18 +132,47 @@ export async function launchPlan(home, id, args, ambient = process.env, cwd = pr
       .filter((skill) => !selected.has(resolve(dirname(skill.path))))
       .map((skill) => ({ path: skill.path, enabled: false }));
     args = ["--no-daemon", ...args, "-c", trust, "-c", `skills.config=${toml(skillConfig)}`];
-    for (const name of Object.keys(discovered.config.mcp_servers ?? {}))
-      if (name !== "paseo") args.push("-c", `mcp_servers.${JSON.stringify(name)}.enabled=false`);
+    if (source) args.push("-c", 'cli_auth_credentials_store="ephemeral"');
+    const servers = Object.fromEntries(
+      Object.entries(discovered.config.mcp_servers ?? {}).map(([name, configuration]) => [
+        name,
+        name === "paseo" ? configuration : { ...configuration, enabled: false },
+      ]),
+    );
+    // Override complete TOML tables: Codex CLI dotted keys do not unquote path/server names.
+    args.push("-c", `mcp_servers=${toml(servers)}`);
   }
-  return { executable: profile.executable, args, env };
+  return { executable: profile.executable, args, env, authSource: source };
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === resolve(new URL(import.meta.url).pathname)) {
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     const [home, id, ...args] = process.argv.slice(2);
     if (!home || !id) throw new Error("Usage: launch.mjs ALLIANCE_HOME HARNESS-ROLE [native arguments]");
     const plan = await launchPlan(home, id, args);
-    const child = spawn(plan.executable, plan.args, { env: plan.env, stdio: "inherit" });
+    if (plan.authSource && ["login", "logout"].includes(args[0])) {
+      if (args[0] === "login" && args[1] === "status") {
+        const status = await authStatus(home);
+        console.log(JSON.stringify(status, null, 2));
+        process.exit(status.ready ? 0 : 1);
+      }
+      throw new Error(
+        "Shared Codex auth is enabled. Manage login in the original profile; alliance-work auth codex --separate restores role logins.",
+      );
+    }
+    const shared =
+      plan.authSource &&
+      args.includes("app-server") &&
+      !args.some((arg) => ["--version", "--help", "-h"].includes(arg));
+    if (plan.authSource && !shared && !args.some((arg) => ["--version", "--help", "-h"].includes(arg)))
+      throw new Error(
+        "Shared Codex auth supports native Paseo app-server sessions. Use a separate role login for standalone interactive Codex.",
+      );
+    const child = spawn(plan.executable, plan.args, {
+      env: plan.env,
+      stdio: shared ? ["pipe", "pipe", "inherit"] : "inherit",
+    });
+    if (shared) bridgeCodexAuth({ child, source: plan.authSource });
     for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => child.kill(signal));
     child.on("error", (error) => {
       console.error(`Alliance launch failed: ${error.message}`);

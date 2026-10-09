@@ -1,16 +1,17 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { discoverCodex } from "../scripts/codex-discovery.mjs";
 import { launchPlan } from "../scripts/launch.mjs";
 import { prepareProfiles } from "../scripts/profiles.mjs";
+import { temporary } from "./temp";
 
 const enabled = process.env.ALLIANCE_NATIVE_TESTS === "1";
 async function fixture() {
-  const root = await mkdtemp("/private/tmp/alliance-native-check-"),
+  const root = await temporary("alliance-native-check-"),
     home = join(root, "home"),
     cwd = join(root, "repo");
   await mkdir(cwd);
@@ -89,7 +90,19 @@ test("native Codex only enables the selected Seatwork skills despite project and
     join(f.cwd, ".codex/config.toml"),
     'model_reasoning_effort = "low"\n[mcp_servers.project_sentinel]\ncommand="/usr/bin/false"\n',
   );
-  const p = await launchPlan(f.home, "codex-peer", ["app-server"], { PATH: process.env.PATH }, f.cwd);
+  const manifest = JSON.parse(await readFile(join(f.home, "profiles.json"), "utf8"));
+  const config = join(manifest.profiles["codex-peer"].home, "config.toml");
+  await writeFile(
+    config,
+    (await readFile(config, "utf8")) + `\n[projects.${JSON.stringify(f.cwd)}]\ntrust_level = "trusted"\n`,
+  );
+  const p = await launchPlan(
+    f.home,
+    "codex-peer",
+    ["app-server", "-c", 'mcp_servers={"explicit.sentinel"={command="/usr/bin/false"}}'],
+    { PATH: process.env.PATH },
+    f.cwd,
+  );
   const flags: string[] = [];
   for (let i = 0; i < p.args.length; i++) if (p.args[i] === "-c") flags.push("-c", p.args[++i]);
   const discovered = await discoverCodex(p.executable, p.env, f.cwd, flags);
@@ -101,6 +114,7 @@ test("native Codex only enables the selected Seatwork skills despite project and
     expected,
   );
   assert.notEqual(discovered.config.model_reasoning_effort, "low");
+  assert.equal(discovered.config.mcp_servers?.["explicit.sentinel"]?.enabled, false);
   assert(
     !discovered.config.mcp_servers?.project_sentinel ||
       discovered.config.mcp_servers.project_sentinel.enabled === false,

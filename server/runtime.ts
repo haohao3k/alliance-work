@@ -147,7 +147,7 @@ export class AllianceRuntime {
   async instruction(provider: string, cwd: string) {
     const profile = await this.profile(provider);
     const room = await this.roomFor(cwd);
-    return `${await readFile(join(profile.home, "root-instructions.md"), "utf8")}\n\n# Current Alliance room\nRoom: ${room.id}\nTitle: ${room.title}\nMission: ${room.mission}\nProject: ${room.cwd}\nDurable assignments and candidates: ${room.artifacts}\nYour exact Seatwork skill files: ${join(profile.home, "skills")}\nAll delegation uses native Paseo create_agent and providers alliance-{codex|claude|pi}-{hq|supervisor|lead|peer|lens}. Keep the existing model unless a different one fits the work better. Consult list_providers for valid model IDs.\n`;
+    return `${await readFile(join(profile.home, "root-instructions.md"), "utf8")}\n\n# Current Alliance room\nRoom: ${room.id}\nTitle: ${room.title}\nMission: ${room.mission}\nProject: ${room.cwd}\nDurable assignments and candidates: ${room.artifacts}\nYour exact Seatwork skill files: ${join(profile.home, "skills")}\nAll delegation uses native Paseo create_agent. Its provider value is alias/model, for example alliance-codex-peer/gpt-6.1-sol. Cross-role aliases are distinct providers: pass settings.modeId explicitly from the target provider catalog, within the assignment permission limits. Keep the existing model unless a different one fits the work better. Consult list_providers for valid modes and model IDs.\n`;
   }
   async bind(agent: PluginHookAgent) {
     const identity = allianceProvider(agent.provider);
@@ -208,7 +208,8 @@ export class AllianceRuntime {
       config: {
         provider: `${provider}/${input.model}`,
         thinkingOptionId: input.thinking,
-        modeId: input.mode,
+        // Paseo leaves an omitted mode to the fresh harness, whose default may be read-only.
+        modeId: input.mode ?? (input.harness === "codex" ? "auto" : undefined),
       },
       prompt: `${input.prompt}\n\nDurable assignment: ${assignment}. Keep results in ${room.artifacts}/candidates before handing back.`,
     });

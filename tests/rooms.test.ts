@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { PaseoApi } from "@getpaseo/client";
@@ -7,6 +7,7 @@ import { profileEnvironment } from "../scripts/launch.mjs";
 import { prepareProfiles, verifyProfile } from "../scripts/profiles.mjs";
 import { composeInstruction } from "../server/instructions";
 import { AllianceRuntime } from "../server/runtime";
+import { temporary } from "./temp";
 
 function member(runtime: AllianceRuntime, id: string) {
   const record = runtime.store.member(id);
@@ -15,7 +16,7 @@ function member(runtime: AllianceRuntime, id: string) {
 }
 
 async function fixture() {
-  const root = await mkdtemp("/private/tmp/alliance-test-");
+  const root = await temporary("alliance-test-");
   const home = join(root, "home");
   const cwd = join(root, "repo");
   await mkdir(cwd);
@@ -29,10 +30,12 @@ async function fixture() {
     sends = 0,
     status = "idle";
   const identities = new Set<string>();
+  const launchConfigs: { modeId?: string }[] = [];
   const workspace = {
     id: "workspace-1",
     agents: {
-      create: async (input: { agentId: string }) => {
+      create: async (input: { agentId: string; config: { modeId?: string } }) => {
+        launchConfigs.push(input.config);
         if (!identities.has(input.agentId)) {
           creates++;
           identities.add(input.agentId);
@@ -65,6 +68,7 @@ async function fixture() {
     paseo,
     room,
     count: () => ({ creates, sends }),
+    launchConfigs,
     status: (next: string) => {
       status = next;
     },
@@ -124,11 +128,36 @@ test("a retried launch keeps one native agent and the durable assignment", async
     const second = await f.runtime.launch(input, f.paseo);
     assert.equal(first.agentId, second.agentId);
     assert.equal(f.count().creates, 1);
+    assert.equal(
+      f.launchConfigs[0].modeId,
+      "auto",
+      "Fresh Codex homes need an explicit workspace-write mode",
+    );
     assert.match(await readFile(member(f.runtime, first.agentId).assignment, "utf8"), /Produce an artifact/);
     await assert.rejects(
       f.runtime.launch({ ...input, prompt: "Different work" }, f.paseo),
       /different assignment/,
     );
+  } finally {
+    f.runtime.close();
+  }
+});
+test("an explicit Codex permission mode survives Alliance launch", async () => {
+  const f = await fixture();
+  try {
+    await f.runtime.launch(
+      {
+        roomId: f.room.id,
+        key: "explicit-mode",
+        role: "peer",
+        harness: "codex",
+        model: "test-model",
+        prompt: "Inspect only",
+        mode: "read-only",
+      },
+      f.paseo,
+    );
+    assert.equal(f.launchConfigs[0].modeId, "read-only");
   } finally {
     f.runtime.close();
   }

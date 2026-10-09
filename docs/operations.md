@@ -146,4 +146,11 @@ runs the portable suite and publishes those assets to this private repository. N
 and real model acceptance checks remain local; CI does not claim to have run them.
 
 Push a matching `vMAJOR.MINOR.PATCH` tag when the release is ready. Existing tags are immutable.
+If the tag event did not start a run, dispatch the same tagged source explicitly:
+
+```sh
+gh workflow run release.yml --repo haohao3k/alliance-work --ref codex/bootstrap -f tag=v0.1.1
+```
+
+The manual workflow also checks out and validates the requested tag before packaging.
 The release archive contains no home directories, runtime credentials or generated room state.

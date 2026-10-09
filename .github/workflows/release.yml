@@ -2,13 +2,25 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing immutable release tag, for example v0.1.1'
+        required: true
+        type: string
 permissions:
   contents: write
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     steps:
+      - name: Validate release tag
+        run: echo "$RELEASE_TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -16,9 +28,9 @@ jobs:
       - run: npm ci
       - run: npm run check && npm run lint
       - name: Match tag to package
-        run: test "$GITHUB_REF_NAME" = "v$(node -p "require('./package.json').version")"
+        run: test "$RELEASE_TAG" = "v$(node -p "require('./package.json').version")"
       - run: npm run release:pack
       - name: Publish private repository assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "Alliance Work $GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$RELEASE_TAG" dist/* --verify-tag --title "Alliance Work $RELEASE_TAG" --generate-notes

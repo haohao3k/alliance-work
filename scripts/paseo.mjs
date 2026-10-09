@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { projectRoot } from "./profiles.mjs";
 
 export function paseo(command, home, root = projectRoot) {
@@ -55,6 +56,28 @@ export async function instanceState(home, root = projectRoot) {
     throw error;
   }
   return paseo(["daemon", "status"], home, root);
+}
+
+// Paseo's daemon reload deliberately retains in-memory plugin sources. Register the
+// selected source through its native config API before reloading that plugin.
+export async function reloadRegisteredPlugin(home, root = projectRoot) {
+  const config = JSON.parse(await readFile(join(home, "config.json"), "utf8"));
+  const source = config.plugins?.["alliance-work"];
+  if (source?.source !== "directory" || resolve(source.path ?? "") !== resolve(root))
+    throw new Error("Persisted Alliance source does not match the selected installation.");
+  const client = new DaemonClient({
+    url: `ws://${config.daemon.listen}/ws`,
+    clientId: "alliance-source-activation",
+    password: process.env.ALLIANCE_PASEO_PASSWORD,
+    connectTimeoutMs: 10000,
+  });
+  try {
+    await client.connect();
+    await client.patchDaemonConfig({ plugins: config.plugins });
+  } finally {
+    await client.close();
+  }
+  paseo(["plugin", "reload", "alliance-work"], home, root);
 }
 
 export async function verifyRuntime(home, root = projectRoot) {

@@ -137,12 +137,13 @@ Bump `package.json` and the lockfile together. Check the candidate and commit it
 npm run check
 npm run lint
 npm run test:native
+npm run test:maintenance
 npm run release:pack
 ```
 
 Packaging uses `git archive HEAD` and refuses a dirty checkout. It creates the versioned archive,
 `checksums.txt` and `install.sh` in ignored `dist/`. The tag workflow checks package/tag agreement,
-runs the portable suite and publishes those assets to this private repository. Native harness
+runs the portable suite and publishes those assets to this private repository. Native harness, disposable Paseo maintenance
 and real model acceptance checks remain local; CI does not claim to have run them.
 
 Push a matching `vMAJOR.MINOR.PATCH` tag when the release is ready. Existing tags are immutable.

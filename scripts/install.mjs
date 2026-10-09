@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import { instanceState, paseo, requireIdle, verifyRuntime } from "./paseo.mjs";
+import { instanceState, paseo, reloadRegisteredPlugin, requireIdle, verifyRuntime } from "./paseo.mjs";
 import { atomicWrite, loadManifest, projectRoot } from "./profiles.mjs";
 
 export async function install({ home, paseoHome, port = 6771, root = projectRoot, previousRoot = root }) {
@@ -72,7 +72,7 @@ export async function install({ home, paseoHome, port = 6771, root = projectRoot
   // Native start is idempotent. Source/config updates use hot reload, never daemon restart.
   paseo(["daemon", "start"], paseoHome, root);
   paseo(["daemon", "reload"], paseoHome, root);
-  if (installed) paseo(["plugin", "reload", "alliance-work"], paseoHome, root);
+  if (installed) await reloadRegisteredPlugin(paseoHome, root);
   else paseo(["plugin", "install", root, "--id", "alliance-work"], paseoHome, root);
   const client = new DaemonClient({
     url: `ws://${config.daemon.listen}/ws`,

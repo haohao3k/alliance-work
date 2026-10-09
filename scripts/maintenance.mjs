@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { authStatus, setAuthSource } from "./auth.mjs";
 import { run } from "./distribution.mjs";
 import { install } from "./install.mjs";
-import { instanceState, paseo, requireIdle, verifyRuntime } from "./paseo.mjs";
+import { instanceState, paseo, reloadRegisteredPlugin, requireIdle, verifyRuntime } from "./paseo.mjs";
 import {
   assertNoLinks,
   atomicWrite,
@@ -220,7 +220,7 @@ export async function activate({
     if (state?.localDaemon === "running") {
       try {
         paseo(["daemon", "reload"], paseoHome, previousRoot);
-        paseo(["plugin", "reload", "alliance-work"], paseoHome, previousRoot);
+        await reloadRegisteredPlugin(paseoHome, previousRoot);
         await verifyRuntime(paseoHome, previousRoot);
       } catch {
         recovery =

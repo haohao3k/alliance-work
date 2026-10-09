@@ -14,7 +14,8 @@ Vendored Seatwork playbooks stay byte-for-byte pinned; place local interpretatio
 operating contract and verify provenance with `npm run verify:vendor`.
 
 Run `npm run check` and `npm run lint` for code changes. Run `npm run test:native` when changing
-harness launch/discovery or generated profile formats. Tests cover user-visible invariants and
+harness launch/discovery or generated profile formats. Run `npm run test:maintenance` for
+installer/update/recovery changes; it starts and stops only disposable native Paseo instances. Tests cover user-visible invariants and
 real failure risks; do not add wording or implementation-mirroring tests. Reproduce a regression
 against the prior behavior, and report added/removed test lines with the result.
 

@@ -114,10 +114,12 @@ npm ci
 npm run check
 npm run lint
 npm run test:native
+npm run test:maintenance
 ```
 
 Default tests do not call models. Native tests inspect actual Codex/Claude/Pi discovery and
-require their binaries. A model delegation/handback exercise needs usable participating
+require their binaries. Maintenance tests exercise source switching and failed-candidate recovery
+on a disposable native Paseo instance. A model delegation/handback exercise needs usable participating
 credentials and is a separate acceptance check.
 
 `vendor/seatwork/provenance.json` pins 18 selected skills / 22 files to commit

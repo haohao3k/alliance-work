@@ -7,6 +7,7 @@ import { authStatus, setAuthSource } from "./auth.mjs";
 import { run } from "./distribution.mjs";
 import { install } from "./install.mjs";
 import { instanceState, paseo, reloadRegisteredPlugin, requireIdle, verifyRuntime } from "./paseo.mjs";
+import { bundledPi } from "./pi-runtime.mjs";
 import {
   assertNoLinks,
   atomicWrite,
@@ -176,8 +177,15 @@ export async function activate({
     throw new Error(
       `Running Paseo ${state.daemonVersion} does not match this release's ${pkg.devDependencies["@getpaseo/cli"]}. Update the dedicated runtime explicitly before proceeding.`,
     );
+  const pi = await bundledPi(root);
   const executables = Object.fromEntries(
-    await Promise.all(["codex", "claude", "pi"].map(async (name) => [name, await findExecutable(name)])),
+    await Promise.all(
+      ["codex", "claude", "pi"].map(async (name) => {
+        const executable = name === "pi" && pi ? pi.executable : await findExecutable(name);
+        await access(executable, constants.X_OK);
+        return [name, executable];
+      }),
+    ),
   );
   run("npm", ["run", "typecheck"], { cwd: root, stdio: "inherit" });
   const saved = await snapshot(home, paseoHome, binPath);

@@ -6,7 +6,8 @@ import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { discoverCodex } from "../scripts/codex-discovery.mjs";
 import { launchPlan } from "../scripts/launch.mjs";
-import { prepareProfiles } from "../scripts/profiles.mjs";
+import { bundledPi } from "../scripts/pi-runtime.mjs";
+import { prepareProfiles, projectRoot } from "../scripts/profiles.mjs";
 import { temporary } from "./temp";
 
 const enabled = process.env.ALLIANCE_NATIVE_TESTS === "1";
@@ -21,6 +22,9 @@ async function fixture() {
       spawnSync("/usr/bin/which", [name], { encoding: "utf8" }).stdout.trim(),
     ]),
   );
+  const pi = await bundledPi(projectRoot);
+  assert(pi);
+  executables.pi = pi.executable;
   await prepareProfiles({ home, isolatedRoot: join(root, "profiles"), executables });
   return { root, home, cwd };
 }
@@ -99,13 +103,23 @@ test("native Codex only enables the selected Seatwork skills despite project and
   const p = await launchPlan(
     f.home,
     "codex-peer",
-    ["app-server", "-c", 'mcp_servers={"explicit.sentinel"={command="/usr/bin/false"}}'],
-    { PATH: process.env.PATH },
-    f.cwd,
+    [
+      "app-server",
+      "-c",
+      'mcp_servers={"explicit.sentinel"={command="/usr/bin/false"}}',
+      "-c",
+      "features.apps=true",
+      "-c",
+      "features.plugins=true",
+      "-c",
+      "features.remote_plugin=true",
+    ],
+    { PATH: process.env.PATH, ALLIANCE_WORKSPACE_CWD: f.cwd },
   );
   const flags: string[] = [];
   for (let i = 0; i < p.args.length; i++) if (p.args[i] === "-c") flags.push("-c", p.args[++i]);
-  const discovered = await discoverCodex(p.executable, p.env, f.cwd, flags);
+  assert.equal(p.cwd, f.cwd);
+  const discovered = await discoverCodex(p.executable, p.env, p.cwd, flags);
   assert.deepEqual(
     discovered.skills
       .filter((s: { enabled: boolean }) => s.enabled)
@@ -113,6 +127,8 @@ test("native Codex only enables the selected Seatwork skills despite project and
       .sort(),
     expected,
   );
+  for (const name of ["apps", "plugins", "remote_plugin", "tool_suggest"])
+    assert.equal(discovered.config.features[name], false);
   assert.notEqual(discovered.config.model_reasoning_effort, "low");
   assert.equal(discovered.config.mcp_servers?.["explicit.sentinel"]?.enabled, false);
   assert(
@@ -159,6 +175,23 @@ test("native Pi retains builtin MCP and only discovers explicit Seatwork skills"
     { PATH: process.env.PATH },
     f.cwd,
   );
+  const metadata = join(f.root, "pi-metadata.json");
+  const probe = join(f.root, "probe.mjs");
+  await writeFile(
+    probe,
+    `import {writeFileSync} from "node:fs";
+export default (pi) => pi.on("session_start", (_event, ctx) => {
+  writeFileSync(${JSON.stringify(metadata)}, JSON.stringify({
+    tools: pi.getAllTools().map(t => t.name), systemPrompt: ctx.getSystemPrompt(),
+    env: { home: process.env.HOME, role: process.env.PI_CODING_AGENT_DIR,
+      cursorSystemCredentials: process.env.PI_CURSOR_SYSTEM_CREDENTIALS,
+      antigravityExtraToolsDisabled: process.env.ANTIGRAVITY_NO_EXTRA_TOOLS }
+  }));
+});`,
+  );
+  await writeFile(join(f.cwd, ".pi/APPEND_SYSTEM.md"), "FOREIGN_PROJECT_INSTRUCTION_SENTINEL");
+  await writeFile(join(f.root, "AGENTS.md"), "FOREIGN_ANCESTOR_INSTRUCTION_SENTINEL");
+  p.args.push("-e", probe, "--append-system-prompt", "ALLIANCE_NATIVE_ROLE_SENTINEL");
   p.env.PI_OFFLINE = "1";
   const response = await nativeResponse<PiResponse>(p.executable, p.args, p.env, f.cwd, {
     id: "probe",
@@ -172,5 +205,17 @@ test("native Pi retains builtin MCP and only discovers explicit Seatwork skills"
       .sort(),
     expected,
   );
-  assert(response.data.commands.some((c: NativeCommand) => c.name === "mcp" && c.source === "extension"));
+  const extensions = response.data.commands.filter((c) => c.source === "extension").map((c) => c.name);
+  for (const command of ["mcp", "devin-status", "antigravity.doctor", "cursor.doctor"])
+    assert(extensions.includes(command), `Missing approved provider command: ${command}`);
+  const actual = JSON.parse(await readFile(metadata, "utf8"));
+  assert.equal(actual.env.home, p.env.HOME);
+  assert.equal(actual.env.role, p.env.PI_CODING_AGENT_DIR);
+  assert.equal(actual.env.cursorSystemCredentials, "0");
+  assert.equal(actual.env.antigravityExtraToolsDisabled, "1");
+  for (const tool of ["read", "bash", "edit", "write", "codemode", "tool_search"])
+    assert(actual.tools.includes(tool), `Native capability missing: ${tool}`);
+  assert(!actual.tools.some((name: string) => ["google_search", "generate_image"].includes(name)));
+  assert(actual.systemPrompt.includes("ALLIANCE_NATIVE_ROLE_SENTINEL"));
+  assert(!actual.systemPrompt.includes("FOREIGN_"));
 });

@@ -8,8 +8,8 @@ reasoning and tools. Start with one Supervisor and let the work determine the te
 
 ## Install
 
-Requires macOS or Linux, Node 24+, npm, Codex 0.160.0+, Claude Code 2.1.289+ and Pi 1.0.0+.
-Paseo **0.10.3** is pinned and installed locally with the package. The repository is private;
+Requires macOS or Linux, Node 24+, npm, Codex 0.160.0+ and Claude Code 2.1.289+.
+Paseo **0.10.3** and Pi **1.0.0** are pinned and installed locally with the package. The repository is private;
 GitHub downloads require `gh auth login` with access to `haohao3k/alliance-work`.
 
 From this checkout:
@@ -87,9 +87,11 @@ Private HOME/XDG directories prevent automatic discovery of the daily `~/.agents
 other user configuration. This also separates implicit Git/SSH configuration; configure needed
 access explicitly. Home isolation is a loading boundary, not an OS filesystem sandbox.
 
-Codex disables discovered skills outside the selected role and non-Paseo MCPs. Claude uses
+Codex discovers skills against the bound room directory, disables skills outside the selected
+role and blocks account-synced plugins/apps as well as non-Paseo MCPs. Claude uses
 only role settings, strict MCP configuration and disables cloud/bundled skills and plugins.
-Pi receives explicit Seatwork skills and its native Paseo-required extensions. Repository task
+Pi receives explicit Seatwork skills, native Paseo-required extensions and the approved
+[provider packages](docs/operations.md#pi-runtime-and-provider-packages). Repository task
 instructions remain relevant; machine-managed policy is not bypassed.
 
 ## Rooms, delegation and acceptance
@@ -118,7 +120,7 @@ npm run test:maintenance
 ```
 
 Default tests do not call models. Native tests inspect actual Codex/Claude/Pi discovery and
-require their binaries. Maintenance tests exercise source switching and failed-candidate recovery
+require the Codex/Claude binaries and bundled Pi. Maintenance tests exercise source switching and failed-candidate recovery
 on a disposable native Paseo instance. A model delegation/handback exercise needs usable participating
 credentials and is a separate acceptance check.
 

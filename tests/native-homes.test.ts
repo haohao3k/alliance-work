@@ -14,7 +14,16 @@ async function fixture() {
   const root = await temporary("alliance-native-check-"),
     home = join(root, "home"),
     cwd = join(root, "repo");
-  await mkdir(cwd);
+  await mkdir(join(cwd, ".agents/skills/project-check"), { recursive: true });
+  await writeFile(
+    join(cwd, ".agents/skills/project-check/SKILL.md"),
+    "---\nname: project-check\ndescription: Check selected project behavior.\n---\nInspect this project.\n",
+  );
+  await mkdir(join(cwd, ".alliance"));
+  await writeFile(
+    join(cwd, ".alliance/skills.json"),
+    JSON.stringify({ version: 1, skills: [".agents/skills/project-check"] }),
+  );
   const executables = Object.fromEntries(
     ["codex", "claude", "pi"].map((name) => [
       name,
@@ -70,6 +79,8 @@ async function nativeResponse<T>(
   }
 }
 const expected = [
+  "alliance-verify",
+  "project-check",
   "slp-candidate-handoff",
   "slp-challenge-premise",
   "slp-evidence-report",
@@ -140,7 +151,11 @@ test("native Claude loads role skills, excluding project customization", { skip:
     request: { subtype: "initialize" },
   });
   const names = response.response.response.commands.map((c: { name: string }) => c.name);
-  for (const name of expected) assert(names.includes(name));
+  for (const name of expected)
+    assert(
+      names.some((item) => item === name || item === `alliance-project:${name}`),
+      `Missing ${name}: ${names.join(", ")}`,
+    );
   assert(!names.includes("project-sentinel"));
 });
 test("native Pi retains builtin MCP and only discovers explicit Seatwork skills", {

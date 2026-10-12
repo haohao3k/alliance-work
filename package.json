@@ -1,6 +1,6 @@
 {
   "name": "alliance-work",
-  "version": "0.1.3",
+  "version": "0.1.5",
   "private": true,
   "type": "module",
   "description": "Autonomous rooms and isolated agent homes on native Paseo",
@@ -21,9 +21,9 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.0",
-    "@getpaseo/cli": "0.10.3",
-    "@getpaseo/client": "0.10.3",
-    "@getpaseo/plugin": "0.10.3",
+    "@getpaseo/cli": "0.11.2",
+    "@getpaseo/client": "0.11.2",
+    "@getpaseo/plugin": "0.11.2",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@tanstack/react-query": "^5.90.2",
     "@types/node": "^24.0.0",
@@ -32,6 +32,7 @@
     "react-native": "0.81.5",
     "tsx": "^4.20.0",
     "typescript": "^5.9.3",
+    "yaml": "2.9.1",
     "zod": "^4.4.3"
   },
   "bin": {

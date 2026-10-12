@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rmdir, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rmdir, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,6 +32,7 @@ export async function loadManifest(home) {
 /** @param {{home: string, executables: Record<string,string>, isolatedRoot?: string, root?: string}} options */
 export async function prepareProfiles({ home, executables, isolatedRoot = undefined, root = projectRoot }) {
   home = resolve(home);
+  root = resolve(root);
   if (!isAbsolute(home)) throw new Error("Alliance home must be absolute");
   await assertNoLinks(home);
   const prior = await loadManifest(home).catch((e) => {
@@ -44,6 +45,18 @@ export async function prepareProfiles({ home, executables, isolatedRoot = undefi
   const provenance = JSON.parse(await readFile(join(root, "vendor/seatwork/provenance.json"), "utf8"));
   const ownership = await readFile(join(root, "room/policies/agent-ownership.md"), "utf8");
   const operating = await readFile(join(root, "room/policies/operating-contract.md"), "utf8");
+  const modelSelection = await readFile(join(root, "room/policies/model-selection.md"), "utf8");
+  const mapping = await readFile(join(root, "room/policies/seatwork-mapping.md"), "utf8");
+  const localSkills = [];
+  const collect = async (directory) => {
+    for (const name of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, name.name);
+      if (name.isDirectory()) await collect(path);
+      else if (name.isFile()) localSkills.push(path);
+      else throw new Error(`Unsupported bundled skill: ${path}`);
+    }
+  };
+  await collect(join(root, "room/skills"));
   /** @type {Record<string, Profile>} */
   const profiles = {};
   for (const harness of harnesses) {
@@ -98,10 +111,17 @@ export async function prepareProfiles({ home, executables, isolatedRoot = undefi
           ? /\/peer\/(slp-challenge-premise|slp-evidence-report)\//.test(file.path)
           : file.path.startsWith(`vendor/seatwork/skills/${role}/`),
       );
-      for (const file of selected) {
+      for (const file of [
+        ...selected,
+        ...localSkills.map((path) => ({ path: path.slice(root.length + 1), local: true, sha256: "" })),
+      ]) {
         const bytes = await readFile(join(root, file.path));
-        if (digest(bytes) !== file.sha256) throw new Error(`Seatwork source bytes changed: ${file.path}`);
-        const relative = file.path.split("/").slice(4).join("/");
+        if (!file.local && digest(bytes) !== file.sha256)
+          throw new Error(`Seatwork source bytes changed: ${file.path}`);
+        const relative = file.path
+          .split("/")
+          .slice(file.local ? 2 : 4)
+          .join("/");
         const path = join(roleHome, "skills", relative);
         await manage(path, bytes);
         const skillDir = join(roleHome, "skills", relative.split("/")[0]);
@@ -119,7 +139,10 @@ export async function prepareProfiles({ home, executables, isolatedRoot = undefi
         }
       }
       const roleText = await readFile(join(root, "room/roles", `${role}.md`), "utf8");
-      await manage(join(roleHome, "root-instructions.md"), `${ownership}\n\n${operating}\n\n${roleText}`);
+      await manage(
+        join(roleHome, "root-instructions.md"),
+        `${ownership}\n\n${operating}\n\n${mapping}\n\n${modelSelection}\n\n${roleText}`,
+      );
       if (harness === "codex")
         await manage(join(roleHome, "config.toml"), 'cli_auth_credentials_store = "file"\n');
       if (harness === "claude")

@@ -9,7 +9,7 @@ reasoning and tools. Start with one Supervisor and let the work determine the te
 ## Install
 
 Requires macOS or Linux, Node 24+, npm, Codex 0.160.0+, Claude Code 2.1.289+ and Pi 1.0.0+.
-Paseo **0.10.3** is pinned and installed locally with the package. The repository is private;
+Paseo **0.11.2** is pinned and installed locally with the package. The repository is private;
 GitHub downloads require `gh auth login` with access to `haohao3k/alliance-work`.
 
 From this checkout:
@@ -30,9 +30,11 @@ the candidate and registers `~/.local/bin/alliance-work`. Add `~/.local/bin` to 
 is not already there. Installation opts into the trusted Alliance plugin on its own dedicated
 Paseo instance; it preserves existing daily Paseo installations.
 
-Open **http://127.0.0.1:6771 → Alliance Work**, create a room with an absolute project directory,
-and give its Supervisor an outcome, scope and acceptance criteria. The selected home is saved
-in native plugin settings and survives a daemon restart.
+Open a project in Paseo and start an **Alliance** profile. A missing room is created automatically;
+an existing room is reused, including an unambiguous matching Git worktree. Give the agent its
+assignment in the native chat. **Alliance Work** is the live monitor: status, project filters and
+**Open** to jump to a session. **Add project** provides host-local folder completion when needed.
+The dedicated installation defaults to **http://127.0.0.1:6771**; existing installations keep their port.
 
 ## Authenticate once for all Codex roles
 
@@ -96,16 +98,51 @@ instructions remain relevant; machine-managed policy is not bypassed.
 
 Paseo owns agents, workspaces, native MCP, conversations and lifecycle. Alliance adds the room
 surface, durable assignments, role context and explicit candidate acceptance. It has no Piggery
-runtime dependency, extra MCP server or second message transport.
+runtime dependency, extra MCP server or second message transport. HQ can still use the installed
+Piggery CLI for projects that already coordinate through it.
 
 One checkout has one room. Git worktrees can join an unambiguous matching room. Persist the
 brief before native delegation; keep results and candidate identity before signaling completion.
 The operating contract maps Seatwork vocabulary to native Paseo tools without adding aliases.
 
+Each room's **Models** settings control the Peer/Lens allowlist, effort and preferences by task
+difficulty. Lead chooses worker models within that policy; Supervisor/HQ can intervene. Lead
+prefers GPT-6 Astra or Claude Opus 5.5 at medium/high but may choose any supported model/effort.
+Settings govern new Alliance launches; native
+in-session model changes are outside the current SDK gate. See the [room workflow](docs/quickstart.vi.md#model-theo-room).
+
 Sending a native prompt can interrupt active work. Notifications and lifecycle hooks are best
 effort and are not replayed after an outage. Reconcile saved artifacts and native history on
-resume. A completed turn does not accept its artifact: **Disposition** records a candidate and
-evidence, and a new turn reopens current acceptance while preserving earlier decisions.
+resume. A completed turn does not accept its artifact: explicit acceptance records a candidate and evidence. The monitor does not turn an idle agent
+into an accepted result; older disposition artifacts and RPCs remain available.
+
+## Project skills and bound evidence
+
+Register project-owned skills explicitly; every role can use them when relevant:
+
+```sh
+alliance-work skills add .agents/skills/verify-app --project /path/to/project
+alliance-work skills list --project /path/to/project
+```
+
+The versioned `.alliance/skills.json` selection loads on fresh Codex, Claude and Pi sessions.
+References/scripts remain beside their skill. Daily profiles and unrelated project settings,
+hooks and MCPs stay excluded. Lead chooses the approach; registration adds no mandatory ceremony.
+
+Run an owner-chosen check and retain its report:
+
+```sh
+alliance-work verify --scenario persistence --kind runtime --target local-test-instance --input .env.local -- npm run test:e2e
+alliance-work accept --agent CANDIDATE_OWNER_ID --report /absolute/report.json
+```
+
+`verify` defaults to `--kind test`. Its report binds the checkout, HEAD, tracked/non-ignored
+untracked files, explicit inputs and artifacts to the actual command result. Reports live
+outside the candidate tree. For non-Git deliverables, name candidate files with `--input`.
+The owner can run checks directly, choose a project control skill, include artifacts with
+`--artifact` and declare gaps with `--unverified`. Acceptance rejects failed/blocked/stale
+reports and changed artifacts. It does not prove that the chosen assertions establish every
+product claim; Lead retains that judgment. See [workflow details](docs/quickstart.vi.md).
 
 ## Development
 

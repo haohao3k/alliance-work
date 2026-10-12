@@ -1,89 +1,78 @@
-# Alliance Work — hướng dẫn nhanh
+# Alliance Work
 
-Bắt đầu bằng **một room, một Supervisor và một kết quả rõ ràng**. Agent tự chọn cách làm và gọi thêm role khi cần. Không phải tạo đủ năm role cho mỗi việc.
+Mở project bằng giao diện native của Paseo, chọn profile **Alliance HQ / Supervisor / Lead / Peer / Lens**, rồi giao việc trong chat.
 
-## 1. Cài đặt và kiểm tra auth
+## Room tự động
 
-Làm phần [Install](../README.md#install), rồi kiểm tra:
+Chưa có room cho thư mục thì Alliance tạo một room khi mở profile. Đã có thì dùng lại,
+không đổi mission hay tạo bản sao. Worktree khớp duy nhất một room của repository cũng dùng lại
+room đó. Nếu nhiều room cùng repository khiến việc chọn mơ hồ, thêm chính đường dẫn checkout
+bằng **Alliance Work → Add project**.
+
+**Add project** cho phép gõ `~/`, đường dẫn tuyệt đối, hoặc chọn thư mục trong danh sách.
+Thư mục được đọc trên host đang chọn. Không cần nhập tên, mission hay assignment ở đây.
+
+## Theo dõi
+
+**Alliance Work** hiển thị agent theo project: tên, role, model, trạng thái và thời điểm cập nhật.
+Chọn **Working**, **Attention**, **Idle**, lọc project hoặc tìm theo tên. **Open** mở đúng session
+trên đúng host. **Archived** hiện thêm session đã lưu trữ. Bảng tự cập nhật; lỗi đọc hiển thị rõ
+khi dữ liệu cũ vẫn còn trên màn hình.
+
+Gửi việc mới, tiếp tục, xử lý permission và kiểm tra bàn giao trong chat native. Agent idle chỉ
+có nghĩa không chạy lượt hiện tại; không đồng nghĩa công việc đã được nghiệm thu. Assignment,
+kết quả và các quyết định cũ vẫn nằm dưới `~/.alliance-work/rooms/<room-id>/`.
+
+## Model theo room
+
+Mở **Alliance Work → Models** ở project cần chỉnh. Chọn mức `routine`, `standard`, `complex`
+hoặc `frontier`, thêm model/effort từ catalog thật, bỏ lựa chọn không muốn dùng và chỉnh priority.
+Số nhỏ được ưu tiên hơn; **Save model settings** lưu riêng cho room trên host đó. Các band có
+thể dùng chung một route. **Reset defaults** chỉ sửa bản nháp, cần Save mới áp dụng.
+
+Peer/Lens mặc định ưu tiên Sol high hoặc Opus 5.5 medium cho việc triển khai; có Sonnet 5.5
+xhigh cho việc complex, Astra high cho frontier. Lead tự đánh giá độ khó và quyết định cuối
+cùng trong allowlist; Supervisor/HQ có thể can thiệp bằng lý do và bằng chứng. Priority không
+ép phải thử model đầu tiên. Không có classifier tự đọc prompt để định độ khó, và không tự
+đổi model đang chạy. HQ/Supervisor giữ lựa chọn model độc lập với allowlist Peer/Lens.
+
+Lead **ưu tiên GPT-6 Astra hoặc Claude Opus 5.5, medium/high**, nhưng được chọn model/effort khác
+trong catalog thật khi phù hợp task. Đây là ưu tiên, không phải điều kiện chặn tạo Lead; allowlist
+Peer/Lens không giới hạn model của Lead. Settings cho chỉnh effort ưu tiên khi không chỉ định.
+Nếu model không hỗ trợ effort ưu tiên thì dùng mặc định khả dụng của model. Model/effort được
+chọn tường minh nhưng không có trong catalog vẫn báo lỗi, không tự đổi ngầm.
+
+Gate kiểm tra mọi lượt **tạo agent Alliance** qua UI/native `create_agent` và RPC. Native
+delegation chỉ có model/effort nên gate kiểm tra hợp của allowlist; band độ khó là hướng dẫn
+cho Lead. RPC `members.launch` có `difficulty` thì kiểm tra thêm band được chọn. Bỏ model/effort
+sẽ lấy route khả dụng theo priority, ưu tiên band standard khi không chỉ định độ khó.
+
+Settings áp dụng cho **launch mới**. Phiên đang mở giữ context cũ; SDK Paseo hiện chưa có hook
+chặn đổi model/effort ngay trong phiên. Khi đổi policy, owner cần bàn giao assignment sang phiên
+mới; không coi đây là giới hạn chi phí cưỡng chế cho mọi lệnh native/harness. Không tự ngắt phiên.
+
+Policy chung của Alliance nằm trong `room/policies/agent-ownership.md`, `operating-contract.md`
+và `model-selection.md`, được nạp cho mọi role. Đây là phần tương đương general policy; vendor
+Seatwork giữ nguyên. [Nguyên tắc chọn model và nguồn OpenAI/Anthropic](../room/policies/model-selection.md).
+
+## HQ nhiều host
+
+Workspace HQ giữ danh bạ host và các con trỏ project. HQ dùng Paseo CLI với `--host` để đọc
+trạng thái và message, rồi giao việc trong phạm vi Human đã giao. Native Paseo MCP thao tác trên
+host của session. Luôn ghi cả host và agent ID; host mất kết nối là chưa biết trạng thái.
+HQ có thể dùng Piggery CLI cho project dùng Piggery, nhưng không tự coi mình đã có participant ID.
+
+## Auth và cập nhật
 
 ```sh
-alliance-work auth codex --from "$HOME/.codex"
 alliance-work auth status
 alliance-work doctor
-```
-
-Cả **HQ, Supervisor, Lead, Peer và Lens** dùng nguồn auth Codex này. Mỗi role vẫn có config,
-skills, instructions và lịch sử riêng. Nếu auth nguồn hết hạn, làm mới đăng nhập ở Codex gốc rồi
-tiếp tục; không cần login lại từng role. Xem [vận hành và auth](operations.md#authentication)
-cho giới hạn refresh, đăng nhập riêng và Claude/Pi.
-
-Mở [127.0.0.1:6771](http://127.0.0.1:6771) và chọn **Alliance Work**.
-
-## 2. Tạo room cho project
-
-Tạo thư mục project trước; có thể dùng một repository đang có. Trong **Alliance Work → New room**, nhập:
-
-- **Room title:** tên dễ nhận biết, ví dụ `Focus Board`.
-- **Project directory:** đường dẫn tuyệt đối đến thư mục project.
-- **Room mission:** kết quả cần đạt, giới hạn và cách biết đã hoàn thành.
-
-Bấm **Create room**. Một checkout chỉ có một room. Room và mission được lưu, vẫn còn sau khi tải lại trang.
-
-![Room Focus Board đã tạo](assets/room-ready.jpg)
-
-## 3. Giao assignment đầu tiên
-
-Ở **Start an assignment**, chọn role → harness → model. Với Codex dùng auth chung, mọi role đều nhận nguồn auth đã chọn. Với Claude/Pi hoặc Codex đăng nhập riêng, chuẩn bị auth cho các role sẽ tham gia.
-
-| Role | Khi nào dùng |
-| --- | --- |
-| Supervisor | Chịu trách nhiệm kết quả của project, phân công và kiểm tra bàn giao |
-| Lead | Phụ trách một nhánh công việc có phạm vi riêng |
-| Peer | Thực hiện một nhiệm vụ, tự điều tra và quyết định kỹ thuật trong phạm vi đó |
-| Lens | Đưa một góc nhìn hoặc đánh giá có bằng chứng |
-| HQ | Điều phối ưu tiên và ranh giới giữa nhiều nhóm công việc |
-
-Với bài thử này, chọn **supervisor → codex → GPT-6.1-Sol**. Assignment nên nêu **kết quả, phạm vi, bằng chứng**. Ví dụ:
-
-> Đọc README.md và hoàn thành Focus Board trong project này. Giao một phần triển khai có ranh giới rõ cho một alliance-codex-peer qua native Paseo. Tự kiểm tra candidate của Peer, chạy npm test và ghi HANDOFF.md với kết quả, bằng chứng, giới hạn còn lại và commit. Chỉ sửa project này cùng artifact của room; không deploy. Được phép tự quyết định thiết kế và cách triển khai trong phạm vi trên.
-
-Bấm **Start supervisor** để mở chat native. Assignment chỉ được lưu chính thức khi gửi; nội dung đang gõ trong form có thể mất khi tải lại trang. Bản assignment đầy đủ của demo được lưu riêng trong `alliance-work-demo/ASSIGNMENT.md` để dùng lại.
-
-![Chọn role, model và soạn assignment](assets/assignment-ready.jpg)
-
-## 4. Theo dõi và tiếp tục
-
-Trở lại room để xem các thành viên; **Open chat** mở cuộc hội thoại native của từng agent. **Refresh** đọc lại trạng thái.
-
-**Resume → Continue assignment** dùng khi agent đã dừng hoặc đang idle và còn việc phải làm. Nếu có yêu cầu quyền đang chờ, xử lý trong chat trước. Khi agent còn chạy, dùng chat để chủ động điều chỉnh; không gửi lặp cùng một assignment.
-
-Paseo có thể hiện yêu cầu quyền chạy tool hoặc lệnh trong chat. Kiểm tra thao tác và phạm vi assignment rồi chọn **Accept** cho lượt đó. Nếu Supervisor dùng `respond_to_permission` để xử lý quyền của Peer, có thể mở chat Peer để xem yêu cầu gốc.
-
-Agent kết thúc một lượt chưa có nghĩa sản phẩm đã đạt yêu cầu. Đọc phần bàn giao, kiểm tra candidate và chạy các kiểm tra phù hợp với project.
-
-## 5. Nghiệm thu đúng candidate
-
-Mở **Disposition** ở thành viên chịu trách nhiệm bàn giao:
-
-1. **Candidate identity:** commit SHA hoặc artifact cố định đang được đánh giá.
-2. **Disposition evidence:** đã kiểm tra gì, kết quả ra sao, còn thiếu gì.
-3. Chọn **Accept candidate** khi đạt; chọn **Reject candidate** nếu cần làm tiếp.
-
-Một lượt làm việc mới mở lại trạng thái acceptance; quyết định trước vẫn được giữ trong artifact của room. Assignment, kết quả lượt chạy và quyết định nằm dưới `~/.alliance-work/rooms/<room-id>/`.
-
-![Supervisor và Peer đã được nghiệm thu riêng](assets/room-accepted.jpg)
-
-## Cập nhật
-
-```sh
 alliance-work update --check
 alliance-work update
-alliance-work doctor
 ```
 
-Kết thúc agent và workspace script đang chạy trước khi update. Room, assignment và lịch sử được
-giữ lại. Dùng `alliance-work setup --refresh` khi cần nạp lại asset từ phiên bản đang cài;
-`alliance-work rollback` quay về bản cài trước. Xem [hướng dẫn vận hành](operations.md#updates-and-recovery).
+Xem [cài đặt và auth](../README.md) và [vận hành](operations.md). Cập nhật chờ agent và workspace
+script idle rồi hot reload plugin; không restart daemon đang chạy.
 
 ## Demo Focus Board đã nghiệm thu
 
@@ -110,3 +99,30 @@ gh release download v0.1.3 --repo haohao3k/alliance-work --pattern alliance-work
 Bài này chạy model thật bằng **Codex Supervisor và Peer**. Claude/Pi đã được kiểm tra native home và
 skill discovery, chưa chạy bài model acceptance này. Các kiểm tra UI không thay thế một audit
 accessibility hoặc kiểm tra mọi trình duyệt. Auth và giới hạn refresh nằm trong [operations](operations.md#authentication).
+
+## Skill theo project và evidence gắn candidate
+
+Mỗi project đăng ký các thư mục `.agents/skills/<name>` qua `alliance-work skills add PATH`.
+Manifest `.alliance/skills.json` đi cùng repository/worktree. Session mới nạp đúng selection;
+session đang chạy không bị ngắt. Claude dùng một plugin chỉ chứa skill đã chọn; Codex/Pi nạp
+skill được chọn qua discovery/đường dẫn native. Không nhập cấu hình cá nhân hoặc project hooks/MCP.
+Tên `slp-*` và `alliance-*` dành cho playbook managed; phần mở rộng dùng tên project của mình.
+
+Dùng `alliance-work verify --scenario NAME --kind test -- COMMAND ARGS` để chạy check đã chọn.
+`runtime` chỉ dành cho check thật sự đi qua hành vi runtime; `analysis` cho kiểm tra phân tích.
+`--target` mô tả instance được thao tác; đây là nhãn của owner, không thay cho driver xác minh
+đúng endpoint. `--input FILE` đưa cấu hình bị Git ignore vào fingerprint; `--artifact FILE`
+gắn screenshot/trace; `--unverified REASON` giữ phạm vi chưa thử. Các tùy chọn sau repeat được.
+Không có Git thì dùng `--input` để chỉ rõ các file candidate. Không đưa secrets vào command line.
+
+CLI trả đường dẫn report, digest và verdict PASS/FAIL/BLOCKED/STALE. Command thay đổi candidate
+trong lúc chạy sẽ STALE. Owner đọc report rồi gọi `alliance-work accept --agent ID --report PATH`.
+Có thể chạy command bằng đường dẫn Node/CLI tuyệt đối trong room context khi PATH chưa có launcher.
+Không cần thêm reviewer hoặc model family; Lead tự quyết phạm vi check và review. Proof từ unit
+test không được diễn giải thành UI đã chạy. Acceptance không cấp quyền publish/merge/deploy.
+
+Bản ghi native assignment được tạo khi mở session, kể cả khi giao việc bằng native create_agent.
+Nó trỏ tới conversation giữ nguyên lời giao việc; hook Paseo không cung cấp initial prompt nên
+Alliance không dựng lại nội dung đó. Owner vẫn lưu/link brief và acceptance conditions khi cần.
+Mapping đầy đủ của tên tool/đường dẫn Seatwork nằm trong operating instructions của mỗi role.
+Các disposition cũ được giữ nguyên như quyết định lịch sử, không tự nâng thành proof đã xác minh.

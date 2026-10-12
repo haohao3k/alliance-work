@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { RoleName, RoomRecord } from "../shared/contracts";
+import { defaultModelPolicy, ModelPolicy, type ModelPolicyValue } from "../shared/model-policy";
 
 export interface MemberRecord {
   id: string;
@@ -10,12 +11,15 @@ export interface MemberRecord {
   provider: string;
   parentId: string | null;
   assignment: string;
+  cwd?: string;
   lastOutcome: string | null;
   resultPath: string | null;
   decision: "open" | "accepted" | "rejected";
   decisionEvidence: string | null;
   launchKey: string | null;
   launchHash: string | null;
+  launchModel?: string;
+  launchEffort?: string;
   lastTurnId?: string | null;
 }
 export class RoomStore {
@@ -25,7 +29,36 @@ export class RoomStore {
     this.db = new DatabaseSync(join(home, "rooms.sqlite"));
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS rooms(id TEXT PRIMARY KEY, cwd TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS members(id TEXT PRIMARY KEY, roomId TEXT NOT NULL, launchKey TEXT, data TEXT NOT NULL, UNIQUE(roomId, launchKey));`);
+      CREATE TABLE IF NOT EXISTS members(id TEXT PRIMARY KEY, roomId TEXT NOT NULL, launchKey TEXT, data TEXT NOT NULL, UNIQUE(roomId, launchKey));
+      CREATE TABLE IF NOT EXISTS room_model_policies(roomId TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL);`);
+  }
+  modelPolicy(roomId: string) {
+    this.room(roomId);
+    const row = this.db.prepare("SELECT revision,data FROM room_model_policies WHERE roomId=?").get(roomId) as
+      | { revision: number; data: string }
+      | undefined;
+    return {
+      revision: row?.revision ?? 0,
+      policy: row ? ModelPolicy.parse(JSON.parse(row.data)) : defaultModelPolicy(),
+    };
+  }
+  saveModelPolicy(roomId: string, policy: ModelPolicyValue, revision: number) {
+    this.room(roomId);
+    const data = JSON.stringify(ModelPolicy.parse(policy));
+    const result =
+      revision === 0
+        ? this.db
+            .prepare(
+              "INSERT INTO room_model_policies(roomId,revision,data) VALUES(?,1,?) ON CONFLICT DO NOTHING",
+            )
+            .run(roomId, data)
+        : this.db
+            .prepare(
+              "UPDATE room_model_policies SET revision=revision+1,data=? WHERE roomId=? AND revision=?",
+            )
+            .run(data, roomId, revision);
+    if (!result.changes) throw new Error("Model policy changed elsewhere. Reload settings before saving.");
+    return this.modelPolicy(roomId);
   }
   rooms(): RoomRecord[] {
     return (this.db.prepare("SELECT data FROM rooms ORDER BY rowid DESC").all() as { data: string }[]).map(

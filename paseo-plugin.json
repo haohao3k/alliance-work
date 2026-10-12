@@ -1,1 +1,1 @@
-{ "id": "alliance-work", "requirements": { "paseo": ">=0.10.3 <0.11.0" } }
+{ "id": "alliance-work", "requirements": { "paseo": ">=0.10.3" } }

@@ -14,6 +14,12 @@ The bootstrap verifies `checksums.txt`, installs `package-lock.json` dependencie
 candidate before activation. All three native harness binaries must be on PATH. Their versions
 are sensitive to configuration/discovery changes; run `npm run test:native` after upgrading one.
 
+Activation accepts the release's pinned Paseo daemon and the explicitly tested `0.11.2` daemon.
+This also supports installed `0.10.3` clients talking to `0.11.2` hosts; it does not upgrade or
+restart the daemon. Other version mismatches remain blocked. To exercise a different installed
+daemon binary in a disposable test instance, set `ALLIANCE_TEST_DAEMON_CLI` to its absolute
+`bin/paseo` path when running `npm run test:maintenance`.
+
 Custom locations are explicit:
 
 ```sh
@@ -76,9 +82,12 @@ alliance-work login pi peer
 ```
 
 Use any of `hq`, `supervisor`, `lead`, `peer`, `lens`. Only participating roles need credentials.
-Claude and Pi currently use separate role credentials. Optional owner-only
-`credentials.env.json` in a role home accepts explicit provider API-key variables; ambient
-provider secrets are not inherited. Never commit or record credential files.
+Claude and Pi use explicit role credentials. Optional owner-only
+`credentials.env.json` in a role home accepts provider API-key variables. Claude roles also
+accept `CLAUDE_CODE_OAUTH_TOKEN` for an existing `claude setup-token` credential. This variable
+is rejected for Codex and Pi. Ambient provider secrets are not inherited.
+Keep credential files at mode 600 and never commit, print or record their contents.
+New Claude sessions read the role credential file; no daemon restart is required.
 
 ## Updates and recovery
 
@@ -98,6 +107,7 @@ no fallback to another repository or an unpinned branch.
 A maintenance lock prevents competing installer/updater processes. Before mutation and again
 before hot reload, native readback must show no running/starting agents and no active workspace
 scripts. Unknown status is refused. Finish current work and rerun; updates do not kill agents.
+Native sessions reported as `closed` after a daemon restart are inactive and permit maintenance.
 Do not start assignments while maintenance is running.
 
 Managed profiles, the installation record, CLI launcher and dedicated Paseo configuration are
@@ -110,7 +120,10 @@ history and room artifacts are not regenerated or included in managed-file backu
 A failed candidate restores managed files and attempts to reload the previous runtime. If live
 recovery fails, the command reports the backup path and requires `doctor` before continuing.
 The first installation has no prior runtime to roll back to; inspect native plugin logs if its
-activation fails. These releases do not migrate the room database schema. `rollback` is a code
+activation fails. Room model settings use an additive `room_model_policies` table in the existing
+room database, with optimistic revisions to reject stale settings saves. Existing rooms use
+defaults until explicitly saved. Older code ignores this table; rollback preserves its values.
+`rollback` is a code
 and generated-profile rollback, not a rollback of work the agents have performed. A source
 installation uses the current checkout bytes; rollback does not undo edits to that checkout.
 
@@ -155,3 +168,22 @@ gh workflow run release.yml --repo haohao3k/alliance-work --ref codex/bootstrap 
 
 The manual workflow also checks out and validates the requested tag before packaging.
 The release archive contains no home directories, runtime credentials or generated room state.
+
+## Upgrading host builds with a prerelease suffix
+
+From v0.1.5, `alliance-work update` compares stable releases with installed host versions such
+as `0.1.4-ryzen.1`. Older launchers cannot parse that suffix. Bootstrap once with the release
+installer, which preserves the recorded Alliance/Paseo home, credentials, rooms and native settings:
+
+```sh
+mkdir -p /tmp/alliance-upgrade
+gh release download --repo haohao3k/alliance-work --pattern install.sh --dir /tmp/alliance-upgrade --clobber
+sh /tmp/alliance-upgrade/install.sh
+alliance-work doctor
+```
+
+Run on the destination host with Node 24+, npm, gh and the native harnesses on PATH. It verifies
+the release checksum and candidate before activation. Busy or unknown agent/script state refuses
+activation; retry when work is idle. No running daemon is restarted. Later releases use ordinary
+`alliance-work update --check` / `alliance-work update`. Project skill selections live in projects;
+project skill caches and evidence live outside managed role assets and survive refresh/update.

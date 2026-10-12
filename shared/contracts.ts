@@ -1,5 +1,6 @@
 import { defineRpc, defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
+import { Difficulty, ModelPolicy } from "./model-policy";
 
 export const Role = z.enum(["hq", "supervisor", "lead", "peer", "lens"]);
 export const Harness = z.enum(["codex", "claude", "pi"]);
@@ -23,6 +24,10 @@ export const Member = z.object({
   roomId: z.string(),
   role: Role,
   provider: z.string(),
+  title: z.string(),
+  model: z.string().nullable(),
+  updatedAt: z.string().nullable(),
+  archived: z.boolean(),
   parentId: z.string().nullable(),
   assignment: z.string(),
   lastOutcome: z.string().nullable(),
@@ -40,11 +45,16 @@ export const roomList = defineRpc({
 export const roomCreate = defineRpc({
   name: "rooms.create",
   input: z.object({
-    title: z.string().trim().min(1).max(160),
+    title: z.string().trim().max(160).default(""),
     cwd: z.string().min(1),
-    mission: z.string().trim().min(1).max(50000),
+    mission: z.string().trim().max(50000).default(""),
   }),
   output: Room,
+});
+export const directoryList = defineRpc({
+  name: "directories.list",
+  input: z.object({ query: z.string().max(4096) }),
+  output: z.object({ current: z.string().nullable(), parent: z.string(), paths: z.array(z.string()) }),
 });
 export const memberLaunch = defineRpc({
   name: "members.launch",
@@ -53,12 +63,30 @@ export const memberLaunch = defineRpc({
     key: z.string().min(1).max(160),
     role: Role,
     harness: Harness,
-    model: z.string().min(1),
+    model: z.string().min(1).optional(),
     prompt: z.string().min(1).max(100000),
     thinking: z.string().optional(),
     mode: z.string().optional(),
+    difficulty: Difficulty.optional(),
   }),
   output: z.object({ agentId: z.string() }),
+});
+export const roomModelPolicy = defineRpc({
+  name: "models.read",
+  input: z.object({ roomId: z.string() }),
+  output: z.object({ policy: ModelPolicy, revision: z.number().int() }),
+});
+export const roomModelPolicySave = defineRpc({
+  name: "models.save",
+  input: z.object({ roomId: z.string(), policy: ModelPolicy, revision: z.number().int().nonnegative() }),
+  output: roomModelPolicy.output,
+});
+export const roomModelCatalog = defineRpc({
+  name: "models.catalog",
+  input: z.object({ roomId: z.string(), harness: Harness, role: Role }),
+  output: z.object({
+    models: z.array(z.object({ id: z.string(), label: z.string(), efforts: z.array(z.string()) })),
+  }),
 });
 export const memberResume = defineRpc({
   name: "members.resume",

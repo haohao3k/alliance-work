@@ -18,16 +18,24 @@ export function run(command, args, options = {}) {
   return result.stdout;
 }
 export function isNewerRelease(tag, current) {
-  const left = tag.replace(/^v/, "").split(".").map(Number);
-  const right = current.replace(/^v/, "").split(".").map(Number);
-  if (
-    left.length !== 3 ||
-    right.length !== 3 ||
-    [...left, ...right].some((part) => !Number.isSafeInteger(part) || part < 0)
-  )
-    throw new Error("Cannot compare release versions.");
+  const parse = (version) => {
+    const match =
+      /^v?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z.-]+)?$/.exec(
+        version,
+      );
+    if (!match) throw new Error("Cannot compare release versions.");
+    const parts = match.slice(1, 4).map(Number);
+    if (parts.some((part) => !Number.isSafeInteger(part)))
+      throw new Error("Cannot compare release versions.");
+    return { parts, prerelease: match[4] };
+  };
+  const next = parse(tag),
+    previous = parse(current);
+  if (next.prerelease) throw new Error("Update target must be a stable release");
+  const left = next.parts,
+    right = previous.parts;
   for (let i = 0; i < 3; i++) if (left[i] !== right[i]) return left[i] > right[i];
-  return false;
+  return Boolean(previous.prerelease);
 }
 export function releaseInfo(tag) {
   const args = ["release", "view", ...(tag ? [tag] : []), "--repo", repository, "--json", "tagName,url"];

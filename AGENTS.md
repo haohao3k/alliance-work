@@ -19,6 +19,11 @@ installer/update/recovery changes; it starts and stops only disposable native Pa
 real failure risks; do not add wording or implementation-mirroring tests. Reproduce a regression
 against the prior behavior, and report added/removed test lines with the result.
 
+Setup is `npm ci` on Node 24 (macOS or Linux). Native and maintenance tests need `codex`, `claude`
+and `pi` on PATH; Pi is `npm i -g @earendil-works/pi-coding-agent`. Maintenance tests use
+a temp home and a free loopback port; the installed instance defaults to 6771. Do not run
+`./install.sh` or `setup` for source checks: they write `~/.alliance-work` and `~/.local/bin`.
+
 Activation is part of installer/plugin changes: obtain fresh idle readback, run the owned
 installer or `setup --refresh`, verify plugin running, health/root and the changed behavior.
 Never restart a running daemon to load a plugin. Never alter the user's daily Paseo instance.

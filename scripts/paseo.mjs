@@ -4,6 +4,12 @@ import { join, resolve } from "node:path";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { projectRoot } from "./profiles.mjs";
 
+// Exact daemon versions exercised by native lifecycle/maintenance tests. SDK and CLI stay pinned.
+export function requireCompatibleDaemon(version, pinned) {
+  if (version && !new Set([pinned, "0.11.2"]).has(version))
+    throw new Error(`Running Paseo ${version} is not validated for this Alliance release (CLI ${pinned}).`);
+}
+
 export function paseo(command, home, root = projectRoot) {
   const result = spawnSync(
     process.execPath,
@@ -28,7 +34,9 @@ export function paseo(command, home, root = projectRoot) {
 export function requireIdleState(agents, scripts) {
   if (!Array.isArray(agents) || !Array.isArray(scripts))
     throw new Error("Idle state is unknown; no update applied.");
-  const busy = agents.filter((agent) => !["idle", "error", "stopped", "archived"].includes(agent.status));
+  const busy = agents.filter(
+    (agent) => !["idle", "error", "closed", "stopped", "archived"].includes(agent.status),
+  );
   const active = scripts.filter((script) => script.lifecycle !== "stopped");
   if (busy.length || active.length)
     throw new Error(

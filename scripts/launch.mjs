@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { claudeSkillPlugin, projectSkills } from "../server/project-skills.mjs";
 import { authSource, authStatus, bridgeCodexAuth } from "./auth.mjs";
 import { discoverCodex } from "./codex-discovery.mjs";
 import { loadManifest, verifyProfile } from "./profiles.mjs";
@@ -12,7 +13,7 @@ export function profileEnvironment(profile, home, ambient = process.env, credent
   for (const [key, value] of Object.entries(ambient)) {
     if (
       value !== undefined &&
-      /^(PATH|LANG|LC_.*|TZ|TERM|COLORTERM|TMPDIR|TMP|TEMP|USER|LOGNAME|PASEO_.*|SSL_CERT_FILE|SSL_CERT_DIR|HTTPS?_PROXY|NO_PROXY)$/i.test(
+      /^(PATH|LANG|LC_.*|TZ|TERM|COLORTERM|TMPDIR|TMP|TEMP|USER|LOGNAME|PASEO_.*|ALLIANCE_BOUND_ROOM|ALLIANCE_ASSIGNMENT|ALLIANCE_ARTIFACTS|SSL_CERT_FILE|SSL_CERT_DIR|HTTPS?_PROXY|NO_PROXY)$/i.test(
         key,
       )
     )
@@ -21,7 +22,8 @@ export function profileEnvironment(profile, home, ambient = process.env, credent
   for (const [key, value] of Object.entries(credentials)) {
     if (
       typeof value !== "string" ||
-      !/^(ANTHROPIC_API_KEY|ANTHROPIC_BASE_URL|OPENAI_API_KEY|OPENAI_BASE_URL|GEMINI_API_KEY|GOOGLE_API_KEY)$/.test(
+      (key === "CLAUDE_CODE_OAUTH_TOKEN" && profile.harness !== "claude") ||
+      !/^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY|ANTHROPIC_BASE_URL|OPENAI_API_KEY|OPENAI_BASE_URL|GEMINI_API_KEY|GOOGLE_API_KEY)$/.test(
         key,
       )
     )
@@ -86,10 +88,13 @@ export async function launchPlan(home, id, args, ambient = process.env, cwd = pr
     );
   if ((metadataCommand && profile.harness !== "pi") || accountCommand)
     return { executable: profile.executable, args, env, authSource: source };
+  const bundle = await projectSkills(cwd);
   if (profile.harness === "claude") {
     args = replaceFlag(args, "--setting-sources", "user");
     args = replaceFlag(args, "--settings", join(profile.home, "settings.json"));
     if (!args.includes("--strict-mcp-config")) args.push("--strict-mcp-config");
+    const plugin = await claudeSkillPlugin(home, bundle);
+    if (plugin) args.push("--plugin-dir", plugin);
     // Only the caller-bound native Paseo endpoint may survive an explicit MCP argument.
     for (let i = 0; i < args.length; i++)
       if (args[i] === "--mcp-config") {
@@ -115,6 +120,7 @@ export async function launchPlan(home, id, args, ambient = process.env, cwd = pr
       "builtin:tool-search",
     ];
     for (const skill of profile.skillEntries) args.push("--skill", skill);
+    for (const skill of bundle.skills) args.push("--skill", join(skill.directory, "SKILL.md"));
     args = replaceFlag(args, "--session-dir", join(profile.home, "sessions"));
   } else {
     const configArgs = [];
@@ -127,7 +133,11 @@ export async function launchPlan(home, id, args, ambient = process.env, cwd = pr
     const trust = `projects=${toml({ [resolve(cwd)]: { trust_level: "untrusted" } })}`;
     configArgs.push("-c", trust);
     const discovered = await discoverCodex(profile.executable, env, cwd, configArgs);
-    const selected = new Set(profile.skillDirectories.map((path) => resolve(path)));
+    const selected = new Set(
+      [...profile.skillDirectories, ...bundle.skills.map((skill) => skill.directory)].map((path) =>
+        resolve(path),
+      ),
+    );
     const skillConfig = discovered.skills
       .filter((skill) => !selected.has(resolve(dirname(skill.path))))
       .map((skill) => ({ path: skill.path, enabled: false }));

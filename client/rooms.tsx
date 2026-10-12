@@ -1,447 +1,562 @@
 import { type PluginSurfaceProps, usePaseo, useRpc } from "@getpaseo/plugin/client";
+import { Icon, Modal, ScrollView, TextInput } from "@getpaseo/plugin/client/react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
-import {
-  Harness,
-  memberDisposition,
-  memberLaunch,
-  memberResume,
-  profileStatus,
-  Role,
-  roomCreate,
-  roomList,
-} from "../shared/contracts";
+import { Pressable, Text, View } from "react-native";
+import { directoryList, roomCreate, roomList } from "../shared/contracts";
+import { activityState, relativeTime } from "../shared/monitor";
+import { ModelSettings } from "./model-settings";
 
-export function Rooms({ theme, layout, navigation }: PluginSurfaceProps) {
+type Props = PluginSurfaceProps;
+type Colors = Props["theme"]["colors"];
+type Filter = "all" | "working" | "attention" | "idle";
+
+function Button({
+  label,
+  icon,
+  onPress,
+  colors: c,
+  disabled,
+  selected,
+}: {
+  label: string;
+  icon?: string;
+  onPress: () => void;
+  colors: Colors;
+  disabled?: boolean;
+  selected?: boolean;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityState={{ disabled: Boolean(disabled), selected: Boolean(selected) }}
+      disabled={disabled}
+      onPress={onPress}
+      style={({ pressed }) => ({
+        flexDirection: "row",
+        alignItems: "center",
+        gap: 6,
+        minHeight: 36,
+        paddingHorizontal: 10,
+        borderRadius: 6,
+        borderWidth: 1,
+        borderColor: selected ? c.accent : c.border,
+        backgroundColor: selected || pressed ? c.surface2 : c.surface0,
+        opacity: disabled ? 0.45 : 1,
+      })}
+    >
+      {icon && <Icon name={icon} size={14} color={c.foregroundMuted} />}
+      <Text style={{ color: c.foreground, fontSize: 12, fontWeight: "500" }}>{label}</Text>
+    </Pressable>
+  );
+}
+
+function ProjectPicker({
+  theme,
+  host,
+  onClose,
+  onCreated,
+}: {
+  theme: Props["theme"];
+  host: Props["host"];
+  onClose: () => void;
+  onCreated: (id: string) => void;
+}) {
+  const c = theme.colors;
+  const suggest = useRpc(directoryList);
+  const create = useRpc(roomCreate);
+  const [path, setPath] = useState("");
+  const [query, setQuery] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => setQuery(path), 200);
+    return () => clearTimeout(timer);
+  }, [path]);
+  const folders = useQuery({
+    queryKey: ["alliance-directories", host.id, query],
+    queryFn: () => suggest({ query }),
+    retry: false,
+  });
+  const add = useMutation({
+    mutationFn: () => create({ cwd: folders.data?.current ?? "" }),
+    onSuccess: (room) => onCreated(room.id),
+  });
+  const pendingPath = path !== query || folders.isFetching;
+  return (
+    <Modal
+      title="Add project"
+      icon={<Icon name="FolderPlus" size={18} color={c.foregroundMuted} />}
+      open
+      onOpenChange={(open) => {
+        if (!open && !add.isPending) onClose();
+      }}
+    >
+      <Modal.Content contentContainerStyle={{ padding: 16, gap: 12 }}>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <Icon name="Server" size={14} color={c.foregroundMuted} />
+          <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>{host.label}</Text>
+        </View>
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            borderWidth: 1,
+            borderColor: c.border,
+            borderRadius: 8,
+            paddingHorizontal: 12,
+          }}
+        >
+          <Icon name="FolderSearch" size={16} color={c.foregroundMuted} />
+          <TextInput
+            autoFocus
+            accessibilityLabel="Project path"
+            placeholder="Search folders…"
+            placeholderTextColor={c.foregroundMuted}
+            value={path}
+            onChangeText={setPath}
+            autoCapitalize="none"
+            autoCorrect={false}
+            style={{ flex: 1, minWidth: 0, padding: 12, fontSize: 14, color: c.foreground }}
+          />
+        </View>
+        <View style={{ borderWidth: 1, borderColor: c.border, borderRadius: 8, overflow: "hidden" }}>
+          {query && folders.data && (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Parent folder"
+              onPress={() => setPath(`${folders.data?.parent}/`)}
+              style={{
+                flexDirection: "row",
+                gap: 10,
+                alignItems: "center",
+                padding: 12,
+                backgroundColor: c.surface1,
+              }}
+            >
+              <Icon name="ArrowUp" size={16} color={c.foregroundMuted} />
+              <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>Parent folder</Text>
+            </Pressable>
+          )}
+          <ScrollView style={{ maxHeight: 270 }} keyboardShouldPersistTaps="handled">
+            {!pendingPath &&
+              folders.data?.paths.map((folder) => (
+                <Pressable
+                  key={folder}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Browse ${folder}`}
+                  onPress={() => setPath(`${folder}/`)}
+                  style={({ pressed }) => ({
+                    flexDirection: "row",
+                    gap: 10,
+                    alignItems: "center",
+                    padding: 12,
+                    backgroundColor: pressed ? c.surface2 : c.surface0,
+                  })}
+                >
+                  <Icon name="Folder" size={16} color={c.foregroundMuted} />
+                  <View style={{ flex: 1, minWidth: 0, gap: 3 }}>
+                    <Text numberOfLines={1} style={{ color: c.foreground, fontSize: 13 }}>
+                      {folder.split("/").filter(Boolean).at(-1) || "/"}
+                    </Text>
+                    <Text
+                      numberOfLines={1}
+                      ellipsizeMode="head"
+                      style={{ color: c.foregroundMuted, fontSize: 11 }}
+                    >
+                      {folder}
+                    </Text>
+                  </View>
+                  <Icon name="ChevronRight" size={14} color={c.foregroundMuted} />
+                </Pressable>
+              ))}
+            {(pendingPath || !folders.data?.paths.length) && (
+              <Text style={{ padding: 14, color: c.foregroundMuted, fontSize: 12 }}>
+                {pendingPath ? "Loading…" : folders.error ? "Folder unavailable" : "No subfolders"}
+              </Text>
+            )}
+          </ScrollView>
+        </View>
+        {(folders.error || add.error) && (
+          <Text accessibilityRole="alert" style={{ color: c.statusDanger, fontSize: 12 }}>
+            {(folders.error || add.error)?.message}
+          </Text>
+        )}
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+          <Text
+            numberOfLines={1}
+            ellipsizeMode="head"
+            style={{ flex: 1, color: c.foregroundMuted, fontSize: 12 }}
+          >
+            {!pendingPath ? folders.data?.current : ""}
+          </Text>
+          <Button
+            label={add.isPending ? "Adding…" : "Add project"}
+            icon="Plus"
+            colors={c}
+            onPress={() => add.mutate()}
+            disabled={add.isPending || pendingPath || !folders.data?.current}
+          />
+        </View>
+      </Modal.Content>
+    </Modal>
+  );
+}
+
+export function Rooms({ theme, host, layout, navigation }: Props) {
   const c = theme.colors;
   const paseo = usePaseo();
   const cache = useQueryClient();
-  const list = useRpc(roomList),
-    create = useRpc(roomCreate),
-    launch = useRpc(memberLaunch),
-    resume = useRpc(memberResume),
-    dispose = useRpc(memberDisposition),
-    profiles = useRpc(profileStatus);
-  const data = useQuery({ queryKey: ["alliance-rooms"], queryFn: () => list({}) });
-  const profile = useQuery({ queryKey: ["alliance-profiles"], queryFn: () => profiles({}) });
-  const [selected, select] = useState<string | null>(null);
-  const [creating, setCreating] = useState(false);
-  const [title, setTitle] = useState(""),
-    [cwd, setCwd] = useState(""),
-    [mission, setMission] = useState("");
-  const [role, setRole] = useState<"hq" | "supervisor" | "lead" | "peer" | "lens">("supervisor");
-  const [harness, setHarness] = useState<"codex" | "claude" | "pi">("codex");
-  const [model, setModel] = useState(""),
-    [prompt, setPrompt] = useState("");
-  const [launchKey, setLaunchKey] = useState(() => `${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  const [review, setReview] = useState<string | null>(null),
-    [candidate, setCandidate] = useState(""),
-    [evidence, setEvidence] = useState("");
-  const [resumeId, setResumeId] = useState<string | null>(null),
-    [resumePrompt, setResumePrompt] = useState("");
-  const room = data.data?.rooms.find((item) => item.id === selected) ?? data.data?.rooms[0];
-  const members = data.data?.members.filter((item) => item.roomId === room?.id) ?? [];
-  const models = useQuery({
-    queryKey: ["alliance-models", harness, role],
-    queryFn: () => paseo.providers.listModels(`alliance-${harness}-${role}`),
-    enabled: Boolean(room),
-  });
+  const list = useRpc(roomList);
+  const queryKey = ["alliance-rooms", host.id];
+  const data = useQuery({ queryKey, queryFn: () => list({}), refetchInterval: 5000 });
+  const [project, setProject] = useState<string | null>(null);
+  const [filter, setFilter] = useState<Filter>("all");
+  const [search, setSearch] = useState("");
+  const [archived, setArchived] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [modelRoom, setModelRoom] = useState<{ id: string; title: string } | null>(null);
+  const [now, setNow] = useState(Date.now());
+  const [panelWidth, setPanelWidth] = useState(0);
   useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 10000);
     const unsubscribe = paseo.agents.subscribe(() => {
-      void cache.invalidateQueries({ queryKey: ["alliance-rooms"] });
+      void cache.invalidateQueries({ queryKey: ["alliance-rooms", host.id] });
     });
-    return unsubscribe;
-  }, [paseo, cache]);
-  const refresh = () => cache.invalidateQueries({ queryKey: ["alliance-rooms"] });
-  const newRoom = useMutation({
-    mutationFn: () => create({ title, cwd, mission }),
-    onSuccess: (result) => {
-      select(result.id);
-      setCreating(false);
-      setTitle("");
-      setCwd("");
-      setMission("");
-      void refresh();
-    },
-  });
-  const newMember = useMutation({
-    mutationFn: () => {
-      if (!room) throw new Error("Select a room");
-      return launch({ roomId: room.id, key: launchKey, role, harness, model, prompt });
-    },
-    onSuccess: (result) => {
-      setPrompt("");
-      setLaunchKey(`${Date.now()}-${Math.random().toString(36).slice(2)}`);
-      void refresh();
-      navigation?.openAgent({ agentId: result.agentId });
-    },
-  });
-  const continueMember = useMutation({
-    mutationFn: () => {
-      if (!resumeId) throw new Error("Select an agent to resume");
-      return resume({ agentId: resumeId, prompt: resumePrompt });
-    },
-    onSuccess: () => {
-      setResumeId(null);
-      setResumePrompt("");
-      void refresh();
-    },
-  });
-  const decision = useMutation({
-    mutationFn: (value: "accepted" | "rejected") => {
-      if (!review) throw new Error("Select a candidate to review");
-      return dispose({ agentId: review, decision: value, candidate, evidence });
-    },
-    onSuccess: () => {
-      setReview(null);
-      setCandidate("");
-      setEvidence("");
-      void refresh();
-    },
-  });
-  const inputStyle = {
-    color: c.foreground,
-    borderColor: c.border,
-    borderWidth: 1,
-    borderRadius: 6,
-    padding: 12,
-    fontSize: 14,
+    return () => {
+      clearInterval(timer);
+      unsubscribe();
+    };
+  }, [paseo, cache, host.id]);
+
+  const rooms = data.data?.rooms ?? [];
+  const members = (data.data?.members ?? []).filter((member) => archived || !member.archived);
+  const counts = {
+    all: members.length,
+    working: members.filter((member) => activityState(member).group === "working").length,
+    attention: members.filter((member) => activityState(member).group === "attention").length,
+    idle: members.filter((member) => activityState(member).group === "idle").length,
   };
-  const label = { color: c.foregroundMuted, fontSize: 12, marginBottom: 6 };
-  const button = (text: string, onPress: () => void, disabled = false, primary = false) => (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={text}
-      disabled={disabled}
-      onPress={onPress}
-      style={{
-        paddingVertical: 10,
-        paddingHorizontal: 14,
-        borderRadius: 6,
-        borderWidth: 1,
-        borderColor: c.border,
-        backgroundColor: primary ? c.accent : c.surface1,
-        opacity: disabled ? 0.45 : 1,
-      }}
-    >
-      <Text style={{ color: primary ? c.accentForeground : c.foreground, fontSize: 13 }}>{text}</Text>
-    </Pressable>
-  );
-  const error =
-    data.error || newRoom.error || newMember.error || continueMember.error || decision.error || profile.error;
+  const needle = search.trim().toLowerCase();
+  const groups = rooms
+    .filter((room) => !project || project === room.id)
+    .map((room) => ({
+      room,
+      members: members
+        .filter(
+          (member) =>
+            member.roomId === room.id &&
+            (filter === "all" || activityState(member).group === filter) &&
+            (!needle ||
+              `${room.title} ${room.cwd} ${member.title} ${member.role} ${member.model ?? ""}`
+                .toLowerCase()
+                .includes(needle)),
+        )
+        .sort((a, b) => activityState(a).order - activityState(b).order || a.title.localeCompare(b.title)),
+    }))
+    .filter(
+      ({ room, members: rows }) =>
+        rows.length ||
+        (filter === "all" && (!needle || `${room.title} ${room.cwd}`.toLowerCase().includes(needle))),
+    );
+  const muted = { color: c.foregroundMuted, fontSize: 11 };
+  const cell = { color: c.foreground, fontSize: 12 };
+  const compact = layout.compact || panelWidth < 780;
+
   return (
-    <ScrollView
+    <View
+      onLayout={(event) => setPanelWidth(event.nativeEvent.layout.width)}
       style={{ flex: 1, backgroundColor: c.surface0 }}
-      contentContainerStyle={{
-        padding: layout.compact ? 16 : 28,
-        gap: 24,
-        maxWidth: 1180,
-        width: "100%",
-        alignSelf: "center",
-      }}
     >
-      <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
-        <View style={{ flex: 1 }}>
-          <Text style={{ color: c.foreground, fontSize: 25, fontWeight: "600" }}>Alliance Work</Text>
-          <Text style={{ color: c.foregroundMuted, marginTop: 5 }}>
-            Shared outcomes. Independent judgment.
-          </Text>
-        </View>
-        {button(creating ? "Close form" : "New room", () => setCreating(!creating))}
-      </View>
-      {error && (
-        <View
-          accessibilityRole="alert"
-          style={{ padding: 14, borderColor: c.border, borderWidth: 1, gap: 10 }}
-        >
-          <Text style={{ color: c.foreground }}>{error.message}</Text>
-          {button("Refresh", () => {
-            void data.refetch();
-            void profile.refetch();
-          })}
-        </View>
-      )}
-      {creating && (
-        <View style={{ gap: 12, paddingBottom: 20, borderBottomWidth: 1, borderColor: c.border }}>
-          <Text style={{ color: c.foreground, fontSize: 18, fontWeight: "600" }}>
-            Give the room an outcome
-          </Text>
-          <TextInput
-            accessibilityLabel="Room title"
-            placeholder="Room title"
-            placeholderTextColor={c.foregroundMuted}
-            style={inputStyle}
-            value={title}
-            onChangeText={setTitle}
-          />
-          <TextInput
-            accessibilityLabel="Project directory"
-            placeholder="Absolute project directory"
-            placeholderTextColor={c.foregroundMuted}
-            style={inputStyle}
-            value={cwd}
-            onChangeText={setCwd}
-            autoCapitalize="none"
-          />
-          <TextInput
-            accessibilityLabel="Room mission"
-            placeholder="What should this room achieve?"
-            placeholderTextColor={c.foregroundMuted}
-            style={[inputStyle, { minHeight: 100, textAlignVertical: "top" }]}
-            multiline
-            value={mission}
-            onChangeText={setMission}
-          />
-          <View style={{ alignItems: "flex-start" }}>
-            {button(
-              newRoom.isPending ? "Creating…" : "Create room",
-              () => newRoom.mutate(),
-              newRoom.isPending || !title.trim() || !cwd.trim() || !mission.trim(),
-              true,
-            )}
+      <ScrollView
+        contentContainerStyle={{
+          padding: compact ? 14 : 24,
+          gap: 18,
+          width: "100%",
+          maxWidth: 1440,
+          alignSelf: "center",
+        }}
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+          <Icon name="Activity" size={21} color={c.accent} />
+          <View style={{ flex: 1, gap: 3 }}>
+            <Text style={{ color: c.foreground, fontSize: 21, fontWeight: "600" }}>Alliance Work</Text>
+            <Text style={muted}>{host.label}</Text>
           </View>
+          <Button label="Add project" icon="FolderPlus" colors={c} onPress={() => setAdding(true)} />
+          {!compact && (
+            <Button
+              label="Refresh"
+              icon="RefreshCw"
+              colors={c}
+              onPress={() => void data.refetch()}
+              disabled={data.isFetching}
+            />
+          )}
         </View>
-      )}
-      {data.isPending && <Text style={{ color: c.foregroundMuted }}>Loading rooms…</Text>}
-      {!data.isPending && !room && !creating && (
-        <View style={{ paddingVertical: 48, gap: 12 }}>
-          <Text style={{ color: c.foreground, fontSize: 20 }}>Start with one clear outcome.</Text>
-          <Text style={{ color: c.foregroundMuted, maxWidth: 540 }}>
-            Create a room for a project. Bring in a Supervisor, work directly with a Lead, or assign a focused
-            task to a Peer. The team can grow when the work calls for it.
-          </Text>
-          <View style={{ alignItems: "flex-start" }}>
-            {button("Create the first room", () => setCreating(true), false, true)}
-          </View>
-        </View>
-      )}
-      {room && (
-        <>
-          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-            {data.data?.rooms.map((item) => (
-              <Pressable
-                key={item.id}
-                onPress={() => select(item.id)}
-                accessibilityRole="button"
-                accessibilityState={{ selected: item.id === room.id }}
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
+          {(
+            [
+              ["all", "Agents"],
+              ["working", "Working"],
+              ["attention", "Attention"],
+              ["idle", "Idle"],
+            ] as const
+          ).map(([key, label]) => (
+            <Pressable
+              key={key}
+              accessibilityRole="button"
+              accessibilityLabel={`${label}: ${counts[key]}`}
+              accessibilityState={{ selected: filter === key }}
+              onPress={() => setFilter(key)}
+              style={({ pressed }) => ({
+                flex: 1,
+                minWidth: compact ? 70 : 120,
+                padding: compact ? 10 : 14,
+                gap: 5,
+                borderWidth: 1,
+                borderRadius: 8,
+                borderColor: filter === key ? c.accent : c.border,
+                backgroundColor: pressed ? c.surface2 : c.surface1,
+              })}
+            >
+              <Text
                 style={{
-                  paddingVertical: 8,
-                  paddingHorizontal: 12,
-                  borderBottomWidth: item.id === room.id ? 2 : 0,
-                  borderColor: c.accent,
+                  color:
+                    key === "attention" && counts[key]
+                      ? c.statusWarning
+                      : key === "working"
+                        ? c.statusSuccess
+                        : c.foreground,
+                  fontSize: 24,
+                  fontWeight: "600",
+                  fontVariant: ["tabular-nums"],
                 }}
               >
-                <Text style={{ color: item.id === room.id ? c.foreground : c.foregroundMuted }}>
-                  {item.title}
-                </Text>
-              </Pressable>
+                {data.data ? counts[key] : "—"}
+              </Text>
+              <Text style={muted}>{label}</Text>
+            </Pressable>
+          ))}
+        </View>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+          <View
+            style={{
+              flex: 1,
+              flexDirection: "row",
+              alignItems: "center",
+              gap: 8,
+              borderWidth: 1,
+              borderColor: c.border,
+              borderRadius: 6,
+              paddingHorizontal: 10,
+            }}
+          >
+            <Icon name="Search" size={14} color={c.foregroundMuted} />
+            <TextInput
+              accessibilityLabel="Filter agents"
+              placeholder="Filter agents or projects…"
+              placeholderTextColor={c.foregroundMuted}
+              value={search}
+              onChangeText={setSearch}
+              autoCapitalize="none"
+              autoCorrect={false}
+              style={{ flex: 1, minWidth: 0, minHeight: 36, color: c.foreground, fontSize: 12 }}
+            />
+          </View>
+          <Button label="Archived" colors={c} selected={archived} onPress={() => setArchived(!archived)} />
+        </View>
+        {rooms.length > 1 && (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6 }}>
+            <Button
+              label="All projects"
+              selected={project === null}
+              colors={c}
+              onPress={() => setProject(null)}
+            />
+            {rooms.map((room) => (
+              <Button
+                key={room.id}
+                label={room.title}
+                selected={project === room.id}
+                colors={c}
+                onPress={() => setProject(room.id)}
+              />
             ))}
-          </View>
-          <View style={{ gap: 10 }}>
-            <Text style={{ color: c.foreground, fontSize: 20, fontWeight: "600" }}>{room.title}</Text>
-            <Text selectable style={{ color: c.foreground, lineHeight: 22 }}>
-              {room.mission}
+          </ScrollView>
+        )}
+        {data.error && (
+          <View style={{ gap: 8 }}>
+            <Text accessibilityRole="alert" style={{ color: c.statusDanger, fontSize: 12 }}>
+              {data.data ? "Update failed · showing last result. " : "Unable to load agents. "}
+              {data.error.message}
             </Text>
-            <Text selectable style={{ color: c.foregroundMuted, fontSize: 12 }}>
-              {room.cwd}
-            </Text>
+            <Button label="Retry" colors={c} onPress={() => void data.refetch()} disabled={data.isFetching} />
           </View>
-          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
-            <Text style={{ color: c.foreground, fontSize: 16, fontWeight: "600" }}>Agents & work</Text>
-            {button(
-              data.isFetching ? "Refreshing…" : "Refresh",
-              () => {
-                void data.refetch();
-              },
-              data.isFetching,
-            )}
+        )}
+        {data.isPending && <Text style={muted}>Loading…</Text>}
+        {!data.isPending && !data.error && !rooms.length && (
+          <View style={{ paddingVertical: 40, alignItems: "center", gap: 10 }}>
+            <Icon name="Activity" size={28} color={c.foregroundMuted} />
+            <Text style={cell}>No Alliance sessions</Text>
+            <Text style={muted}>Start an Alliance profile in any Paseo project.</Text>
           </View>
-          {!members.length && (
-            <Text style={{ color: c.foregroundMuted }}>
-              No agents yet. Choose a role and give it an assignment below.
-            </Text>
-          )}
-          {members.map((member) => (
+        )}
+        {!!rooms.length && !groups.length && <Text style={muted}>No matching agents</Text>}
+        {groups.map(({ room, members: rows }) => (
+          <View
+            key={room.id}
+            style={{ borderWidth: 1, borderColor: c.border, borderRadius: 8, overflow: "hidden" }}
+          >
             <View
-              key={member.id}
-              style={{ borderTopWidth: 1, borderColor: c.border, paddingTop: 14, gap: 10 }}
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 9,
+                paddingHorizontal: 14,
+                paddingVertical: 12,
+                backgroundColor: c.surface1,
+              }}
             >
+              <Icon name="Folder" size={15} color={c.foregroundMuted} />
+              <View style={{ flex: 1, minWidth: 0, gap: 3 }}>
+                <Text numberOfLines={1} style={{ ...cell, fontWeight: "600" }}>
+                  {room.title}
+                </Text>
+                <Text numberOfLines={1} ellipsizeMode="head" selectable style={muted}>
+                  {room.cwd}
+                </Text>
+              </View>
+              <Text style={muted}>{rows.length}</Text>
+              <Button label="Models" icon="Settings2" colors={c} onPress={() => setModelRoom(room)} />
+            </View>
+            {!compact && rows.length > 0 && (
               <View
                 style={{
-                  flexDirection: layout.compact ? "column" : "row",
-                  justifyContent: "space-between",
-                  gap: 10,
+                  flexDirection: "row",
+                  alignItems: "center",
+                  gap: 12,
+                  paddingHorizontal: 14,
+                  paddingVertical: 8,
+                  borderBottomWidth: 1,
+                  borderColor: c.border,
                 }}
               >
-                <View style={{ flex: 1, gap: 4 }}>
-                  <Text style={{ color: c.foreground, fontWeight: "600", fontSize: 15 }}>
-                    {member.role} · {member.status}
-                  </Text>
-                  <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>
-                    {member.provider} · acceptance: {member.decision}
-                  </Text>
-                  <Text selectable style={{ color: c.foregroundMuted, fontSize: 11 }}>
-                    {member.id}
-                  </Text>
-                </View>
-                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-                  {navigation && button("Open chat", () => navigation.openAgent({ agentId: member.id }))}
-                  {button(
-                    "Resume",
-                    () => {
-                      setResumeId(member.id);
-                      setResumePrompt(
-                        "Continue the existing assignment. Reconcile the latest artifacts and unfinished work first.",
-                      );
-                    },
-                    ["running", "starting", "initializing"].includes(member.status),
+                <Text style={{ ...muted, flex: 1 }}>AGENT</Text>
+                <Text style={{ ...muted, width: 84 }}>ROLE</Text>
+                <Text style={{ ...muted, width: 144 }}>MODEL</Text>
+                <Text style={{ ...muted, width: 105 }}>STATUS</Text>
+                <Text style={{ ...muted, width: 58, textAlign: "right" }}>UPDATED</Text>
+                <View style={{ width: 64 }} />
+              </View>
+            )}
+            {rows.map((member) => {
+              const state = activityState(member);
+              const color = c[state.color];
+              return (
+                <View
+                  key={member.id}
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    gap: compact ? 8 : 12,
+                    paddingHorizontal: 14,
+                    paddingVertical: 10,
+                    borderBottomWidth: 1,
+                    borderColor: c.border,
+                  }}
+                >
+                  <View style={{ flex: 1, minWidth: 0, gap: 4 }}>
+                    <Text numberOfLines={1} style={cell}>
+                      {member.title}
+                    </Text>
+                    {compact && (
+                      <Text numberOfLines={1} style={muted}>
+                        {member.role} · {member.model || member.provider.replace(/^alliance-/, "")}
+                      </Text>
+                    )}
+                    {member.error && (
+                      <Text numberOfLines={2} style={{ color: c.statusDanger, fontSize: 11 }}>
+                        {member.error}
+                      </Text>
+                    )}
+                  </View>
+                  {!compact && (
+                    <Text numberOfLines={1} style={{ ...muted, width: 84 }}>
+                      {member.role}
+                    </Text>
                   )}
-                  {button("Disposition", () => setReview(member.id))}
-                </View>
-              </View>
-              {member.lastOutcome && (
-                <Text style={{ color: c.foregroundMuted, fontSize: 12 }}>
-                  Last recorded turn: {member.lastOutcome}. Acceptance requires a separate disposition.
-                </Text>
-              )}
-              {member.error && <Text style={{ color: c.foreground }}>{member.error}</Text>}
-              {member.resultPath && (
-                <Text selectable style={{ color: c.foregroundMuted, fontSize: 11 }}>
-                  Result: {member.resultPath}
-                </Text>
-              )}
-              {resumeId === member.id && (
-                <View style={{ gap: 8 }}>
-                  <TextInput
-                    accessibilityLabel="Resume instructions"
-                    multiline
-                    value={resumePrompt}
-                    onChangeText={setResumePrompt}
-                    style={[inputStyle, { minHeight: 80 }]}
-                  />
-                  {button(
-                    "Continue assignment",
-                    () => continueMember.mutate(),
-                    continueMember.isPending || !resumePrompt.trim(),
-                    true,
+                  {!compact && (
+                    <Text numberOfLines={1} style={{ ...muted, width: 144 }}>
+                      {member.model || member.provider.replace(/^alliance-/, "")}
+                    </Text>
+                  )}
+                  <View
+                    style={{ width: compact ? 80 : 105, flexDirection: "row", alignItems: "center", gap: 6 }}
+                  >
+                    <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: color }} />
+                    <Text numberOfLines={1} style={{ color, fontSize: 11, flexShrink: 1 }}>
+                      {state.label}
+                    </Text>
+                  </View>
+                  {!compact && (
+                    <Text style={{ ...muted, width: 58, textAlign: "right", fontVariant: ["tabular-nums"] }}>
+                      {relativeTime(member.updatedAt, now)}
+                    </Text>
+                  )}
+                  {navigation && (
+                    <View style={{ width: 64 }}>
+                      <Button
+                        label="Open"
+                        icon="ArrowUpRight"
+                        colors={c}
+                        onPress={() => navigation.openAgent({ agentId: member.id, serverId: host.id })}
+                      />
+                    </View>
                   )}
                 </View>
-              )}
-              {review === member.id && (
-                <View style={{ gap: 8 }}>
-                  <TextInput
-                    accessibilityLabel="Candidate identity"
-                    placeholder="Candidate SHA or immutable artifact"
-                    placeholderTextColor={c.foregroundMuted}
-                    value={candidate}
-                    onChangeText={setCandidate}
-                    style={inputStyle}
+              );
+            })}
+            {!rows.length && (
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 12, padding: 14 }}>
+                <Text style={{ ...muted, flex: 1 }}>No agents</Text>
+                {navigation && (
+                  <Button
+                    label="Open project"
+                    icon="ArrowUpRight"
+                    colors={c}
+                    onPress={() =>
+                      navigation.openWorkspace({ workspaceId: room.workspaceId, serverId: host.id })
+                    }
                   />
-                  <TextInput
-                    accessibilityLabel="Disposition evidence"
-                    placeholder="What was verified? What remains?"
-                    placeholderTextColor={c.foregroundMuted}
-                    multiline
-                    value={evidence}
-                    onChangeText={setEvidence}
-                    style={[inputStyle, { minHeight: 80 }]}
-                  />
-                  <View style={{ flexDirection: "row", gap: 8 }}>
-                    {button(
-                      "Accept candidate",
-                      () => decision.mutate("accepted"),
-                      decision.isPending || !candidate.trim() || !evidence.trim(),
-                    )}
-                    {button(
-                      "Reject candidate",
-                      () => decision.mutate("rejected"),
-                      decision.isPending || !candidate.trim() || !evidence.trim(),
-                    )}
-                    {button("Cancel", () => setReview(null))}
-                  </View>
-                </View>
-              )}
-            </View>
-          ))}
-          <View style={{ gap: 12, borderTopWidth: 1, borderColor: c.border, paddingTop: 24 }}>
-            <Text style={{ color: c.foreground, fontSize: 17, fontWeight: "600" }}>Start an assignment</Text>
-            <View>
-              <Text style={label}>Responsibility</Text>
-              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
-                {Role.options.map((item) => (
-                  <View key={item}>{button(item, () => setRole(item), false, item === role)}</View>
-                ))}
+                )}
               </View>
-            </View>
-            <View>
-              <Text style={label}>Harness</Text>
-              <View style={{ flexDirection: "row", gap: 8 }}>
-                {Harness.options.map((item) => (
-                  <View key={item}>
-                    {button(
-                      item,
-                      () => {
-                        if (item !== harness) setModel("");
-                        setHarness(item);
-                      },
-                      false,
-                      item === harness,
-                    )}
-                  </View>
-                ))}
-              </View>
-            </View>
-            <View>
-              <Text style={label}>Model</Text>
-              <TextInput
-                accessibilityLabel="Model ID"
-                value={model}
-                onChangeText={setModel}
-                autoCapitalize="none"
-                placeholder="Choose below or enter a model ID"
-                placeholderTextColor={c.foregroundMuted}
-                style={inputStyle}
-              />
-              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
-                {models.data?.models?.map((item) => (
-                  <View key={item.id}>
-                    {button(item.label || item.id, () => setModel(item.id), false, item.id === model)}
-                  </View>
-                ))}
-              </View>
-              {models.isPending && <Text style={label}>Reading the provider catalog…</Text>}
-              {models.error && <Text style={label}>{models.error.message}</Text>}
-            </View>
-            <TextInput
-              accessibilityLabel="Assignment"
-              placeholder="Outcome, scope and what will count as done…"
-              placeholderTextColor={c.foregroundMuted}
-              multiline
-              value={prompt}
-              onChangeText={setPrompt}
-              style={[inputStyle, { minHeight: 120, textAlignVertical: "top" }]}
-            />
-            <View style={{ alignItems: "flex-start" }}>
-              {button(
-                newMember.isPending ? "Starting…" : `Start ${role}`,
-                () => newMember.mutate(),
-                newMember.isPending || !model.trim() || !prompt.trim(),
-                true,
-              )}
-            </View>
-            <Text style={label}>
-              Uses the role’s independent home. Configure shared Codex auth or sign in to this role before
-              starting.
-            </Text>
+            )}
           </View>
-        </>
+        ))}
+      </ScrollView>
+      {modelRoom && (
+        <ModelSettings
+          roomId={modelRoom.id}
+          title={modelRoom.title}
+          theme={theme}
+          hostId={host.id}
+          onClose={() => setModelRoom(null)}
+        />
       )}
-      {profile.data && (
-        <Text selectable style={{ color: c.foregroundMuted, fontSize: 11 }}>
-          Alliance home: {profile.data.home} · {profile.data.profiles.length} role profiles
-        </Text>
+      {adding && (
+        <ProjectPicker
+          theme={theme}
+          host={host}
+          onClose={() => setAdding(false)}
+          onCreated={(id) => {
+            setProject(id);
+            setFilter("all");
+            setSearch("");
+            setAdding(false);
+            void cache.invalidateQueries({ queryKey });
+          }}
+        />
       )}
-    </ScrollView>
+    </View>
   );
 }

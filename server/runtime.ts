@@ -2,13 +2,17 @@ import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import type { PaseoApi } from "@getpaseo/client";
 import type { RpcInput } from "@getpaseo/plugin";
 import type { PluginHookAgent, PluginTurnOutcome } from "@getpaseo/plugin/server";
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
+import { validateEvidence } from "../server/evidence.mjs";
+import { projectSkills, skillCatalog } from "../server/project-skills.mjs";
 import type { memberLaunch, RoleName, RoomRecord } from "../shared/contracts";
+import { policyInstruction, type TaskDifficulty } from "../shared/model-policy";
+import { chooseModel } from "./model-policy";
 import { verifyProfile } from "./profile-integrity.mjs";
 import { RoomStore } from "./store";
 
@@ -66,6 +70,7 @@ export class AllianceRuntime {
   readonly home: string;
   store!: RoomStore;
   private manifest!: Manifest;
+  private roomWrite: Promise<unknown> = Promise.resolve();
   constructor(home: string) {
     this.home = resolve(home || process.env.ALLIANCE_WORK_HOME || join(homedir(), ".alliance-work"));
   }
@@ -94,7 +99,34 @@ export class AllianceRuntime {
       })),
     };
   }
-  async roomFor(cwd: string): Promise<RoomRecord> {
+  async modelCatalog(roomId: string, harness: string, role: RoleName, paseo: PaseoApi) {
+    const room = this.store.room(roomId);
+    const result = await paseo.providers.listModels(`alliance-${harness}-${role}`, { cwd: room.cwd });
+    if (result.error || !result.models) throw new Error(result.error || "Provider model catalog unavailable");
+    return result.models;
+  }
+  async selectModel(
+    roomId: string,
+    provider: string,
+    paseo: PaseoApi,
+    model?: string,
+    effort?: string,
+    difficulty?: TaskDifficulty,
+  ) {
+    const identity = allianceProvider(provider);
+    if (!identity) throw new Error("Not an Alliance provider");
+    const catalog = await this.modelCatalog(roomId, identity.harness, identity.role, paseo);
+    return chooseModel(
+      this.store.modelPolicy(roomId).policy,
+      identity.role,
+      identity.harness,
+      catalog,
+      model,
+      effort,
+      difficulty,
+    );
+  }
+  private async findRoom(cwd: string): Promise<RoomRecord | null> {
     const path = await realpath(cwd);
     const rooms = this.store.rooms();
     const exact = rooms.find((room) => room.cwd === path);
@@ -106,23 +138,44 @@ export class AllianceRuntime {
         ).filter((room): room is RoomRecord => Boolean(room))
       : [];
     if (matches.length === 1) return matches[0];
-    throw new Error(
-      matches.length
-        ? "Several rooms match this worktree. Open a room for this checkout before launching."
-        : "Create an Alliance room for this checkout before launching an Alliance role.",
-    );
+    if (matches.length)
+      throw new Error("Several rooms match this worktree. Add this checkout explicitly to choose its room.");
+    return null;
+  }
+  async roomFor(cwd: string): Promise<RoomRecord> {
+    const room = await this.findRoom(cwd);
+    if (!room) throw new Error("No Alliance room exists for this checkout");
+    return room;
+  }
+  private serializeRoom<T>(write: () => Promise<T>): Promise<T> {
+    const next = this.roomWrite.then(write);
+    this.roomWrite = next.catch(() => {});
+    return next;
+  }
+  async ensureRoom(cwd: string, paseo: PaseoApi, workspaceId?: string | null) {
+    return this.serializeRoom(async () => {
+      const existing = await this.findRoom(cwd);
+      return existing ?? this.saveRoom({ cwd, title: basename(cwd), mission: "" }, paseo, workspaceId);
+    });
   }
   async createRoom(input: { title: string; cwd: string; mission: string }, paseo: PaseoApi) {
+    return this.serializeRoom(() => this.saveRoom(input, paseo));
+  }
+  private async saveRoom(
+    input: { title: string; cwd: string; mission: string },
+    paseo: PaseoApi,
+    workspaceId?: string | null,
+  ) {
     if (!isAbsolute(input.cwd)) throw new Error("Project directory must be absolute");
     const cwd = await realpath(input.cwd);
     if (!(await lstat(cwd)).isDirectory()) throw new Error("Project directory is not a directory");
-    if (this.store.rooms().some((room) => room.cwd === cwd))
-      throw new Error("This checkout already has an Alliance room");
-    const workspace = await paseo.workspaces.open(cwd);
+    const existing = this.store.rooms().find((room) => room.cwd === cwd);
+    if (existing) return existing;
+    const workspace = workspaceId ? paseo.workspaces.ref(workspaceId) : await paseo.workspaces.open(cwd);
     const id = randomUUID();
     const room: RoomRecord = {
       id,
-      title: input.title,
+      title: input.title.trim() || basename(cwd),
       cwd,
       workspaceId: workspace.id,
       mission: input.mission,
@@ -136,27 +189,44 @@ export class AllianceRuntime {
     this.store.addRoom(room);
     return room;
   }
-  async instruction(provider: string, cwd: string) {
+  async instruction(provider: string, cwd: string, paseo?: PaseoApi) {
     const profile = await this.profile(provider);
-    const room = await this.roomFor(cwd);
-    return `${await readFile(join(profile.home, "root-instructions.md"), "utf8")}\n\n# Current Alliance room\nRoom: ${room.id}\nTitle: ${room.title}\nMission: ${room.mission}\nProject: ${room.cwd}\nDurable assignments and candidates: ${room.artifacts}\nYour exact Seatwork skill files: ${join(profile.home, "skills")}\nAll delegation uses native Paseo create_agent. Its provider value is alias/model, for example alliance-codex-peer/gpt-6.1-sol. Cross-role aliases are distinct providers: pass settings.modeId explicitly from the target provider catalog, within the assignment permission limits. Keep the existing model unless a different one fits the work better. Consult list_providers for valid modes and model IDs.\n`;
+    const room = paseo ? await this.ensureRoom(cwd, paseo) : await this.roomFor(cwd);
+    const { policy, revision } = this.store.modelPolicy(room.id);
+    const skills = skillCatalog(await projectSkills(cwd));
+    return `${await readFile(join(profile.home, "root-instructions.md"), "utf8")}\n\n# Current Alliance room\nRoom: ${room.id}\nTitle: ${room.title}\nMission: ${room.mission || "Follow the Human's assignment in this conversation."}\nProject: ${room.cwd}\nDurable assignments and candidates: ${room.artifacts}\nYour exact Seatwork skill files: ${join(profile.home, "skills")}\nDelegate on this host using native Paseo create_agent. Its provider value is alias/model, for example alliance-codex-peer/gpt-6.1-sol. For another host, use Paseo CLI with an explicit --host and remote workspace. Cross-role aliases are distinct providers: pass settings.modeId explicitly from the target provider catalog, within the assignment permission limits. Consult list_providers for valid modes, model IDs and effort IDs; pass the selected effort explicitly.\n\n${policyInstruction(policy, revision)}\n\n${skills}\n\nAlliance CLI: ${process.execPath} ${join(this.manifest.root, "scripts/cli.mjs")} --home ${this.home}. Use its verify/accept commands to bind evidence to the candidate. Run --help for exact arguments.`;
   }
   async bind(agent: PluginHookAgent) {
     const identity = allianceProvider(agent.provider);
     if (!identity) return;
     const existing = this.store.member(agent.id);
-    if (existing) {
-      if (agent.parentAgentId) this.store.updateMember(agent.id, { parentId: agent.parentAgentId });
+    if (existing?.assignment) {
+      if (agent.parentAgentId)
+        this.store.updateMember(agent.id, { parentId: agent.parentAgentId, cwd: agent.cwd });
       return;
     }
     const room = await this.roomFor(agent.cwd);
+    const assignment = join(room.artifacts, "assignments", `${agent.id}.md`);
+    await writeAtomic(
+      assignment,
+      `# Native assignment ${agent.id}\n\nOwner: ${agent.parentAgentId ?? "Human"}\nAgent: ${agent.id}\nCheckout: ${agent.cwd}\n\nThe native conversation is the authority for the Human's outcome and subsequent direction.\nRead get_agent_activity for this agent; save acceptance conditions and substantive handbacks here or link the owner's brief.\nInitial chat text is not exposed by Paseo's create hook; this record does not invent it.\n`,
+    );
+    if (existing) {
+      this.store.updateMember(agent.id, {
+        assignment,
+        cwd: agent.cwd,
+        parentId: agent.parentAgentId ?? existing.parentId,
+      });
+      return;
+    }
     this.store.saveMember({
       id: agent.id,
       roomId: room.id,
       role: identity.role,
       provider: agent.provider,
       parentId: agent.parentAgentId,
-      assignment: "",
+      assignment,
+      cwd: agent.cwd,
       lastOutcome: null,
       resultPath: null,
       decision: "open",
@@ -173,10 +243,21 @@ export class AllianceRuntime {
     const previous = this.store.byLaunch(room.id, input.key);
     if (previous && previous.launchHash !== hash)
       throw new Error("Launch key already belongs to a different assignment");
+    const selected = await this.selectModel(
+      room.id,
+      provider,
+      paseo,
+      previous?.launchModel ?? input.model,
+      previous?.launchEffort ?? input.thinking,
+      input.difficulty,
+    );
     const id = previous?.id ?? randomUUID();
     const assignment = join(room.artifacts, "assignments", `${id}.md`);
     if (!previous) {
-      await writeAtomic(assignment, `# Assignment ${id}\n\nRole: ${input.role}\n\n${input.prompt}\n`);
+      await writeAtomic(
+        assignment,
+        `# Assignment ${id}\n\nRole: ${input.role}\nModel: ${provider}/${selected.model}\nEffort: ${selected.thinkingOptionId ?? "provider default"}\nDifficulty: ${input.difficulty ?? "owner-assessed"}\nPolicy revision: ${this.store.modelPolicy(room.id).revision}\n\n${input.prompt}\n`,
+      );
       this.store.saveMember({
         id,
         roomId: room.id,
@@ -184,12 +265,15 @@ export class AllianceRuntime {
         provider,
         parentId: null,
         assignment,
+        cwd: room.cwd,
         lastOutcome: null,
         resultPath: null,
         decision: "open",
         decisionEvidence: null,
         launchKey: input.key,
         launchHash: hash,
+        launchModel: selected.model,
+        launchEffort: selected.thinkingOptionId,
       });
     }
     const workspace = paseo.workspaces.ref(room.workspaceId);
@@ -198,8 +282,8 @@ export class AllianceRuntime {
       idempotencyKey: `alliance/${room.id}/${input.key}`,
       title: `[${input.role}] ${room.title}`,
       config: {
-        provider: `${provider}/${input.model}`,
-        thinkingOptionId: input.thinking,
+        provider: `${provider}/${selected.model}`,
+        thinkingOptionId: selected.thinkingOptionId,
         // Paseo leaves an omitted mode to the fresh harness, whose default may be read-only.
         modeId: input.mode ?? (input.harness === "codex" ? "auto" : undefined),
       },
@@ -212,13 +296,28 @@ export class AllianceRuntime {
       this.store.members().map(async (member) => {
         try {
           const refreshed = await paseo.agents.ref(member.id).refresh();
+          const agent = refreshed?.agent;
           return {
             ...member,
-            status: refreshed?.agent.status ?? "unavailable",
-            error: refreshed?.agent.lastError ?? null,
+            title: agent?.title ?? member.role,
+            model: agent?.runtimeInfo?.model ?? agent?.model ?? null,
+            updatedAt: agent?.updatedAt ? String(agent.updatedAt) : null,
+            archived: agent?.archivedAt != null,
+            status: agent?.pendingPermissions?.length
+              ? "awaiting_permission"
+              : (agent?.status ?? "unavailable"),
+            error: agent?.lastError ?? null,
           };
         } catch (error) {
-          return { ...member, status: "unknown", error: (error as Error).message };
+          return {
+            ...member,
+            title: member.role,
+            model: null,
+            updatedAt: null,
+            archived: false,
+            status: "unknown",
+            error: (error as Error).message,
+          };
         }
       }),
     );
@@ -279,11 +378,16 @@ export class AllianceRuntime {
     const member = this.store.member(id);
     if (!member) throw new Error("Unknown Alliance member");
     const room = this.store.room(member.roomId);
+    const report =
+      decision === "accepted" ? await validateEvidence(evidence, member.cwd ?? room.cwd, candidate) : null;
     const path = join(room.artifacts, "dispositions", `${randomUUID()}.json`);
     await writeAtomic(
       path,
-      JSON.stringify({ agentId: id, decision, candidate, evidence, at: new Date().toISOString() }, null, 2) +
-        "\n",
+      JSON.stringify(
+        { agentId: id, decision, candidate, evidence, verification: report, at: new Date().toISOString() },
+        null,
+        2,
+      ) + "\n",
     );
     this.store.updateMember(id, { decision, decisionEvidence: path });
     return { saved: true as const };

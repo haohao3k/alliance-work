@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { PaseoApi } from "@getpaseo/client";
 import { profileEnvironment } from "../scripts/launch.mjs";
 import { prepareProfiles, verifyProfile } from "../scripts/profiles.mjs";
+import { runVerification } from "../server/evidence.mjs";
 import { composeInstruction } from "../server/instructions";
 import { AllianceRuntime } from "../server/runtime";
 import { temporary } from "./temp";
@@ -30,7 +32,7 @@ async function fixture() {
     sends = 0,
     status = "idle";
   const identities = new Set<string>();
-  const launchConfigs: { modeId?: string }[] = [];
+  const launchConfigs: { modeId?: string; thinkingOptionId?: string }[] = [];
   const workspace = {
     id: "workspace-1",
     agents: {
@@ -45,7 +47,17 @@ async function fixture() {
     },
   };
   const paseo = {
-    workspaces: { open: async () => workspace, ref: () => workspace },
+    providers: {
+      listModels: async (provider: string) => ({
+        models: ["gpt-6.1-sol", "gpt-6-astra", "claude-opus-5-5", "claude-sonnet-5-5"].map((id) => ({
+          provider,
+          id,
+          label: id,
+          thinkingOptions: ["low", "medium", "high", "xhigh"].map((id) => ({ id, label: id })),
+        })),
+      }),
+    },
+    workspaces: { open: async () => workspace, ref: (id: string) => ({ ...workspace, id }) },
     agents: {
       ref: () => ({
         refresh: async () => ({ agent: { status, pendingPermissions: [], lastError: null } }),
@@ -79,7 +91,7 @@ test("role homes own exact Seatwork bytes and never inherit ambient credentials 
   try {
     const profile = f.manifest.profiles["codex-peer"];
     await verifyProfile(profile);
-    assert.equal(profile.skillDirectories.length, 5);
+    assert.equal(profile.skillDirectories.length, 6);
     const env = profileEnvironment(profile, f.home, {
       HOME: "/daily",
       CODEX_HOME: "/daily/codex",
@@ -121,13 +133,26 @@ test("a retried launch keeps one native agent and the durable assignment", async
       key: "one-assignment",
       role: "peer" as const,
       harness: "codex" as const,
-      model: "test-model",
+      model: "gpt-6.1-sol",
       prompt: "Produce an artifact and verification.",
     };
     const first = await f.runtime.launch(input, f.paseo);
+    const settings = f.runtime.store.modelPolicy(f.room.id);
+    for (const route of settings.policy.routes) {
+      if (route.model === "gpt-6.1-sol") {
+        route.difficulties = route.effort === "medium" ? ["routine", "standard"] : ["complex"];
+      }
+    }
+    f.runtime.store.saveModelPolicy(f.room.id, settings.policy, settings.revision);
     const second = await f.runtime.launch(input, f.paseo);
     assert.equal(first.agentId, second.agentId);
     assert.equal(f.count().creates, 1);
+    assert.equal(f.launchConfigs[0].thinkingOptionId, "high");
+    assert.equal(
+      f.launchConfigs[1].thinkingOptionId,
+      "high",
+      "Retries retain their resolved route despite changed preferences",
+    );
     assert.equal(
       f.launchConfigs[0].modeId,
       "auto",
@@ -151,7 +176,7 @@ test("an explicit Codex permission mode survives Alliance launch", async () => {
         key: "explicit-mode",
         role: "peer",
         harness: "codex",
-        model: "test-model",
+        model: "gpt-6.1-sol",
         prompt: "Inspect only",
         mode: "read-only",
       },
@@ -162,10 +187,33 @@ test("an explicit Codex permission mode survives Alliance launch", async () => {
     f.runtime.close();
   }
 });
+test("Lead can explicitly choose a worker model and effort", async () => {
+  const f = await fixture();
+  try {
+    const result = await f.runtime.launch(
+      {
+        roomId: f.room.id,
+        key: "flexible-lead",
+        role: "lead",
+        harness: "codex",
+        model: "gpt-6.1-sol",
+        thinking: "xhigh",
+        prompt: "Own this workstream",
+      },
+      f.paseo,
+    );
+    assert.equal(f.count().creates, 1);
+    assert.equal(f.runtime.store.member(result.agentId)?.launchModel, "gpt-6.1-sol");
+    assert.equal(f.launchConfigs[0].thinkingOptionId, "xhigh");
+  } finally {
+    f.runtime.close();
+  }
+});
+
 test("canceled/failed/completed turns preserve ownership and never accept their own artifact, across restart", async () => {
   const f = await fixture();
   const { agentId } = await f.runtime.launch(
-    { roomId: f.room.id, key: "work", role: "peer", harness: "codex", model: "test-model", prompt: "Task" },
+    { roomId: f.room.id, key: "work", role: "peer", harness: "codex", model: "gpt-6.1-sol", prompt: "Task" },
     f.paseo,
   );
   const agent = {
@@ -189,14 +237,21 @@ test("canceled/failed/completed turns preserve ownership and never accept their 
   try {
     assert.equal(member(reopened, agentId).lastOutcome, "completed");
     assert.equal(member(reopened, agentId).decision, "open");
-    await reopened.disposition(agentId, "accepted", "sha:123", "Integration check passed");
+    execFileSync("git", ["init", "-q", f.cwd]);
+    const proof = await runVerification({
+      cwd: f.cwd,
+      output: join(f.root, "proof"),
+      command: [process.execPath, "-e", "process.exit(0)"],
+      scenario: "disposition-persistence",
+    });
+    await reopened.disposition(agentId, "accepted", proof.report.candidate.digest, proof.path);
     assert.equal(member(reopened, agentId).decision, "accepted");
     const disposition = member(reopened, agentId).decisionEvidence;
     assert(disposition);
     await reopened.startTurn(agent, "next-turn");
     assert.equal(member(reopened, agentId).decision, "open");
     assert.equal(member(reopened, agentId).resultPath, null);
-    assert.equal(JSON.parse(await readFile(disposition, "utf8")).candidate, "sha:123");
+    assert.equal(JSON.parse(await readFile(disposition, "utf8")).candidate, proof.report.candidate.digest);
   } finally {
     reopened.close();
   }
@@ -205,7 +260,14 @@ test("resume refuses to interrupt active work and late turn receipts cannot over
   const f = await fixture();
   try {
     const { agentId } = await f.runtime.launch(
-      { roomId: f.room.id, key: "work", role: "peer", harness: "codex", model: "test-model", prompt: "Task" },
+      {
+        roomId: f.room.id,
+        key: "work",
+        role: "peer",
+        harness: "codex",
+        model: "gpt-6.1-sol",
+        prompt: "Task",
+      },
       f.paseo,
     );
     f.status("running");
@@ -241,4 +303,100 @@ test("native inheritance replaces the generated role without duplicating it or l
   assert(peer.includes("PEER_ROLE"));
   assert(peer.includes("HUMAN_CONSTRAINT"));
   assert.equal(composeInstruction("PEER_ROLE", peer), peer);
+});
+
+test("native Alliance launch creates a missing room once and reuses it across concurrent starts and restart", async () => {
+  const f = await fixture();
+  try {
+    const cwd = join(f.root, "new-project");
+    await mkdir(cwd);
+    const alias = join(f.root, "project-alias");
+    await symlink(cwd, alias);
+    const instructions = await Promise.all([
+      f.runtime.instruction("alliance-codex-hq", cwd, f.paseo),
+      f.runtime.instruction("alliance-codex-hq", alias, f.paseo),
+    ]);
+    const first = await f.runtime.roomFor(cwd);
+    const second = await f.runtime.roomFor(alias);
+    assert.equal(first.id, second.id);
+    assert(instructions.every((instruction) => instruction.includes(first.id)));
+    assert.equal(f.runtime.store.rooms().length, 2);
+    const instruction = await f.runtime.instruction("alliance-codex-hq", cwd, f.paseo);
+    assert(instruction.includes(first.id));
+    assert.equal(f.runtime.store.rooms().length, 2);
+    // Re-adding a known path cannot replace the original mission or workspace.
+    const known = await f.runtime.createRoom(
+      { cwd: f.cwd, title: "Overwrite", mission: "Overwrite" },
+      f.paseo,
+    );
+    assert.deepEqual(known, f.room);
+    const reopened = await new AllianceRuntime(f.home).ready();
+    try {
+      assert.equal((await reopened.ensureRoom(cwd, f.paseo)).id, first.id);
+      assert.equal(reopened.store.rooms().length, 2);
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    f.runtime.close();
+  }
+});
+
+test("a resumed native session binds a missing room to its existing workspace", async () => {
+  const f = await fixture();
+  try {
+    const cwd = join(f.root, "resumed-project");
+    await mkdir(cwd);
+    const room = await f.runtime.ensureRoom(cwd, f.paseo, "existing-workspace");
+    // A reference to the actual workspace must be used rather than opening another one.
+    assert.equal(room.workspaceId, "existing-workspace");
+    await assert.rejects(f.runtime.ensureRoom(join(cwd, "missing"), f.paseo));
+    assert.equal(f.runtime.store.rooms().length, 2);
+  } finally {
+    f.runtime.close();
+  }
+});
+
+test("a linked Git worktree reuses its project's room; ambiguous roots never create another room", async () => {
+  const f = await fixture();
+  try {
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: f.cwd, stdio: "pipe" });
+    git("init");
+    git(
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.test",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "initial",
+    );
+    const worktree = join(f.root, "worktree");
+    git("worktree", "add", "-b", "worker", worktree);
+    assert.equal((await f.runtime.ensureRoom(worktree, f.paseo)).id, f.room.id);
+    assert.equal(f.runtime.store.rooms().length, 1);
+    // An explicit separate room is allowed; it makes a third linked checkout ambiguous.
+    await f.runtime.createRoom({ cwd: worktree, title: "Separate", mission: "Separate scope" }, f.paseo);
+    const third = join(f.root, "third");
+    git("worktree", "add", "-b", "other", third);
+    await assert.rejects(f.runtime.ensureRoom(third, f.paseo), /Several rooms/);
+    assert.equal(f.runtime.store.rooms().length, 2);
+    assert.equal((await f.runtime.ensureRoom(worktree, f.paseo)).title, "Separate");
+  } finally {
+    f.runtime.close();
+  }
+});
+
+test("acceptance refuses invented candidate and evidence identities", async () => {
+  const f = await fixture();
+  try {
+    const { agentId } = await f.runtime.launch(
+      { roomId: f.room.id, key: "proof", role: "peer", harness: "codex", prompt: "Verify an outcome" },
+      f.paseo,
+    );
+    await assert.rejects(f.runtime.disposition(agentId, "accepted", "invented", "not-a-report"));
+  } finally {
+    f.runtime.close();
+  }
 });

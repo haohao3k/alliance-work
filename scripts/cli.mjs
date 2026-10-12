@@ -1,7 +1,11 @@
 #!/usr/bin/env node
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import { Evidence, runVerification } from "../server/evidence.mjs";
+import { projectSkills, registerSkill } from "../server/project-skills.mjs";
 import { authStatus, setAuthSource } from "./auth.mjs";
 import { downloadRelease, isNewerRelease, releaseInfo, run } from "./distribution.mjs";
 import { activate, doctor, installation, withMaintenance } from "./maintenance.mjs";
@@ -11,6 +15,8 @@ import { projectRoot } from "./profiles.mjs";
 const args = process.argv.slice(2);
 const flags = {};
 const positional = [];
+let checkCommand = [];
+const repeated = { "--input": [], "--artifact": [], "--unverified": [] };
 const values = new Set([
   "--home",
   "--paseo-home",
@@ -20,6 +26,15 @@ const values = new Set([
   "--codex-auth-from",
   "--from",
   "--version-tag",
+  "--project",
+  "--output",
+  "--scenario",
+  "--kind",
+  "--target",
+  "--agent",
+  "--report",
+  "--assignment",
+  "--timeout-ms",
 ]);
 const switches = new Set([
   "--help",
@@ -47,6 +62,17 @@ const help = `Alliance Work — isolated agent rooms on native Paseo
   alliance-work update --check        Read latest private GitHub release; change nothing
   alliance-work update                Verify, stage, check and activate the latest release
   alliance-work rollback              Activate the previous installation when idle
+  alliance-work skills list [--project PATH]
+  alliance-work skills add .agents/skills/NAME [--project PATH]
+  alliance-work verify --scenario NAME [--project PATH] -- COMMAND [ARGS...]
+  alliance-work accept --agent ID --report /absolute/report.json
+
+Verification options: --kind test|runtime|analysis (default test), --target LABEL,
+  --input FILE (repeat for ignored runtime inputs), --artifact FILE (repeat),
+  --unverified REASON (repeat), --output DIR (outside checkout), --timeout-ms 600000.
+Commands run directly without a shell. Lead chooses checks and review depth.
+PASS describes the selected check, not untested product behavior. Changed candidates
+or artifacts cannot reuse an old report. Project skills apply to new sessions.
 
 Options: --home PATH, --paseo-home PATH, --bin-dir PATH, --port 6771,
          --codex-auth-from PATH, --separate-auth, --json
@@ -56,7 +82,14 @@ Paseo is pinned per release. Maintenance never restarts a running daemon.
 try {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    if (values.has(arg)) {
+    if (arg === "--") {
+      checkCommand = args.slice(i + 1);
+      break;
+    }
+    if (Object.hasOwn(repeated, arg)) {
+      if (!args[i + 1]) throw new Error(`Missing value for ${arg}`);
+      repeated[arg].push(args[++i]);
+    } else if (values.has(arg)) {
       if (!args[i + 1] || args[i + 1].startsWith("--")) throw new Error(`Missing value for ${arg}`);
       flags[arg] = args[++i];
     } else if (switches.has(arg)) flags[arg] = true;
@@ -73,7 +106,9 @@ try {
     console.log(help);
     process.exit(0);
   }
-  const home = resolve(flags["--home"] ?? join(homedir(), ".alliance-work"));
+  const home = resolve(
+    flags["--home"] ?? process.env.ALLIANCE_WORK_HOME ?? join(homedir(), ".alliance-work"),
+  );
   const output = (value) => console.log(typeof value === "string" ? value : JSON.stringify(value, null, 2));
   const installOptions = {
     home,
@@ -84,7 +119,72 @@ try {
     authFrom: flags["--codex-auth-from"],
     separateAuth: !!flags["--separate-auth"],
   };
-  if (command === "install" || (command === "setup" && flags["--refresh"])) {
+  if (command === "skills") {
+    const cwd = resolve(flags["--project"] ?? process.cwd());
+    if (positional[1] === "add" && positional[2]) output(await registerSkill(cwd, positional[2]));
+    else if (positional[1] !== "list")
+      throw new Error("Usage: alliance-work skills list | skills add .agents/skills/NAME");
+    const bundle = await projectSkills(cwd);
+    output({
+      root: bundle.root,
+      revision: bundle.digest,
+      skills: bundle.skills.map(({ name, description, directory }) => ({ name, description, directory })),
+    });
+  } else if (command === "verify") {
+    const timeoutMs = Number(flags["--timeout-ms"] ?? 600000);
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error("Invalid verification timeout");
+    const result = await runVerification({
+      cwd: resolve(flags["--project"] ?? process.cwd()),
+      output: resolve(
+        flags["--output"] ?? join(process.env.ALLIANCE_ARTIFACTS ?? home, "evidence", randomUUID()),
+      ),
+      command: checkCommand,
+      scenario: flags["--scenario"],
+      kind: flags["--kind"] ?? "test",
+      target: flags["--target"],
+      inputs: repeated["--input"],
+      artifacts: repeated["--artifact"],
+      unverified: repeated["--unverified"],
+      assignment: flags["--assignment"] ?? process.env.ALLIANCE_ASSIGNMENT ?? null,
+      agentId: process.env.PASEO_AGENT_ID ?? null,
+      timeoutMs,
+    });
+    output({
+      report: result.path,
+      candidate: result.report.candidate.digest,
+      verdict: result.report.verdict,
+      kind: result.report.kind,
+      unverified: result.report.unverified,
+    });
+    if (result.report.verdict !== "PASS") process.exitCode = 1;
+  } else if (command === "accept") {
+    if (!flags["--agent"] || !flags["--report"])
+      throw new Error("Usage: alliance-work accept --agent ID --report /absolute/report.json");
+    const reportPath = resolve(flags["--report"]);
+    const report = Evidence.parse(JSON.parse(await readFile(reportPath, "utf8")));
+    const current = await installation(home);
+    if (!current) throw new Error("No Alliance installation exists for this home");
+    const config = JSON.parse(await readFile(join(current.paseoHome, "config.json"), "utf8"));
+    const client = new DaemonClient({
+      url: `ws://${config.daemon.listen}/ws`,
+      clientId: "alliance-acceptance",
+      password: process.env.ALLIANCE_PASEO_PASSWORD,
+      connectTimeoutMs: 10000,
+    });
+    try {
+      await client.connect();
+      output(
+        await client.invokePluginRpc("alliance-work", "members.disposition", {
+          agentId: flags["--agent"],
+          decision: "accepted",
+          candidate: report.candidate.digest,
+          evidence: reportPath,
+        }),
+      );
+    } finally {
+      await client.close();
+    }
+  } else if (command === "install" || (command === "setup" && flags["--refresh"])) {
     if (flags["--codex-auth-from"] && flags["--separate-auth"])
       throw new Error("Choose shared or separate auth, not both.");
     output(await withMaintenance(home, () => activate(installOptions)));

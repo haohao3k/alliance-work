@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { cp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join, relative } from "node:path";
 import { test } from "node:test";
+import { createPaseoApi } from "@getpaseo/client";
+import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { activate, installation } from "../scripts/maintenance.mjs";
 import { instanceState, paseo, requireIdle, verifyRuntime } from "../scripts/paseo.mjs";
 import { loadManifest, projectRoot } from "../scripts/profiles.mjs";
@@ -37,7 +40,151 @@ test("native Paseo switches release roots and restores the previous plugin after
     isolatedRoot: join(dir, "roles"),
     authFrom: undefined,
   };
+  if (process.env.ALLIANCE_TEST_DAEMON_CLI) {
+    await mkdir(paseoHome, { recursive: true });
+    await writeFile(
+      join(paseoHome, "config.json"),
+      JSON.stringify({
+        version: 1,
+        daemon: { listen: `127.0.0.1:${port}`, relay: { enabled: false } },
+        features: { webUi: { enabled: true } },
+      }),
+    );
+    await writeFile(
+      join(paseoHome, "alliance-instance.json"),
+      JSON.stringify({ allianceHome: home, root: projectRoot }),
+    );
+    execFileSync(
+      process.execPath,
+      [process.env.ALLIANCE_TEST_DAEMON_CLI, "daemon", "start", "--home", paseoHome],
+      { timeout: 30000 },
+    );
+  }
   await activate(options);
+  // Exercise native hooks, not just the runtime class: opening an Alliance profile is enough.
+  const client = new DaemonClient({
+    url: `ws://127.0.0.1:${port}/ws`,
+    clientId: "alliance-room-test",
+    connectTimeoutMs: 10000,
+  });
+  const api = createPaseoApi(client);
+  try {
+    await client.connect();
+    const cwd = join(dir, "auto-room");
+    await mkdir(cwd);
+    execFileSync("git", ["init", "-q", cwd]);
+    await writeFile(join(cwd, "result.txt"), "candidate");
+    const before = (await client.invokePluginRpc("alliance-work", "rooms.list", {})) as {
+      rooms: { id: string; cwd: string }[];
+    };
+    const workspace = await api.workspaces.open(cwd);
+    // Native create_agent and the native UI must hit the policy gate, not only the Alliance RPC.
+    const flexibleLead = await workspace.agents.create({
+      config: { provider: "alliance-codex-lead/gpt-6.1-sol", thinkingOptionId: "xhigh" },
+    });
+    const flexibleSnapshot = (await flexibleLead.refresh())?.agent;
+    assert.equal(flexibleSnapshot?.model, "gpt-6.1-sol");
+    assert.equal(flexibleSnapshot?.thinkingOptionId, "xhigh");
+    await flexibleLead.detach();
+    await flexibleLead.archive();
+    await assert.rejects(
+      workspace.agents.create({
+        config: { provider: "alliance-codex-peer/gpt-6.1-sol", thinkingOptionId: "xhigh" },
+      }),
+      /No allowed/,
+    );
+    const policyRooms = (await client.invokePluginRpc("alliance-work", "rooms.list", {})) as {
+      rooms: { id: string; cwd: string }[];
+    };
+    const policyRoomId = policyRooms.rooms.find((room) => room.cwd === cwd)?.id;
+    assert(policyRoomId);
+    const savedPolicy = (await client.invokePluginRpc("alliance-work", "models.read", {
+      roomId: policyRoomId,
+    })) as { policy: { leadEffort: string }; revision: number };
+    await client.invokePluginRpc("alliance-work", "models.save", {
+      roomId: policyRoomId,
+      revision: savedPolicy.revision,
+      policy: { ...savedPolicy.policy, leadEffort: "high" },
+    });
+    const created = await workspace.agents.create({
+      title: "Room lifecycle test",
+      config: { provider: "alliance-codex-hq/gpt-6.1-sol" },
+    });
+    await created.detach();
+    const after = (await client.invokePluginRpc("alliance-work", "rooms.list", {})) as {
+      rooms: { id: string; cwd: string }[];
+      members: { id: string; assignment: string }[];
+    };
+    assert.equal(after.rooms.length, before.rooms.length + 1);
+    assert(after.members.some((member) => member.id === created.id));
+    const nativeAssignment = after.members.find((member) => member.id === created.id)?.assignment;
+    assert(nativeAssignment);
+    assert((await readFile(nativeAssignment, "utf8")).includes(created.id));
+    const proof = JSON.parse(
+      execFileSync(
+        process.execPath,
+        [
+          join(projectRoot, "scripts/cli.mjs"),
+          "verify",
+          "--project",
+          cwd,
+          "--output",
+          join(dir, "native-proof"),
+          "--scenario",
+          "candidate-readback",
+          "--",
+          process.execPath,
+          "-e",
+          "if(require('fs').readFileSync('result.txt','utf8')!=='candidate')process.exit(1)",
+        ],
+        { encoding: "utf8", timeout: 30000 },
+      ),
+    );
+    const disposition = {
+      agentId: created.id,
+      decision: "accepted",
+      candidate: proof.candidate,
+      evidence: proof.report,
+    };
+    assert.deepEqual(
+      JSON.parse(
+        execFileSync(
+          process.execPath,
+          [
+            join(projectRoot, "scripts/cli.mjs"),
+            "accept",
+            "--home",
+            home,
+            "--agent",
+            created.id,
+            "--report",
+            proof.report,
+          ],
+          { encoding: "utf8", timeout: 30000 },
+        ),
+      ),
+      { saved: true },
+    );
+    await writeFile(join(cwd, "result.txt"), "changed candidate");
+    await assert.rejects(
+      client.invokePluginRpc("alliance-work", "members.disposition", disposition),
+      /changed|stale/,
+    );
+    const again = (await client.invokePluginRpc("alliance-work", "rooms.create", { cwd })) as { id: string };
+    assert.equal(again.id, after.rooms.find((room) => room.cwd === cwd)?.id);
+    const final = (await client.invokePluginRpc("alliance-work", "rooms.list", {})) as { rooms: unknown[] };
+    assert.equal(final.rooms.length, after.rooms.length);
+    await created.archive();
+    const allowedLead = await workspace.agents.create({
+      config: { provider: "alliance-codex-lead/gpt-6-astra" },
+    });
+    assert.equal((await allowedLead.refresh())?.agent.thinkingOptionId, "high");
+    await allowedLead.detach();
+    await allowedLead.archive();
+  } finally {
+    await api.dispose();
+    await client.close();
+  }
   const candidate = join(dir, "release candidate");
   await cp(projectRoot, candidate, {
     recursive: true,

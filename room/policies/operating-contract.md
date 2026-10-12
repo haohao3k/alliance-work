@@ -16,8 +16,10 @@ HQ silence and fixed rounds are not Alliance defaults. Choose review depth from 
 Do not perform another model's supposedly independent review yourself or claim independence
 without it. Follow stricter project or Human requirements.
 
-Paseo owns agents, native messaging, sessions, workspaces and lifecycle. There is no Piggery
-daemon, Alliance MCP server or second mailbox. A successful send means a prompt was dispatched,
+Paseo owns Alliance agents, native messaging, sessions, workspaces and lifecycle. Alliance adds
+no MCP server or second mailbox. HQ may use an existing Piggery installation through its CLI
+when the assigned project uses Piggery; discover that project's gate and rules first. Do not
+assume a Paseo agent is also a registered Piggery participant. A successful send means a prompt was dispatched,
 not that the recipient processed or accepted it. Sending to a busy agent may interrupt its turn.
 Use finish notifications for ordinary handback, continue unrelated work while waiting, and send
 an interrupting message only when its urgency warrants that effect. Notifications can be missed
@@ -43,8 +45,8 @@ Use native Paseo tools by their current schemas. Compatibility vocabulary in Sea
   affected agents via native Paseo. Do not invent a backend ownership-transfer tool.
 
 Tool names in old examples are vocabulary, not additional installed tools. Discover the current
-native schema rather than guessing arguments. Choose models from the live provider catalog;
-there is no mandatory cheap-first ladder. Select strong reasoning when the task warrants it.
+native schema rather than guessing arguments. Apply the model-selection policy and current
+room allowlist, then verify model and effort in the target role's live provider catalog.
 
 Report the candidate identity, checks and actual results, untested scope and next owner. Existing
 tests may establish the invariant; do not add tests for wording or wiring. A reproducible fix needs

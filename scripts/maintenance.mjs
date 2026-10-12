@@ -6,7 +6,14 @@ import { dirname, join, resolve } from "node:path";
 import { authStatus, setAuthSource } from "./auth.mjs";
 import { run } from "./distribution.mjs";
 import { install } from "./install.mjs";
-import { instanceState, paseo, reloadRegisteredPlugin, requireIdle, verifyRuntime } from "./paseo.mjs";
+import {
+  instanceState,
+  paseo,
+  reloadRegisteredPlugin,
+  requireCompatibleDaemon,
+  requireIdle,
+  verifyRuntime,
+} from "./paseo.mjs";
 import {
   assertNoLinks,
   atomicWrite,
@@ -172,10 +179,7 @@ export async function activate({
     else if (state.localDaemon !== "stopped") throw new Error("Daemon state unknown; no update applied.");
   }
   const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
-  if (state?.daemonVersion && state.daemonVersion !== pkg.devDependencies["@getpaseo/cli"])
-    throw new Error(
-      `Running Paseo ${state.daemonVersion} does not match this release's ${pkg.devDependencies["@getpaseo/cli"]}. Update the dedicated runtime explicitly before proceeding.`,
-    );
+  requireCompatibleDaemon(state?.daemonVersion, pkg.devDependencies["@getpaseo/cli"]);
   const executables = Object.fromEntries(
     await Promise.all(["codex", "claude", "pi"].map(async (name) => [name, await findExecutable(name)])),
   );

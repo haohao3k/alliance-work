@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { isNewerRelease, verifyChecksum } from "../scripts/distribution.mjs";
 import { restore, snapshot } from "../scripts/maintenance.mjs";
-import { requireIdleState } from "../scripts/paseo.mjs";
+import { requireCompatibleDaemon, requireIdleState } from "../scripts/paseo.mjs";
 import { loadManifest, prepareProfiles, projectRoot, verifyProfile } from "../scripts/profiles.mjs";
 import { AllianceRuntime } from "../server/runtime";
 import { temporary } from "./temp";
@@ -69,6 +69,7 @@ test("rollback restores managed profiles/config while preserving auth, sessions 
 
 test("maintenance refuses active agents, scripts and unknown readback", () => {
   requireIdleState([{ id: "finished", status: "idle" }], []);
+  requireIdleState([{ id: "closed-after-restart", status: "closed" }], []);
   assert.throws(() => requireIdleState([{ id: "working", status: "running" }], []), /working:running/);
   assert.throws(() => requireIdleState([], [{ scriptName: "dev", lifecycle: "running" }]), /dev:running/);
   assert.throws(() => requireIdleState([{ id: "unknown" }], []), /blocked/);
@@ -134,4 +135,17 @@ test("native Codex project trust survives profile verification and refresh witho
   await verifyProfile(refreshed.profiles["codex-peer"]);
   await writeFile(path, nativeConfig + '\n[mcp_servers.unmanaged]\ncommand="unexpected"\n');
   await assert.rejects(verifyProfile(refreshed.profiles["codex-peer"]), /changed/);
+});
+
+test("daemon compatibility accepts only the pinned runtime and the validated newer host", () => {
+  requireCompatibleDaemon("0.10.3", "0.10.3");
+  requireCompatibleDaemon("0.11.2", "0.10.3");
+  assert.throws(() => requireCompatibleDaemon("0.11.3", "0.10.3"), /not validated/);
+  assert.throws(() => requireCompatibleDaemon("0.9.9", "0.10.3"), /not validated/);
+});
+
+test("stable updates accept installed host prereleases without downgrading a newer base", () => {
+  assert.equal(isNewerRelease("v0.1.5", "0.1.4-ryzen.1"), true);
+  assert.equal(isNewerRelease("v0.1.4", "0.1.4-host.2"), true);
+  assert.equal(isNewerRelease("v0.1.4", "0.1.5-host.1"), false);
 });

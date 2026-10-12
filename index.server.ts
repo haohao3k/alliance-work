@@ -1,13 +1,18 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { directorySuggestions } from "./server/directories";
 import { composeInstruction } from "./server/instructions";
 import { AllianceRuntime, allianceProvider } from "./server/runtime";
 import {
+  directoryList,
   memberDisposition,
   memberLaunch,
   memberResume,
   profileStatus,
   roomCreate,
   roomList,
+  roomModelCatalog,
+  roomModelPolicy,
+  roomModelPolicySave,
   settings,
 } from "./shared/contracts";
 
@@ -30,6 +35,26 @@ export default function contribute(server: PluginServerContext) {
   server.handle(profileStatus, async () => (await get()).profiles());
   server.handle(roomList, async (_input, { paseo }) => (await get()).list(paseo));
   server.handle(roomCreate, async (input, { paseo }) => (await get()).createRoom(input, paseo));
+  server.handle(roomModelPolicy, async ({ roomId }) => (await get()).store.modelPolicy(roomId));
+  server.handle(roomModelPolicySave, async ({ roomId, policy, revision }) =>
+    (await get()).store.saveModelPolicy(roomId, policy, revision),
+  );
+  server.handle(roomModelCatalog, async ({ roomId, harness, role }, { paseo }) => ({
+    models: (await (await get()).modelCatalog(roomId, harness, role, paseo))
+      .filter((model) => model.isSelectable !== false)
+      .map((model) => ({
+        id: model.id,
+        label: model.label,
+        efforts: (model.thinkingOptions ?? []).map((option) => option.id),
+      })),
+  }));
+  server.handle(directoryList, async ({ query }, { paseo }) => {
+    const workspaces = await paseo.workspaces.list();
+    return directorySuggestions(
+      query,
+      workspaces.entries.map((workspace) => workspace.workspaceDirectory),
+    );
+  });
   server.handle(memberLaunch, async (input, { paseo }) => (await get()).launch(input, paseo));
   server.handle(memberResume, async (input, { paseo }) =>
     (await get()).resume(input.agentId, input.prompt, paseo),
@@ -37,24 +62,33 @@ export default function contribute(server: PluginServerContext) {
   server.handle(memberDisposition, async (input) =>
     (await get()).disposition(input.agentId, input.decision, input.candidate, input.evidence),
   );
-  server.before("agent.create", async ({ request }) => {
+  server.before("agent.create", async ({ request }, { paseo }) => {
     if (!allianceProvider(request.config.provider)) return;
     const instance = await get();
-    const instruction = await instance.instruction(request.config.provider, request.config.cwd);
+    const instruction = await instance.instruction(request.config.provider, request.config.cwd, paseo);
+    const room = await instance.roomFor(request.config.cwd);
+    const selected = await instance.selectModel(
+      room.id,
+      request.config.provider,
+      paseo,
+      request.config.model,
+      request.config.thinkingOptionId,
+    );
     return {
       ...request,
       config: {
         ...request.config,
+        ...selected,
         mcpServers: {},
         systemPrompt: composeInstruction(instruction, request.config.systemPrompt),
       },
     };
   });
-  server.before("agent.session_open", async ({ request }) => {
+  server.before("agent.session_open", async ({ request }, { paseo }) => {
     if (!allianceProvider(request.provider)) return;
     const instance = await get();
     const profile = await instance.profile(request.provider);
-    const room = await instance.roomFor(request.cwd);
+    const room = await instance.ensureRoom(request.cwd, paseo, request.workspaceId);
     await instance.bind({
       id: request.agentId,
       workspaceId: request.workspaceId,
@@ -70,6 +104,8 @@ export default function contribute(server: PluginServerContext) {
         ALLIANCE_BOUND_ROOM: room.id,
         ALLIANCE_WORK_HOME: instance.home,
         ALLIANCE_ROLE: profile.role,
+        ALLIANCE_ARTIFACTS: room.artifacts,
+        ALLIANCE_ASSIGNMENT: instance.store.member(request.agentId)?.assignment ?? "",
         CODEX_HOME: profile.harness === "codex" ? profile.home : `${profile.osHome}/.codex`,
         CLAUDE_CONFIG_DIR: profile.harness === "claude" ? profile.home : `${profile.osHome}/.claude`,
         PI_CODING_AGENT_DIR: profile.harness === "pi" ? profile.home : `${profile.osHome}/.pi`,

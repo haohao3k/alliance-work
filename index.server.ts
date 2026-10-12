@@ -102,6 +102,11 @@ export default function contribute(server: PluginServerContext) {
       env: {
         ...request.env,
         ALLIANCE_BOUND_ROOM: room.id,
+        ALLIANCE_WORKSPACE_CWD: request.cwd,
+        HOME: profile.osHome,
+        XDG_CONFIG_HOME: `${profile.osHome}/.config`,
+        XDG_DATA_HOME: `${profile.osHome}/.local/share`,
+        XDG_CACHE_HOME: `${profile.osHome}/.cache`,
         ALLIANCE_WORK_HOME: instance.home,
         ALLIANCE_ROLE: profile.role,
         ALLIANCE_ARTIFACTS: room.artifacts,

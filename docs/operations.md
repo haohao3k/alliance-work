@@ -11,12 +11,11 @@ bootstrap shown in the [README](../README.md#install). Release downloads use the
 account, so private repository access is retained without embedding a GitHub token in scripts.
 
 The bootstrap verifies `checksums.txt`, installs `package-lock.json` dependencies and checks the
-candidate before activation. All three native harness binaries must be on PATH. Their versions
-are sensitive to configuration/discovery changes; run `npm run test:native` after upgrading one.
+candidate before activation. Native Codex and Claude must be on PATH. Pi is installed with the
+release. Harness versions affect configuration/discovery; run `npm run test:native` after upgrading one.
 
-Activation accepts the release's pinned Paseo daemon and the explicitly tested `0.11.2` daemon.
-This also supports installed `0.10.3` clients talking to `0.11.2` hosts; it does not upgrade or
-restart the daemon. Other version mismatches remain blocked. To exercise a different installed
+This release pins and validates Paseo `0.11.2`; activation does not upgrade or restart
+the daemon. Other version mismatches remain blocked. To exercise a different installed
 daemon binary in a disposable test instance, set `ALLIANCE_TEST_DAEMON_CLI` to its absolute
 `bin/paseo` path when running `npm run test:maintenance`.
 
@@ -41,6 +40,24 @@ The installer enables trusted plugin execution only for this dedicated instance.
 runs with the daemon user's filesystem/network access. The command starts an absent dedicated
 daemon and hot reloads an idle existing one; it never restarts a running daemon. If a password
 was explicitly configured, supply `ALLIANCE_PASEO_PASSWORD` for the installer connection.
+
+## Profile loading
+
+Paseo binds the room working directory before launching a native harness. The launcher uses
+that same directory for discovery and the child process, even when Paseo itself started in a
+different directory. Each role receives a private HOME/XDG and its own harness configuration.
+Repository task instructions remain relevant, but project skill/plugin/MCP discovery cannot
+extend the managed role's selected catalog.
+
+Codex's `apps`, `plugins`, `remote_plugin` and `tool_suggest` features are disabled in role
+config and enforced before the authenticated app-server starts. This prevents account sync
+from reintroducing integrations after a successful home-only discovery check. Selected
+Seatwork skills and native Codex tools stay available. See the native
+[configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
+
+Existing sessions retain already-loaded context. After upgrading from a version with a
+loading defect, start a new assignment/session to verify clean context; resuming old history
+cannot remove instructions or tools that were previously visible.
 
 ## Authentication
 
@@ -82,12 +99,39 @@ alliance-work login pi peer
 ```
 
 Use any of `hq`, `supervisor`, `lead`, `peer`, `lens`. Only participating roles need credentials.
-Claude and Pi use explicit role credentials. Optional owner-only
-`credentials.env.json` in a role home accepts provider API-key variables. Claude roles also
-accept `CLAUDE_CODE_OAUTH_TOKEN` for an existing `claude setup-token` credential. This variable
-is rejected for Codex and Pi. Ambient provider secrets are not inherited.
-Keep credential files at mode 600 and never commit, print or record their contents.
-New Claude sessions read the role credential file; no daemon restart is required.
+Claude and Pi use explicit role credentials. An optional owner-only `credentials.env.json` in a
+role home accepts provider API-key variables. Claude roles also accept `CLAUDE_CODE_OAUTH_TOKEN`
+for an existing `claude setup-token` credential. Only put the selected credential in this file;
+never copy a complete daily settings or Keychain record. Ambient provider secrets are not inherited.
+The launcher rejects symlinks, shared file permissions and malformed credential JSON without
+printing its contents. Keep the file mode at `600`; updates preserve it and exclude it from backups.
+Never commit, record or pass credentials as command-line arguments.
+
+## Pi runtime and provider packages
+
+Alliance installs its own Pi **1.0.0** and these explicitly approved npm packages under the
+installation's `node_modules`, using `package-lock.json`:
+
+| Package | Version |
+| --- | --- |
+| `@iznogoudd/pi-devin` | `0.5.1` |
+| `pi-antigravity` | `0.9.0` |
+| `@iznogoudd/pi-cursor` | `1.4.39` |
+
+Each Pi role loads only these explicit extension entry points and native `mcp`, `codemode` and
+`tool-search`. Automatic package/extension, prompt-template and skill discovery stays disabled.
+The daily Pi package tree, settings and credentials are never linked or copied. Native Paseo
+supplies MCP, so `pi-mcp-adapter` is not installed. The approved packages add provider commands;
+`ANTIGRAVITY_NO_EXTRA_TOOLS=1` keeps its optional image/search tools out of the agent tool catalog.
+
+The same release bytes serve all five roles, while each role's HOME/XDG, auth, sessions and caches
+stay separate. `PI_CURSOR_SYSTEM_CREDENTIALS=0` disables Cursor's automatic Keychain/IDE credential
+reuse. Devin's CLI/Desktop paths resolve inside the private role HOME.
+
+Start `alliance-work login pi peer`, then use `/login devin`, `/login antigravity` or `/login cursor`.
+Only sign in the roles/providers you intend to use. Package installation and model discovery do
+not imply authentication or a successful model turn. Package upgrades are explicit Alliance
+dependency changes, verified by native tests and shipped with a new release.
 
 ## Updates and recovery
 
@@ -171,7 +215,7 @@ The release archive contains no home directories, runtime credentials or generat
 
 ## Upgrading host builds with a prerelease suffix
 
-From v0.1.5, `alliance-work update` compares stable releases with installed host versions such
+From v0.1.6, `alliance-work update` compares stable releases with installed host versions such
 as `0.1.4-ryzen.1`. Older launchers cannot parse that suffix. Bootstrap once with the release
 installer, which preserves the recorded Alliance/Paseo home, credentials, rooms and native settings:
 

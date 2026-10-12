@@ -2,7 +2,8 @@ import { constants } from "node:fs";
 import { access } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { prepareProfiles } from "./profiles.mjs";
+import { bundledPi } from "./pi-runtime.mjs";
+import { prepareProfiles, projectRoot } from "./profiles.mjs";
 
 const args = process.argv.slice(2);
 const option = (name) => {
@@ -10,7 +11,8 @@ const option = (name) => {
   return at < 0 ? undefined : args[at + 1];
 };
 async function executable(name) {
-  const explicit = option(`--${name}`);
+  const explicit =
+    option(`--${name}`) ?? (name === "pi" ? (await bundledPi(projectRoot))?.executable : undefined);
   if (explicit) {
     await access(explicit, constants.X_OK);
     return resolve(explicit);

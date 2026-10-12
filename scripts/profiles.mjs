@@ -3,7 +3,6 @@ import { mkdir, readdir, readFile, rename, rmdir, unlink, writeFile } from "node
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-
 import {
   assertNoLinks,
   codexTrust,
@@ -11,13 +10,21 @@ import {
   managedDigest,
   nativeTrustFile,
 } from "../server/profile-integrity.mjs";
+import { bundledPi } from "./pi-runtime.mjs";
 
 export { assertNoLinks, digest, managedDigest, verifyProfile } from "../server/profile-integrity.mjs";
 
+// Native account sync must not populate a managed role with daily/cloud integrations.
+export const codexIsolationFeatures = {
+  apps: false,
+  plugins: false,
+  remote_plugin: false,
+  tool_suggest: false,
+};
 export const roles = ["hq", "supervisor", "lead", "peer", "lens"];
 export const harnesses = ["codex", "claude", "pi"];
 export const projectRoot = fileURLToPath(new URL("../", import.meta.url));
-/** @typedef {{harness:string,role:string,home:string,osHome:string,executable:string,files:Record<string,string>,skillDirectories:string[],skillEntries:string[]}} Profile */
+/** @typedef {{harness:string,role:string,home:string,osHome:string,executable:string,files:Record<string,string>,skillDirectories:string[],skillEntries:string[],extensionPaths:string[]}} Profile */
 export async function atomicWrite(path, value) {
   await assertNoLinks(path);
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
@@ -40,6 +47,7 @@ export async function prepareProfiles({ home, executables, isolatedRoot = undefi
     throw e;
   });
   isolatedRoot ??= prior?.isolatedRoot;
+  const pi = await bundledPi(root);
   const writes = new Map();
   const removals = [];
   const provenance = JSON.parse(await readFile(join(root, "vendor/seatwork/provenance.json"), "utf8"));
@@ -80,6 +88,7 @@ export async function prepareProfiles({ home, executables, isolatedRoot = undefi
         files: {},
         skillDirectories: [],
         skillEntries: [],
+        extensionPaths: harness === "pi" ? (pi?.extensions ?? []) : [],
       };
       await assertNoLinks(roleHome);
 
@@ -144,7 +153,13 @@ export async function prepareProfiles({ home, executables, isolatedRoot = undefi
         `${ownership}\n\n${operating}\n\n${mapping}\n\n${modelSelection}\n\n${roleText}`,
       );
       if (harness === "codex")
-        await manage(join(roleHome, "config.toml"), 'cli_auth_credentials_store = "file"\n');
+        await manage(
+          join(roleHome, "config.toml"),
+          'cli_auth_credentials_store = "file"\n[features]\n' +
+            Object.entries(codexIsolationFeatures)
+              .map(([name, value]) => `${name} = ${value}\n`)
+              .join(""),
+        );
       if (harness === "claude")
         await manage(
           join(roleHome, "settings.json"),

@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { lstat, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { claudeSkillPlugin, projectSkills } from "../server/project-skills.mjs";
 import { authSource, authStatus, bridgeCodexAuth } from "./auth.mjs";
 import { discoverCodex } from "./codex-discovery.mjs";
-import { loadManifest, verifyProfile } from "./profiles.mjs";
+import { assertNoLinks, codexIsolationFeatures, loadManifest, verifyProfile } from "./profiles.mjs";
 
 export function profileEnvironment(profile, home, ambient = process.env, credentials = {}) {
   /** @type {Record<string,string>} */
@@ -41,6 +41,10 @@ export function profileEnvironment(profile, home, ambient = process.env, credent
     CLAUDE_CONFIG_DIR: profile.harness === "claude" ? profile.home : join(profile.osHome, ".claude"),
     PI_CODING_AGENT_DIR: profile.harness === "pi" ? profile.home : join(profile.osHome, ".pi"),
   });
+  if (profile.harness === "pi") {
+    env.PI_CURSOR_SYSTEM_CREDENTIALS = "0";
+    env.ANTIGRAVITY_NO_EXTRA_TOOLS = "1";
+  }
   return env;
 }
 
@@ -66,28 +70,45 @@ function toml(value) {
   return JSON.stringify(value);
 }
 
-export async function launchPlan(home, id, args, ambient = process.env, cwd = process.cwd()) {
+export async function launchPlan(
+  home,
+  id,
+  args,
+  ambient = process.env,
+  cwd = ambient.ALLIANCE_WORKSPACE_CWD ?? process.cwd(),
+) {
+  cwd = resolve(cwd);
   const manifest = await loadManifest(home);
   const profile = manifest.profiles[id];
   if (!profile) throw new Error(`Unknown Alliance profile: ${id}`);
   await verifyProfile(profile);
-  const credentials = await readFile(join(profile.home, "credentials.env.json"), "utf8")
-    .then(JSON.parse)
-    .catch((e) => {
-      if (e.code === "ENOENT") return {};
-      throw e;
-    });
+  const credentialPath = join(profile.home, "credentials.env.json");
+  await assertNoLinks(credentialPath);
+  const info = await lstat(credentialPath).catch((error) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (info && (!info.isFile() || info.mode & 0o077))
+    throw new Error("Role credentials must be a regular owner-only file (chmod 600).");
+  let credentials = {};
+  if (info) {
+    try {
+      credentials = JSON.parse(await readFile(credentialPath, "utf8"));
+    } catch {
+      throw new Error("Role credential JSON is invalid. Its content was not logged.");
+    }
+  }
   const env = profileEnvironment(profile, home, ambient, credentials);
   const source = profile.harness === "codex" ? await authSource(home) : undefined;
   // Account/setup/help commands still use the isolated home, but need no session flags.
   const metadataCommand = args.some((arg) => ["--version", "--help", "-h"].includes(arg));
   const accountCommand = ["login", "logout", "auth", "setup-token"].includes(args[0]);
-  if (ambient.PASEO_AGENT_ID && !ambient.ALLIANCE_BOUND_ROOM)
+  if (ambient.PASEO_AGENT_ID && (!ambient.ALLIANCE_BOUND_ROOM || !ambient.ALLIANCE_WORKSPACE_CWD))
     throw new Error(
-      "Alliance plugin did not bind this session to a room. Enable the plugin before launching.",
+      "Alliance plugin did not bind this session to a room and workspace. Enable the plugin before launching.",
     );
   if ((metadataCommand && profile.harness !== "pi") || accountCommand)
-    return { executable: profile.executable, args, env, authSource: source };
+    return { executable: profile.executable, args, env, cwd, authSource: source };
   const bundle = await projectSkills(cwd);
   if (profile.harness === "claude") {
     args = replaceFlag(args, "--setting-sources", "user");
@@ -119,6 +140,7 @@ export async function launchPlan(home, id, args, ambient = process.env, cwd = pr
       "-e",
       "builtin:tool-search",
     ];
+    for (const extension of profile.extensionPaths ?? []) args.push("-e", extension);
     for (const skill of profile.skillEntries) args.push("--skill", skill);
     for (const skill of bundle.skills) args.push("--skill", join(skill.directory, "SKILL.md"));
     args = replaceFlag(args, "--session-dir", join(profile.home, "sessions"));
@@ -129,6 +151,11 @@ export async function launchPlan(home, id, args, ambient = process.env, cwd = pr
       if (args[i] === "-c" || args[i] === "--config") configArgs.push("-c", args[++i]);
       else if (args[i].startsWith("--config=")) configArgs.push("-c", args[i].slice(9));
     }
+    const isolationArgs = Object.entries(codexIsolationFeatures).flatMap(([name, value]) => [
+      "-c",
+      `features.${name}=${value}`,
+    ]);
+    configArgs.push(...isolationArgs);
     // Skip project-native config, preserving repository task instructions and native capabilities.
     const trust = `projects=${toml({ [resolve(cwd)]: { trust_level: "untrusted" } })}`;
     configArgs.push("-c", trust);
@@ -141,7 +168,15 @@ export async function launchPlan(home, id, args, ambient = process.env, cwd = pr
     const skillConfig = discovered.skills
       .filter((skill) => !selected.has(resolve(dirname(skill.path))))
       .map((skill) => ({ path: skill.path, enabled: false }));
-    args = ["--no-daemon", ...args, "-c", trust, "-c", `skills.config=${toml(skillConfig)}`];
+    args = [
+      "--no-daemon",
+      ...args,
+      ...isolationArgs,
+      "-c",
+      trust,
+      "-c",
+      `skills.config=${toml(skillConfig)}`,
+    ];
     if (source) args.push("-c", 'cli_auth_credentials_store="ephemeral"');
     const servers = Object.fromEntries(
       Object.entries(discovered.config.mcp_servers ?? {}).map(([name, configuration]) => [
@@ -152,7 +187,7 @@ export async function launchPlan(home, id, args, ambient = process.env, cwd = pr
     // Override complete TOML tables: Codex CLI dotted keys do not unquote path/server names.
     args.push("-c", `mcp_servers=${toml(servers)}`);
   }
-  return { executable: profile.executable, args, env, authSource: source };
+  return { executable: profile.executable, args, env, cwd, authSource: source };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -180,6 +215,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       );
     const child = spawn(plan.executable, plan.args, {
       env: plan.env,
+      cwd: plan.cwd,
       stdio: shared ? ["pipe", "pipe", "inherit"] : "inherit",
     });
     if (shared) bridgeCodexAuth({ child, source: plan.authSource });

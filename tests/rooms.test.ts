@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { PaseoApi } from "@getpaseo/client";
-import { profileEnvironment } from "../scripts/launch.mjs";
+import { launchPlan, profileEnvironment } from "../scripts/launch.mjs";
 import { prepareProfiles, verifyProfile } from "../scripts/profiles.mjs";
 import { runVerification } from "../server/evidence.mjs";
 import { composeInstruction } from "../server/instructions";
@@ -96,6 +96,7 @@ test("role homes own exact Seatwork bytes and never inherit ambient credentials 
       HOME: "/daily",
       CODEX_HOME: "/daily/codex",
       ANTHROPIC_API_KEY: "daily-secret",
+      CLAUDE_CODE_OAUTH_TOKEN: "daily-oauth",
       PI_CODING_AGENT_DIR: "/daily/pi",
       PATH: "/bin",
       PASEO_AGENT_ID: "agent",
@@ -103,6 +104,13 @@ test("role homes own exact Seatwork bytes and never inherit ambient credentials 
     assert.equal(env.HOME, profile.osHome);
     assert.equal(env.CODEX_HOME, profile.home);
     assert(!("ANTHROPIC_API_KEY" in env));
+    assert(!("CLAUDE_CODE_OAUTH_TOKEN" in env));
+    const explicit = { CLAUDE_CODE_OAUTH_TOKEN: "explicit-test-token" };
+    assert.equal(
+      profileEnvironment(f.manifest.profiles["claude-peer"], f.home, {}, explicit).CLAUDE_CODE_OAUTH_TOKEN,
+      explicit.CLAUDE_CODE_OAUTH_TOKEN,
+    );
+    assert.throws(() => profileEnvironment(profile, f.home, {}, explicit), /Unsupported/);
     assert.equal(env.PASEO_AGENT_ID, "agent");
     const skill = join(profile.home, "skills/slp-evidence-report/SKILL.md");
     const expected = await readFile(
@@ -115,6 +123,29 @@ test("role homes own exact Seatwork bytes and never inherit ambient credentials 
     f.runtime.close();
   }
 });
+test("role credentials reject shared permissions, links and malformed JSON without leaking bytes", async () => {
+  const f = await fixture();
+  try {
+    const path = join(f.manifest.profiles["claude-peer"].home, "credentials.env.json");
+    await writeFile(path, '{"CLAUDE_CODE_OAUTH_TOKEN":"test-secret"}', { mode: 0o644 });
+    await chmod(path, 0o644);
+    await assert.rejects(launchPlan(f.home, "claude-peer", ["auth", "status"]), /owner-only/);
+    await chmod(path, 0o600);
+    const plan = await launchPlan(f.home, "claude-peer", ["auth", "status"]);
+    assert.equal(plan.env.CLAUDE_CODE_OAUTH_TOKEN, "test-secret");
+    await writeFile(path, '{"CLAUDE_CODE_OAUTH_TOKEN":"test-secret"');
+    await assert.rejects(
+      launchPlan(f.home, "claude-peer", ["auth", "status"]),
+      (error: Error) => error.message.includes("invalid") && !error.message.includes("test-secret"),
+    );
+    const linked = join(f.manifest.profiles["claude-lens"].home, "credentials.env.json");
+    await symlink(path, linked);
+    await assert.rejects(launchPlan(f.home, "claude-lens", ["auth", "status"]), /Symlink/);
+  } finally {
+    f.runtime.close();
+  }
+});
+
 test("symlink skill additions are rejected instead of falling back to a shared home", async () => {
   const f = await fixture();
   try {

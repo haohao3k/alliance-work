@@ -76,7 +76,7 @@ or artifacts cannot reuse an old report. Project skills apply to new sessions.
 
 Options: --home PATH, --paseo-home PATH, --bin-dir PATH, --port 6771,
          --codex-auth-from PATH, --separate-auth, --json
-Requires Node 24+, native Codex/Claude/Pi; updates use authenticated gh.
+Requires Node 24+ and native Codex/Claude. Pi is bundled; updates use authenticated gh.
 Paseo is pinned per release. Maintenance never restarts a running daemon.
 `;
 try {

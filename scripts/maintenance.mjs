@@ -14,6 +14,7 @@ import {
   requireIdle,
   verifyRuntime,
 } from "./paseo.mjs";
+import { bundledPi } from "./pi-runtime.mjs";
 import {
   assertNoLinks,
   atomicWrite,
@@ -180,8 +181,15 @@ export async function activate({
   }
   const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   requireCompatibleDaemon(state?.daemonVersion, pkg.devDependencies["@getpaseo/cli"]);
+  const pi = await bundledPi(root);
   const executables = Object.fromEntries(
-    await Promise.all(["codex", "claude", "pi"].map(async (name) => [name, await findExecutable(name)])),
+    await Promise.all(
+      ["codex", "claude", "pi"].map(async (name) => {
+        const executable = name === "pi" && pi ? pi.executable : await findExecutable(name);
+        await access(executable, constants.X_OK);
+        return [name, executable];
+      }),
+    ),
   );
   run("npm", ["run", "typecheck"], { cwd: root, stdio: "inherit" });
   const saved = await snapshot(home, paseoHome, binPath);

@@ -19,8 +19,8 @@ installer/update/recovery changes; it starts and stops only disposable native Pa
 real failure risks; do not add wording or implementation-mirroring tests. Reproduce a regression
 against the prior behavior, and report added/removed test lines with the result.
 
-Setup is `npm ci` on Node 24 (macOS or Linux). Native and maintenance tests need `codex`, `claude`
-and `pi` on PATH; Pi is `npm i -g @earendil-works/pi-coding-agent`. Maintenance tests use
+Setup is `npm ci` on Node 24 (macOS or Linux). Native and maintenance tests need `codex` and `claude` on PATH; Pi and its approved
+provider packages are installed by `npm ci`. Maintenance tests use
 a temp home and a free loopback port; the installed instance defaults to 6771. Do not run
 `./install.sh` or `setup` for source checks: they write `~/.alliance-work` and `~/.local/bin`.
 

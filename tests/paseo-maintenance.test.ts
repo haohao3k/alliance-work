@@ -111,6 +111,7 @@ test("native Paseo switches release roots and restores the previous plugin after
       config: { provider: "alliance-codex-hq/gpt-6.1-sol" },
     });
     await created.detach();
+    assert.equal(requireIdle(paseoHome).agents, 1, "Idle readback must include detached native sessions");
     const after = (await client.invokePluginRpc("alliance-work", "rooms.list", {})) as {
       rooms: { id: string; cwd: string }[];
       members: { id: string; assignment: string }[];

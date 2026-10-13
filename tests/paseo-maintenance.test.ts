@@ -121,6 +121,37 @@ test("native Paseo switches release roots and restores the previous plugin after
     const nativeAssignment = after.members.find((member) => member.id === created.id)?.assignment;
     assert(nativeAssignment);
     assert((await readFile(nativeAssignment, "utf8")).includes(created.id));
+    await writeFile(
+      join(cwd, "verify.mjs"),
+      `
+      import assert from 'node:assert/strict';
+      import {readFile} from 'node:fs/promises';
+      const {check}=await import(process.env.ALLIANCE_ASSERTION_HELPER);
+      await check('readback', async()=>assert.equal(await readFile('result.txt','utf8'),'candidate'));
+    `,
+    );
+    await writeFile(
+      join(cwd, "features.json"),
+      JSON.stringify({
+        version: 1,
+        features: [
+          {
+            id: "artifact",
+            title: "Candidate artifact",
+            entryPoint: "result.txt",
+            preconditions: "Candidate ready",
+            behaviors: [{ id: "readback", expect: "Candidate bytes read back correctly" }],
+          },
+        ],
+        scenarios: [
+          {
+            id: "readback",
+            command: ["$NODE", "verify.mjs"],
+            assertions: [{ id: "readback", behavior: "readback" }],
+          },
+        ],
+      }),
+    );
     const proof = JSON.parse(
       execFileSync(
         process.execPath,
@@ -131,16 +162,14 @@ test("native Paseo switches release roots and restores the previous plugin after
           cwd,
           "--output",
           join(dir, "native-proof"),
-          "--scenario",
-          "candidate-readback",
-          "--",
-          process.execPath,
-          "-e",
-          "if(require('fs').readFileSync('result.txt','utf8')!=='candidate')process.exit(1)",
+          "--map",
+          "features.json",
         ],
         { encoding: "utf8", timeout: 30000 },
       ),
     );
+    assert.equal(proof.coverage.covered, 1);
+    assert.equal(proof.coverage.total, 1);
     const disposition = {
       agentId: created.id,
       decision: "accepted",

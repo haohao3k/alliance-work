@@ -38,3 +38,22 @@ Acceptance refuses non-PASS results, wrong checkouts, changed candidates and cha
 It does not judge whether a weak check proves a strong claim. Use engineering judgment and
 the existing proof-debt audit when that specific question warrants it. If code or inputs
 change after verification, rerun the affected check rather than rewriting the report.
+
+For a project with a feature map, run its declared scenarios and collect executed coverage:
+
+    alliance-work verify --map .alliance/features.json --feature FEATURE_ID
+
+Omit `--feature` to check the full map; repeat it for a selected scope. The report keeps excluded
+features visible. Each scenario declares assertion IDs mapped to observable behaviors. Its
+driver imports `process.env.ALLIANCE_ASSERTION_HELPER` and calls `check(id, assertionCallback)`
+after observing the product; skip/block records need a reason. Only a completed successful
+scenario with its declared assertions passed contributes coverage. A map entry or command exit
+zero alone is insufficient. `docs/verification.md` under the Alliance installation root defines
+the schema and driver examples. Lead owns scope and the strength of each assertion. Choose
+`--kind runtime` only for scenarios actually exercising runtime behavior; the default is test.
+
+A changed feature map invalidates old proof. Keep entry points, preconditions and expected
+success/error/cancel/persistence behavior current where the change affects them; do not add
+irrelevant paths solely to fill a checklist. Test the verifier against a representative bug
+when its ability to detect that bug is in doubt. Feature maps remain project-owned and optional;
+focused direct checks still work without a new map or additional reviewer.

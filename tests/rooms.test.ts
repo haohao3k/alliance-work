@@ -91,7 +91,7 @@ test("role homes own exact Seatwork bytes and never inherit ambient credentials 
   try {
     const profile = f.manifest.profiles["codex-peer"];
     await verifyProfile(profile);
-    assert.equal(profile.skillDirectories.length, 6);
+    assert.equal(profile.skillDirectories.length, 7);
     const env = profileEnvironment(profile, f.home, {
       HOME: "/daily",
       CODEX_HOME: "/daily/codex",

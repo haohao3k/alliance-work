@@ -146,6 +146,13 @@ The owner can run checks directly, choose a project control skill, include artif
 reports and changed artifacts. It does not prove that the chosen assertions establish every
 product claim; Lead retains that judgment. See [workflow details](docs/quickstart.vi.md).
 
+For executed feature coverage, run `alliance-work verify --map .alliance/features.json`;
+use repeatable `--feature ID` to select the relevant scope. Declared but unexecuted assertions
+remain uncovered. To evaluate a correction from a real failure, run
+`alliance-work eval --suite .alliance/evals/NAME.json`. Baseline/candidate results expose
+regressions and blocked cases; Lead decides whether to keep the lesson. See the
+[map, driver and eval contracts](docs/verification.md).
+
 ## Development
 
 ```sh

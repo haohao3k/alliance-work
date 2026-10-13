@@ -59,6 +59,23 @@ Existing sessions retain already-loaded context. After upgrading from a version 
 loading defect, start a new assignment/session to verify clean context; resuming old history
 cannot remove instructions or tools that were previously visible.
 
+## Context budget
+
+Every Alliance role uses a 300,000-token auto-compaction ceiling. Codex counts the full
+active context; Claude uses a 300k auto-compact window; Pi caps the selected model's
+window at 300k and retains its native compaction reserve. Smaller model windows remain
+smaller. Pi provider extensions, including Cursor, Devin and Antigravity, share this policy.
+The native harness creates the summary and continues the session. Large tool results can
+cross the threshold between native checks; this is a compaction budget, not a per-request
+token rejection limit. The model catalog may still report its physical 1M capacity.
+
+The policy applies when the harness is launched, including resumed sessions. Refresh idle
+existing sessions to adopt it; a running process retains its launch configuration.
+Keep Pi's `compaction.enabled` on. Generated Alliance homes enable it automatically.
+Ordinary Paseo providers can use `scripts/context-launch.mjs HARNESS EXECUTABLE` as their
+configured command and must also have native auto-compaction enabled. This does not
+change the executable or model used by those providers.
+
 ## Authentication
 
 `alliance-work auth codex --from "$HOME/.codex"` selects a regular, owner-only `auth.json` as the
@@ -195,6 +212,7 @@ npm run check
 npm run lint
 npm run test:native
 npm run test:maintenance
+npm run test:coverage
 npm run release:pack
 ```
 
@@ -202,6 +220,16 @@ Packaging uses `git archive HEAD` and refuses a dirty checkout. It creates the v
 `checksums.txt` and `install.sh` in ignored `dist/`. The tag workflow checks package/tag agreement,
 runs the portable suite and publishes those assets to this private repository. Native harness, disposable Paseo maintenance
 and real model acceptance checks remain local; CI does not claim to have run them.
+CI also runs the shipped feature map and retains the per-scenario coverage artifacts. For an
+opt-in real Codex Lead handback plus a with/without-lesson model eval, run:
+
+```sh
+node scripts/acceptance-model.mjs /absolute/fresh-output ~/.codex
+```
+
+This uses a disposable Paseo, isolated role homes and the existing read-only auth bridge. It
+runs real model turns and stops only its own test daemon. Reports remain in the selected output
+folder; no daily daemon is changed. A NO_CHANGE skill eval is reported as no measured benefit.
 
 Push a matching `vMAJOR.MINOR.PATCH` tag when the release is ready. Existing tags are immutable.
 If the tag event did not start a run, dispatch the same tagged source explicitly:

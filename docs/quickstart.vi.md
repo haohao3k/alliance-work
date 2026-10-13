@@ -126,3 +126,15 @@ Nó trỏ tới conversation giữ nguyên lời giao việc; hook Paseo không 
 Alliance không dựng lại nội dung đó. Owner vẫn lưu/link brief và acceptance conditions khi cần.
 Mapping đầy đủ của tên tool/đường dẫn Seatwork nằm trong operating instructions của mỗi role.
 Các disposition cũ được giữ nguyên như quyết định lịch sử, không tự nâng thành proof đã xác minh.
+
+
+## Coverage và học từ failure
+
+`alliance-work verify --map .alliance/features.json --feature ID` chỉ tính coverage khi assertion
+đã chạy và pass. Có thể lặp `--feature`, hoặc bỏ để chạy toàn map. Report giữ rõ phạm vi bỏ ngoài,
+check skip/blocked và hành vi chưa được chứng minh. Lead chọn phạm vi; không bắt tạo map cho việc nhỏ.
+
+Dùng `alliance-work eval --suite .alliance/evals/NAME.json` để so cùng bộ case giữa baseline và bản
+sửa. Report lưu failure evidence, candidate, từng lần chạy và regression; `eval inspect --report PATH`
+kiểm tra evidence còn nguyên. Không tự cài skill hoặc đổi policy. Nếu bản sửa có ích, Lead quyết định
+đăng ký skill và link bài học vào notebook/handoff hiện có. Xem [schema và driver](verification.md).

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { claudeSkillPlugin, projectSkills } from "../server/project-skills.mjs";
 import { authSource, authStatus, bridgeCodexAuth } from "./auth.mjs";
 import { discoverCodex } from "./codex-discovery.mjs";
+import { contextPolicy } from "./context-policy.mjs";
 import { assertNoLinks, codexIsolationFeatures, loadManifest, verifyProfile } from "./profiles.mjs";
 
 export function profileEnvironment(profile, home, ambient = process.env, credentials = {}) {
@@ -187,7 +188,12 @@ export async function launchPlan(
     // Override complete TOML tables: Codex CLI dotted keys do not unquote path/server names.
     args.push("-c", `mcp_servers=${toml(servers)}`);
   }
-  return { executable: profile.executable, args, env, cwd, authSource: source };
+  return {
+    executable: profile.executable,
+    ...contextPolicy(profile.harness, args, env),
+    cwd,
+    authSource: source,
+  };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

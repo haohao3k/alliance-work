@@ -1,0 +1,66 @@
+{
+  "rooms.room-binding": {
+    "file": "tests/rooms.test.ts",
+    "pattern": "native Alliance launch creates a missing room once"
+  },
+  "rooms.assignment": {
+    "file": "tests/rooms.test.ts",
+    "pattern": "a retried launch keeps one native agent"
+  },
+  "rooms.ownership": {
+    "file": "tests/rooms.test.ts",
+    "pattern": "canceled/failed/completed turns preserve ownership"
+  },
+  "rooms.resume": {
+    "file": "tests/rooms.test.ts",
+    "pattern": "resume refuses to interrupt active work"
+  },
+  "models.lead-choice": {
+    "file": "tests/model-policy.test.ts",
+    "pattern": "Lead preferences permit deliberate overrides"
+  },
+  "models.worker-policy": {
+    "file": "tests/model-policy.test.ts",
+    "pattern": "worker selection respects allowlist"
+  },
+  "models.policy-persistence": {
+    "file": "tests/model-policy.test.ts",
+    "pattern": "room policy persists independently"
+  },
+  "skills.skill-selection": {
+    "file": "tests/project-skills.test.ts",
+    "pattern": "project skills require an explicit manifest"
+  },
+  "evidence.evidence-binding": {
+    "file": "tests/evidence.test.ts",
+    "pattern": "evidence binds the actual command"
+  },
+  "evidence.coverage": {
+    "file": "tests/coverage.test.ts",
+    "pattern": "feature coverage binds executed assertions"
+  },
+  "evidence.coverage-integrity": {
+    "file": "tests/coverage.test.ts",
+    "pattern": "coverage refuses stale maps"
+  },
+  "learning.comparison": {
+    "file": "tests/failure-evals.test.ts",
+    "pattern": "failure eval compares the same cases"
+  },
+  "learning.regressions": {
+    "file": "tests/failure-evals.test.ts",
+    "pattern": "failure eval exposes held-out regressions"
+  },
+  "maintenance.idle": {
+    "file": "tests/maintenance.test.ts",
+    "pattern": "maintenance refuses active agents"
+  },
+  "maintenance.rollback": {
+    "file": "tests/maintenance.test.ts",
+    "pattern": "rollback restores managed profiles"
+  },
+  "maintenance.release-integrity": {
+    "file": "tests/maintenance.test.ts",
+    "pattern": "release corruption is rejected"
+  }
+}

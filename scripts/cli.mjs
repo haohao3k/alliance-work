@@ -5,6 +5,8 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { Evidence, runVerification } from "../server/evidence.mjs";
+import { inspectFailureEval, runFailureEval } from "../server/failure-evals.mjs";
+import { runFeatureVerification } from "../server/feature-verification.mjs";
 import { projectSkills, registerSkill } from "../server/project-skills.mjs";
 import { authStatus, setAuthSource } from "./auth.mjs";
 import { downloadRelease, isNewerRelease, releaseInfo, run } from "./distribution.mjs";
@@ -16,7 +18,7 @@ const args = process.argv.slice(2);
 const flags = {};
 const positional = [];
 let checkCommand = [];
-const repeated = { "--input": [], "--artifact": [], "--unverified": [] };
+const repeated = { "--input": [], "--artifact": [], "--unverified": [], "--feature": [] };
 const values = new Set([
   "--home",
   "--paseo-home",
@@ -35,6 +37,8 @@ const values = new Set([
   "--report",
   "--assignment",
   "--timeout-ms",
+  "--map",
+  "--suite",
 ]);
 const switches = new Set([
   "--help",
@@ -65,6 +69,9 @@ const help = `Alliance Work — isolated agent rooms on native Paseo
   alliance-work skills list [--project PATH]
   alliance-work skills add .agents/skills/NAME [--project PATH]
   alliance-work verify --scenario NAME [--project PATH] -- COMMAND [ARGS...]
+  alliance-work verify --map .alliance/features.json [--feature ID] [--project PATH]
+  alliance-work eval --suite .alliance/evals/failure.json [--project PATH]
+  alliance-work eval inspect --report /absolute/eval.json [--project PATH]
   alliance-work accept --agent ID --report /absolute/report.json
 
 Verification options: --kind test|runtime|analysis (default test), --target LABEL,
@@ -133,7 +140,11 @@ try {
   } else if (command === "verify") {
     const timeoutMs = Number(flags["--timeout-ms"] ?? 600000);
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1) throw new Error("Invalid verification timeout");
-    const result = await runVerification({
+    if (flags["--map"] && checkCommand.length) throw new Error("Choose --map or a command, not both");
+    if (!flags["--map"] && repeated["--feature"].length) throw new Error("--feature requires --map");
+    const result = await (flags["--map"] ? runFeatureVerification : runVerification)({
+      map: flags["--map"],
+      features: repeated["--feature"],
       cwd: resolve(flags["--project"] ?? process.cwd()),
       output: resolve(
         flags["--output"] ?? join(process.env.ALLIANCE_ARTIFACTS ?? home, "evidence", randomUUID()),
@@ -155,8 +166,27 @@ try {
       verdict: result.report.verdict,
       kind: result.report.kind,
       unverified: result.report.unverified,
+      coverage: result.coverage ? { ...result.coverage, artifacts: undefined } : undefined,
     });
     if (result.report.verdict !== "PASS") process.exitCode = 1;
+  } else if (command === "eval") {
+    const cwd = resolve(flags["--project"] ?? process.cwd());
+    if (positional[1] === "inspect") {
+      if (!flags["--report"]) throw new Error("eval inspect requires --report");
+      const report = await inspectFailureEval(resolve(flags["--report"]), cwd);
+      output({ report: resolve(flags["--report"]), ...report.summary });
+    } else {
+      if (!flags["--suite"]) throw new Error("eval requires --suite");
+      const destination = resolve(
+        flags["--output"] ?? join(process.env.ALLIANCE_ARTIFACTS ?? home, "evals", randomUUID()),
+      );
+      const { mkdir } = await import("node:fs/promises");
+      const { dirname } = await import("node:path");
+      await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+      const result = await runFailureEval({ cwd, suite: flags["--suite"], output: destination });
+      output({ report: result.path, ...result.report.summary });
+      if (!["IMPROVED", "NO_CHANGE"].includes(result.report.summary.outcome)) process.exitCode = 1;
+    }
   } else if (command === "accept") {
     if (!flags["--agent"] || !flags["--report"])
       throw new Error("Usage: alliance-work accept --agent ID --report /absolute/report.json");

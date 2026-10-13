@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "id": "missing-assertion",
+  "failure": {
+    "summary": "A successful command without an executed assertion must not claim feature coverage",
+    "evidence": [".alliance/evals/missing-assertion.failure.txt"]
+  },
+  "change": {
+    "layer": "check",
+    "description": "Require observed assertion results for an explicitly declared assertion contract",
+    "files": ["server/evidence.mjs", "server/coverage.mjs", "server/assertions.mjs"]
+  },
+  "variants": {
+    "baseline": {
+      "label": "Command-only interpretation (prior behavior)",
+      "command": ["$NODE", "scripts/eval-proof-boundary.mjs"]
+    },
+    "candidate": {
+      "label": "Executed assertion contract",
+      "command": ["$NODE", "scripts/eval-proof-boundary.mjs"]
+    }
+  },
+  "cases": [
+    {
+      "id": "missing",
+      "kind": "regression",
+      "prompt": "A zero-exit command emits no assertion. It must not pass declared coverage.",
+      "assertions": ["honest-verdict"]
+    },
+    {
+      "id": "skipped",
+      "kind": "holdout",
+      "prompt": "An explicitly skipped assertion must remain uncovered.",
+      "assertions": ["honest-verdict"]
+    },
+    {
+      "id": "valid",
+      "kind": "non-trigger",
+      "prompt": "A real passed assertion should remain acceptable.",
+      "assertions": ["honest-verdict"]
+    },
+    {
+      "id": "unavailable",
+      "kind": "blocked",
+      "prompt": "An unavailable command must be BLOCKED, never PASS.",
+      "assertions": ["honest-verdict"]
+    }
+  ]
+}

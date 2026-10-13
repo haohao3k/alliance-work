@@ -1,0 +1,6 @@
+Observed on 2026-10-13 against Alliance Work v0.1.6 (c7c86a2):
+runVerification executed node -e 'process.exit(0)' with a requested assertion
+'login-actually-works'. Zero assertions ran, but the command-only report was PASS.
+The old API did not implement assertionIds. It only established command success.
+This experiment motivates an opt-in assertion contract, not a claim that command-only
+checks establish feature coverage. Kept as a deterministic regression, not model evidence.

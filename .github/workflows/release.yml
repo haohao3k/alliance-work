@@ -27,6 +27,13 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check && npm run lint
+      - run: npm run test:coverage -- --output "$RUNNER_TEMP/alliance-coverage"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: executed-feature-coverage
+          path: ${{ runner.temp }}/alliance-coverage
+          if-no-files-found: ignore
       - name: Match tag to package
         run: test "$RELEASE_TAG" = "v$(node -p "require('./package.json').version")"
       - run: npm run release:pack

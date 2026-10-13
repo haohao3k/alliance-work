@@ -84,6 +84,7 @@ async function nativeResponse<T>(
 }
 const expected = [
   "alliance-verify",
+  "alliance-learn-from-failure",
   "project-check",
   "slp-candidate-handoff",
   "slp-challenge-premise",
@@ -124,6 +125,10 @@ test("native Codex only enables the selected Seatwork skills despite project and
       "features.plugins=true",
       "-c",
       "features.remote_plugin=true",
+      "-c",
+      "model_auto_compact_token_limit=1000000",
+      "-c",
+      'model_auto_compact_token_limit_scope="body_after_prefix"',
     ],
     { PATH: process.env.PATH, ALLIANCE_WORKSPACE_CWD: f.cwd },
   );
@@ -141,6 +146,8 @@ test("native Codex only enables the selected Seatwork skills despite project and
   for (const name of ["apps", "plugins", "remote_plugin", "tool_suggest"])
     assert.equal(discovered.config.features[name], false);
   assert.notEqual(discovered.config.model_reasoning_effort, "low");
+  assert.equal(discovered.config.model_auto_compact_token_limit, 300000);
+  assert.equal(discovered.config.model_auto_compact_token_limit_scope, "total");
   assert.equal(discovered.config.mcp_servers?.["explicit.sentinel"]?.enabled, false);
   assert(
     !discovered.config.mcp_servers?.project_sentinel ||

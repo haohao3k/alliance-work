@@ -1,0 +1,279 @@
+{
+  "version": 1,
+  "features": [
+    {
+      "id": "rooms",
+      "title": "Rooms and delegation",
+      "entryPoint": "Native room creation / create_agent",
+      "preconditions": "Node 24 and npm ci; isolated test fixtures",
+      "behaviors": [
+        {
+          "id": "rooms.room-binding",
+          "expect": "Native sessions bind the same project room across restart"
+        },
+        {
+          "id": "rooms.assignment",
+          "expect": "Retried launches preserve one agent and durable assignment"
+        },
+        {
+          "id": "rooms.ownership",
+          "expect": "Cancel/failure/completion preserve ownership without automatic acceptance"
+        },
+        {
+          "id": "rooms.resume",
+          "expect": "Resume does not interrupt active work or accept late receipts"
+        }
+      ]
+    },
+    {
+      "id": "models",
+      "title": "Owner model choice",
+      "entryPoint": "Room Models settings",
+      "preconditions": "Node 24 and npm ci; isolated test fixtures",
+      "behaviors": [
+        {
+          "id": "models.lead-choice",
+          "expect": "Lead can override preferred model and effort"
+        },
+        {
+          "id": "models.worker-policy",
+          "expect": "Worker choices respect allowlist and owner choice"
+        },
+        {
+          "id": "models.policy-persistence",
+          "expect": "Policies persist and reject stale edits"
+        }
+      ]
+    },
+    {
+      "id": "skills",
+      "title": "Project skills",
+      "entryPoint": "alliance-work skills add",
+      "preconditions": "Node 24 and npm ci; isolated test fixtures",
+      "behaviors": [
+        {
+          "id": "skills.skill-selection",
+          "expect": "Only explicitly registered project skills and resources load"
+        }
+      ]
+    },
+    {
+      "id": "evidence",
+      "title": "Bound acceptance",
+      "entryPoint": "alliance-work verify / accept",
+      "preconditions": "Node 24 and npm ci; isolated test fixtures",
+      "behaviors": [
+        {
+          "id": "evidence.evidence-binding",
+          "expect": "Changed candidate, ignored input or artifact invalidates proof"
+        },
+        {
+          "id": "evidence.coverage",
+          "expect": "Missing/skipped assertions and unmapped behaviors remain uncovered"
+        },
+        {
+          "id": "evidence.coverage-integrity",
+          "expect": "Changed maps, logs and unknown assertions are refused"
+        }
+      ]
+    },
+    {
+      "id": "learning",
+      "title": "Failure evaluations",
+      "entryPoint": "alliance-work eval",
+      "preconditions": "Node 24 and npm ci; isolated test fixtures",
+      "behaviors": [
+        {
+          "id": "learning.comparison",
+          "expect": "Baseline and candidate use the same cases with durable evidence"
+        },
+        {
+          "id": "learning.regressions",
+          "expect": "Held-out regression or blocked baseline prevents an improvement claim"
+        }
+      ]
+    },
+    {
+      "id": "maintenance",
+      "title": "Safe activation",
+      "entryPoint": "alliance-work update / rollback",
+      "preconditions": "Node 24 and npm ci; isolated test fixtures",
+      "behaviors": [
+        {
+          "id": "maintenance.idle",
+          "expect": "Active and unknown state blocks activation"
+        },
+        {
+          "id": "maintenance.rollback",
+          "expect": "Rollback retains auth, sessions and room artifacts"
+        },
+        {
+          "id": "maintenance.release-integrity",
+          "expect": "Corrupt release rejected before activation"
+        }
+      ]
+    }
+  ],
+  "scenarios": [
+    {
+      "id": "rooms.room-binding",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "rooms.room-binding"],
+      "assertions": [
+        {
+          "id": "rooms.room-binding",
+          "behavior": "rooms.room-binding"
+        }
+      ]
+    },
+    {
+      "id": "rooms.assignment",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "rooms.assignment"],
+      "assertions": [
+        {
+          "id": "rooms.assignment",
+          "behavior": "rooms.assignment"
+        }
+      ]
+    },
+    {
+      "id": "rooms.ownership",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "rooms.ownership"],
+      "assertions": [
+        {
+          "id": "rooms.ownership",
+          "behavior": "rooms.ownership"
+        }
+      ]
+    },
+    {
+      "id": "rooms.resume",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "rooms.resume"],
+      "assertions": [
+        {
+          "id": "rooms.resume",
+          "behavior": "rooms.resume"
+        }
+      ]
+    },
+    {
+      "id": "models.lead-choice",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "models.lead-choice"],
+      "assertions": [
+        {
+          "id": "models.lead-choice",
+          "behavior": "models.lead-choice"
+        }
+      ]
+    },
+    {
+      "id": "models.worker-policy",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "models.worker-policy"],
+      "assertions": [
+        {
+          "id": "models.worker-policy",
+          "behavior": "models.worker-policy"
+        }
+      ]
+    },
+    {
+      "id": "models.policy-persistence",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "models.policy-persistence"],
+      "assertions": [
+        {
+          "id": "models.policy-persistence",
+          "behavior": "models.policy-persistence"
+        }
+      ]
+    },
+    {
+      "id": "skills.skill-selection",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "skills.skill-selection"],
+      "assertions": [
+        {
+          "id": "skills.skill-selection",
+          "behavior": "skills.skill-selection"
+        }
+      ]
+    },
+    {
+      "id": "evidence.evidence-binding",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "evidence.evidence-binding"],
+      "assertions": [
+        {
+          "id": "evidence.evidence-binding",
+          "behavior": "evidence.evidence-binding"
+        }
+      ]
+    },
+    {
+      "id": "evidence.coverage",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "evidence.coverage"],
+      "assertions": [
+        {
+          "id": "evidence.coverage",
+          "behavior": "evidence.coverage"
+        }
+      ]
+    },
+    {
+      "id": "evidence.coverage-integrity",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "evidence.coverage-integrity"],
+      "assertions": [
+        {
+          "id": "evidence.coverage-integrity",
+          "behavior": "evidence.coverage-integrity"
+        }
+      ]
+    },
+    {
+      "id": "learning.comparison",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "learning.comparison"],
+      "assertions": [
+        {
+          "id": "learning.comparison",
+          "behavior": "learning.comparison"
+        }
+      ]
+    },
+    {
+      "id": "learning.regressions",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "learning.regressions"],
+      "assertions": [
+        {
+          "id": "learning.regressions",
+          "behavior": "learning.regressions"
+        }
+      ]
+    },
+    {
+      "id": "maintenance.idle",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "maintenance.idle"],
+      "assertions": [
+        {
+          "id": "maintenance.idle",
+          "behavior": "maintenance.idle"
+        }
+      ]
+    },
+    {
+      "id": "maintenance.rollback",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "maintenance.rollback"],
+      "assertions": [
+        {
+          "id": "maintenance.rollback",
+          "behavior": "maintenance.rollback"
+        }
+      ]
+    },
+    {
+      "id": "maintenance.release-integrity",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "maintenance.release-integrity"],
+      "assertions": [
+        {
+          "id": "maintenance.release-integrity",
+          "behavior": "maintenance.release-integrity"
+        }
+      ]
+    }
+  ]
+}

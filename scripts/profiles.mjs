@@ -10,6 +10,7 @@ import {
   managedDigest,
   nativeTrustFile,
 } from "../server/profile-integrity.mjs";
+import { contextTokenLimit } from "./context-policy.mjs";
 import { bundledPi } from "./pi-runtime.mjs";
 
 export { assertNoLinks, digest, managedDigest, verifyProfile } from "../server/profile-integrity.mjs";
@@ -155,7 +156,7 @@ export async function prepareProfiles({ home, executables, isolatedRoot = undefi
       if (harness === "codex")
         await manage(
           join(roleHome, "config.toml"),
-          'cli_auth_credentials_store = "file"\n[features]\n' +
+          `cli_auth_credentials_store = "file"\nmodel_auto_compact_token_limit = ${contextTokenLimit}\nmodel_auto_compact_token_limit_scope = "total"\n[features]\n` +
             Object.entries(codexIsolationFeatures)
               .map(([name, value]) => `${name} = ${value}\n`)
               .join(""),
@@ -170,13 +171,17 @@ export async function prepareProfiles({ home, executables, isolatedRoot = undefi
               syncClaudeAiPlugins: false,
               disableClaudeAiConnectors: true,
               enabledPlugins: {},
+              autoCompactWindow: contextTokenLimit,
             },
             null,
             2,
           ) + "\n",
         );
       if (harness === "pi") {
-        await manage(join(roleHome, "settings.json"), JSON.stringify({ packages: [] }, null, 2) + "\n");
+        await manage(
+          join(roleHome, "settings.json"),
+          JSON.stringify({ packages: [], compaction: { enabled: true } }, null, 2) + "\n",
+        );
         await manage(join(roleHome, "mcp.json"), '{"mcpServers":{}}\n');
       }
       profiles[id] = profile;

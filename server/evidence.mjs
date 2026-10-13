@@ -287,7 +287,7 @@ export async function validateEvidence(path, cwd, candidate) {
       throw new Error("Assertion coverage is incomplete or changed");
   }
   if (report.coverage) {
-    const coverage = await inspectCoverage(report.coverage, cwd, candidate, true);
+    const coverage = await inspectCoverage(report.coverage, current.cwd, candidate, true);
     if (coverage.verdict !== "PASS") throw new Error("Feature coverage is incomplete");
   }
   return report;

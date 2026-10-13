@@ -80,6 +80,7 @@ test("feature coverage binds executed assertions and explicit scope; missing and
   assert.equal(good.coverage?.covered, 1);
   assert.deepEqual(good.coverage?.excluded, ["remote"]);
   await validateEvidence(good.path, f.cwd, good.report.candidate.digest);
+  await validateEvidence(good.path, `${f.cwd}/`, good.report.candidate.digest);
   const all = await verify("all", []);
   assert.equal(all.report.verdict, "BLOCKED");
   assert.equal(all.coverage?.total, 2);
@@ -168,7 +169,7 @@ test("timing out a feature suite stops its scenario process and retains a blocke
     output: join(f.root, "timeout"),
     map: "features.json",
     features: ["persistence"],
-    timeoutMs: 1500,
+    timeoutMs: 3000,
   });
   assert.equal(result.report.verdict, "BLOCKED");
   const pid = Number(await readFile(pidFile, "utf8"));

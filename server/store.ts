@@ -21,6 +21,24 @@ export interface MemberRecord {
   launchModel?: string;
   launchEffort?: string;
   lastTurnId?: string | null;
+  lastAcceptance?: {
+    decision: "accepted" | "rejected";
+    kind: string | null;
+    candidate: string;
+    target: string | null;
+    at: string;
+    evidence: string;
+  };
+}
+export interface JobRecord {
+  key: string;
+  roomId: string;
+  ownerId: string;
+  title: string;
+  pid: number;
+  processIdentity: string;
+  recordedAt: string;
+  revision: number;
 }
 export class RoomStore {
   private db: DatabaseSync;
@@ -30,8 +48,26 @@ export class RoomStore {
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS rooms(id TEXT PRIMARY KEY, cwd TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS members(id TEXT PRIMARY KEY, roomId TEXT NOT NULL, launchKey TEXT, data TEXT NOT NULL, UNIQUE(roomId, launchKey));
+      CREATE TABLE IF NOT EXISTS jobs(key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS room_model_policies(roomId TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL);`);
   }
+  jobs(): JobRecord[] {
+    return (this.db.prepare("SELECT data FROM jobs ORDER BY key").all() as { data: string }[]).map((r) =>
+      JSON.parse(r.data),
+    );
+  }
+  saveJob(job: JobRecord, expectedRevision?: number) {
+    const result =
+      expectedRevision === undefined
+        ? this.db
+            .prepare("INSERT INTO jobs(key,data) VALUES(?,?) ON CONFLICT DO NOTHING")
+            .run(job.key, JSON.stringify(job))
+        : this.db
+            .prepare("UPDATE jobs SET data=? WHERE key=? AND json_extract(data, '$.revision')=?")
+            .run(JSON.stringify(job), job.key, expectedRevision);
+    if (!result.changes) throw new Error("Job changed; refresh before updating ownership");
+  }
+
   modelPolicy(roomId: string) {
     this.room(roomId);
     const row = this.db.prepare("SELECT revision,data FROM room_model_policies WHERE roomId=?").get(roomId) as

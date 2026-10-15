@@ -259,3 +259,48 @@ the release checksum and candidate before activation. Busy or unknown agent/scri
 activation; retry when work is idle. No running daemon is restarted. Later releases use ordinary
 `alliance-work update --check` / `alliance-work update`. Project skill selections live in projects;
 project skill caches and evidence live outside managed role assets and survive refresh/update.
+
+## Ownership and background jobs
+
+`alliance-work status` reads native member state and durable acceptance history. Each member
+shows its parent owner (or Human), whether that owner is available, current acceptance, and the
+last disposition's analysis/test/runtime scope. Historical acceptance does not accept a new turn
+or prove the current checkout unchanged; rerun the relevant verification before a new acceptance.
+
+Register an already-running controller without sending messages, restarting it, or changing its limits:
+
+```sh
+alliance-work jobs track --room ROOM_ID --owner AGENT_ID --pid 12345 --key stable-run-id --title 'Benchmark controller'
+alliance-work jobs list
+alliance-work jobs owner --key stable-run-id --owner NEXT_AGENT_ID --revision 1
+```
+
+The key is global to the installation. PID identity includes Linux boot ID and process start time
+(or macOS process start time). Reused/exited PIDs cannot appear running. Only registered processes
+are observed; this is not discovery of every background task. A controller exit means result
+unverified, not successful completion; detached descendants require their own tracking. Archived,
+closed or unknown owners are highlighted for reassignment. Ownership writes use the displayed
+revision and require an available recipient; recording ownership does not notify or acknowledge
+that recipient. Keep the handoff and output paths in the durable assignment.
+
+## Non-interrupting coordination policy
+
+Ordinary progress goes into the assignment/result artifact. Avoid progress pings and duplicate
+handbacks. Set native `notifyOnFinish=false` when the owner will continue independent work, then
+reconcile at its next task boundary. Use finish notification when the owner is waiting. Urgent
+corrections can still intentionally interrupt. This release does not add a mailbox or claim a
+native queued-send guarantee: Paseo 0.11.2 exposes interrupt/steer, not atomic idle-only delivery.
+The Alliance resume RPC refuses closed, archived, unknown and non-idle agents, but a concurrent
+native send can still race its readback. Existing sessions keep already-loaded instructions until
+fresh context is created; never restart active work just to replace its instructions.
+
+## Candidate identity
+
+Activation checks required context, coverage, failure-learning and operations files and records a
+SHA-256 of shipped runtime source. `doctor` checks those capabilities and compares current bytes
+with that installation pin. This is source drift detection, not a proof of model effectiveness or
+a replacement for tests. Older records without a pin report `pinned: false`.
+
+Stage and test candidates separately. Activation still requires all native agents and workspace
+scripts to be idle, uses the owned installer and preserves daemon/process history. External jobs
+must also be observed before/after; if any impact is uncertain, leave the candidate staged.

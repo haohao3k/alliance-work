@@ -112,6 +112,30 @@
           "expect": "Corrupt release rejected before activation"
         }
       ]
+    },
+    {
+      "id": "operations",
+      "title": "Owner and acceptance visibility",
+      "entryPoint": "Alliance monitor / status / jobs / doctor",
+      "preconditions": "Node 24 and isolated fixtures",
+      "behaviors": [
+        {
+          "id": "operations.owner",
+          "expect": "Owner changes and process tracking persist without sending prompts"
+        },
+        {
+          "id": "operations.process",
+          "expect": "Exited or reused PIDs never imply successful completion"
+        },
+        {
+          "id": "operations.capabilities",
+          "expect": "Missing coverage or changed pinned source fails health checks"
+        },
+        {
+          "id": "operations.resume",
+          "expect": "Unknown and closed recipients receive no resume prompt"
+        }
+      ]
     }
   ],
   "scenarios": [
@@ -272,6 +296,46 @@
         {
           "id": "maintenance.release-integrity",
           "behavior": "maintenance.release-integrity"
+        }
+      ]
+    },
+    {
+      "id": "operations.owner",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "operations.owner"],
+      "assertions": [
+        {
+          "id": "operations.owner",
+          "behavior": "operations.owner"
+        }
+      ]
+    },
+    {
+      "id": "operations.process",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "operations.process"],
+      "assertions": [
+        {
+          "id": "operations.process",
+          "behavior": "operations.process"
+        }
+      ]
+    },
+    {
+      "id": "operations.capabilities",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "operations.capabilities"],
+      "assertions": [
+        {
+          "id": "operations.capabilities",
+          "behavior": "operations.capabilities"
+        }
+      ]
+    },
+    {
+      "id": "operations.resume",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "operations.resume"],
+      "assertions": [
+        {
+          "id": "operations.resume",
+          "behavior": "operations.resume"
         }
       ]
     }

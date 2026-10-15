@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -10,8 +10,10 @@ import type { PluginHookAgent, PluginTurnOutcome } from "@getpaseo/plugin/server
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
 import { validateEvidence } from "../server/evidence.mjs";
 import { projectSkills, skillCatalog } from "../server/project-skills.mjs";
-import type { memberLaunch, RoleName, RoomRecord } from "../shared/contracts";
+import { Acceptance, type memberLaunch, type RoleName, type RoomRecord } from "../shared/contracts";
 import { policyInstruction, type TaskDifficulty } from "../shared/model-policy";
+import { ownerState } from "../shared/operations";
+import { observeJob, processIdentity } from "./jobs.mjs";
 import { chooseModel } from "./model-policy";
 import { verifyProfile } from "./profile-integrity.mjs";
 import { RoomStore } from "./store";
@@ -321,7 +323,45 @@ export class AllianceRuntime {
         }
       }),
     );
-    return { rooms: this.store.rooms(), members };
+    const latest = new Map<string, NonNullable<ReturnType<RoomStore["member"]>>["lastAcceptance"]>();
+    for (const room of this.store.rooms()) {
+      const directory = join(room.artifacts, "dispositions");
+      const names = await readdir(directory).catch((error) => {
+        if (error.code === "ENOENT") return [];
+        throw error;
+      });
+      for (const name of names.filter((n) => n.endsWith(".json"))) {
+        try {
+          const d = JSON.parse(await readFile(join(directory, name), "utf8"));
+          if (!d.agentId || !d.at || !["accepted", "rejected"].includes(d.decision)) continue;
+          const parsed = Acceptance.safeParse({
+            decision: d.decision,
+            kind: d.verification?.kind ?? null,
+            candidate: d.candidate,
+            target: d.verification?.target ?? null,
+            at: d.at,
+            evidence: join(directory, name),
+          });
+          if (parsed.success && (latest.get(d.agentId)?.at ?? "") < parsed.data.at)
+            latest.set(d.agentId, parsed.data);
+        } catch {
+          /* A corrupt record never becomes an acceptance claim. */
+        }
+      }
+    }
+    return {
+      rooms: this.store.rooms(),
+      members: members.map((member) => ({
+        ...member,
+        ...ownerState(member.parentId, members),
+        lastAcceptance: latest.get(member.id) ?? null,
+      })),
+      jobs: await Promise.all(
+        this.store
+          .jobs()
+          .map(async (job) => ({ ...(await observeJob(job)), ...ownerState(job.ownerId, members) })),
+      ),
+    };
   }
   async resume(id: string, prompt: string, paseo: PaseoApi) {
     const member = this.store.member(id);
@@ -331,6 +371,8 @@ export class AllianceRuntime {
     if (!live) throw new Error("Agent is unavailable; its assignment remains open");
     if (["running", "starting", "initializing"].includes(live.agent.status))
       throw new Error("Agent is already working. Open its native chat to steer intentionally.");
+    if (live.agent.archivedAt || live.agent.status !== "idle")
+      throw new Error("Recipient must be idle and unarchived; no prompt sent");
     if ((live.agent.pendingPermissions ?? []).length)
       throw new Error("Resolve the pending permission in the native agent chat first");
     await agent.send(
@@ -338,6 +380,45 @@ export class AllianceRuntime {
       { messageId: randomUUID() },
     );
     return { sent: true as const };
+  }
+  async trackJob(input: { key: string; roomId: string; ownerId: string; title: string; pid: number }) {
+    this.store.room(input.roomId);
+    const owner = this.store.member(input.ownerId);
+    if (!owner) throw new Error("Job owner must be a known Alliance member");
+    const identity = await processIdentity(input.pid);
+    if (!identity) throw new Error("Process is no longer running; no job recorded");
+    const old = this.store.jobs().find((job) => job.key === input.key);
+    if (old) {
+      if (
+        old.pid !== input.pid ||
+        old.processIdentity !== identity ||
+        old.roomId !== input.roomId ||
+        old.ownerId !== input.ownerId
+      )
+        throw new Error("Job key already belongs to another run or owner");
+      return { saved: true as const };
+    }
+    this.store.saveJob({
+      ...input,
+      processIdentity: identity,
+      recordedAt: new Date().toISOString(),
+      revision: 1,
+    });
+    return { saved: true as const };
+  }
+  async changeJobOwner(key: string, ownerId: string, revision: number, paseo: PaseoApi) {
+    if (!this.store.member(ownerId)) throw new Error("Unknown Alliance owner");
+    const live = await paseo.agents.ref(ownerId).refresh();
+    if (
+      !live?.agent ||
+      live.agent.archivedAt ||
+      !["idle", "running", "starting", "initializing"].includes(live.agent.status)
+    )
+      throw new Error("New owner is unavailable");
+    const job = this.store.jobs().find((job) => job.key === key);
+    if (!job) throw new Error("Unknown job");
+    this.store.saveJob({ ...job, ownerId, revision: revision + 1 }, revision);
+    return { saved: true as const };
   }
   async startTurn(agent: PluginHookAgent, turnId: string | null) {
     await this.bind(agent);

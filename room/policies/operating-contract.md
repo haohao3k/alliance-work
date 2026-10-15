@@ -21,8 +21,15 @@ no MCP server or second mailbox. HQ may use an existing Piggery installation thr
 when the assigned project uses Piggery; discover that project's gate and rules first. Do not
 assume a Paseo agent is also a registered Piggery participant. A successful send means a prompt was dispatched,
 not that the recipient processed or accepted it. Sending to a busy agent may interrupt its turn.
-Use finish notifications for ordinary handback, continue unrelated work while waiting, and send
-an interrupting message only when its urgency warrants that effect. Notifications can be missed
+Routine progress belongs in the durable assignment/result artifact, not another prompt to a busy
+owner. Do not send acknowledgements, status pings or duplicate final handbacks. When delegating
+while you continue independent work, set native notifyOnFinish=false; the owner must reconcile
+the child at its next task boundary using native status/activity. Use notifyOnFinish=true only
+when the owner is ready to wait for that child, since native finish notifications can interrupt too.
+Batch related questions into one handback. Send to a busy agent only for an urgent correction
+that justifies interruption, and state that reason. If the recipient is closed, archived, unknown
+or waiting for permission, preserve the handback and surface the missing owner instead of waking it.
+An idle readback is not an atomic delivery guarantee; this pinned native API has no queued-send mode. Notifications can be missed
 across restarts: reconcile agent status and activity on resume; never claim continuous coverage.
 
 Before delegation, write the assignment and its acceptance conditions in the room's artifacts
@@ -35,8 +42,8 @@ the artifact; an explicit disposition names the candidate, evidence and remainin
 Use native Paseo tools by their current schemas. Compatibility vocabulary in Seatwork skills:
 - create_agent: native create_agent, choosing an Alliance provider for the required role.
 - slp_mail: native send_agent_prompt, with background true and notifyOnFinish false for a
-  substantive report to its owner. Prefer the child's native finish notification for final output;
-  do not send both and create feedback loops. Preserve any required durable artifact first.
+  substantive report to its owner. Choose either one finish notification when the owner is waiting, or durable handback
+  with owner reconciliation when it is working; do not send both and create feedback loops. Preserve any required durable artifact first.
 - slp_inbox/slp_status: native get_agent_status/get_agent_activity and list_agents; there is no
   destructive inbox read or delivery-ack claim. Inspect only the agents relevant to your scope.
 - slp_skill: read the role's local skill file and referenced files with your native file tools.
@@ -51,3 +58,15 @@ room allowlist, then verify model and effort in the target role's live provider 
 Report the candidate identity, checks and actual results, untested scope and next owner. Existing
 tests may establish the invariant; do not add tests for wording or wiring. A reproducible fix needs
 a regression check. Acceptance does not authorize publishing, deploying or destructive changes.
+
+Long-running external jobs must keep a stable run ID, command/service identity, output location and
+responsible owner in the assignment. Register the controller process with `alliance-work jobs track`
+once started. The monitor observes that exact process only; a process exit is not a successful job
+or accepted result. Detached descendants and remote jobs need explicit reconciliation. Before
+archiving an owner, transfer responsibility to an available owner and record the handoff; do not
+stop or restart an existing job merely to change its tracking record. A tracking record is metadata,
+not a message or acknowledgement from the recipient.
+
+Acceptance must name its scope: analysis, tests or runtime; keep research answers distinct from
+admitted assessments and verified product behavior. The monitor's last decision is historical;
+a new turn reopens current acceptance. Do not claim product completion from an analysis PASS.

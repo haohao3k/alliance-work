@@ -31,6 +31,7 @@ async function fixture() {
   let creates = 0,
     sends = 0,
     status = "idle";
+  let archivedAt: string | null = null;
   const identities = new Set<string>();
   const launchConfigs: { modeId?: string; thinkingOptionId?: string }[] = [];
   const workspace = {
@@ -60,7 +61,7 @@ async function fixture() {
     workspaces: { open: async () => workspace, ref: (id: string) => ({ ...workspace, id }) },
     agents: {
       ref: () => ({
-        refresh: async () => ({ agent: { status, pendingPermissions: [], lastError: null } }),
+        refresh: async () => ({ agent: { status, archivedAt, pendingPermissions: [], lastError: null } }),
         send: async () => {
           sends++;
         },
@@ -81,6 +82,9 @@ async function fixture() {
     room,
     count: () => ({ creates, sends }),
     launchConfigs,
+    archived: (value: boolean) => {
+      archivedAt = value ? new Date().toISOString() : null;
+    },
     status: (next: string) => {
       status = next;
     },
@@ -282,6 +286,10 @@ test("canceled/failed/completed turns preserve ownership and never accept their 
     await reopened.startTurn(agent, "next-turn");
     assert.equal(member(reopened, agentId).decision, "open");
     assert.equal(member(reopened, agentId).resultPath, null);
+    const display = (await reopened.list(f.paseo)).members.find((m) => m.id === agentId);
+    assert.equal(display?.decision, "open");
+    assert.equal(display?.lastAcceptance?.kind, "test");
+    assert.equal(display?.lastAcceptance?.candidate, proof.report.candidate.digest);
     assert.equal(JSON.parse(await readFile(disposition, "utf8")).candidate, proof.report.candidate.digest);
   } finally {
     reopened.close();
@@ -427,6 +435,61 @@ test("acceptance refuses invented candidate and evidence identities", async () =
       f.paseo,
     );
     await assert.rejects(f.runtime.disposition(agentId, "accepted", "invented", "not-a-report"));
+  } finally {
+    f.runtime.close();
+  }
+});
+
+test("resume refuses unknown, archived and closed recipients without sending a prompt", async () => {
+  const f = await fixture();
+  try {
+    const { agentId } = await f.runtime.launch(
+      { roomId: f.room.id, key: "safe-resume", role: "peer", harness: "codex", prompt: "Work" },
+      f.paseo,
+    );
+    for (const status of ["unknown", "unavailable", "closed", "stopped", "awaiting_permission"]) {
+      f.status(status);
+      await assert.rejects(f.runtime.resume(agentId, "Continue", f.paseo), /idle|unavailable|permission/i);
+    }
+    f.status("idle");
+    f.archived(true);
+    await assert.rejects(f.runtime.resume(agentId, "Continue", f.paseo), /unarchived/);
+    assert.equal(f.count().sends, 0);
+  } finally {
+    f.runtime.close();
+  }
+});
+
+test("tracked processes survive reload, expose missing owners and refuse stale ownership edits", async () => {
+  const f = await fixture();
+  try {
+    const { agentId } = await f.runtime.launch(
+      { roomId: f.room.id, key: "job-owner", role: "lead", harness: "codex", prompt: "Own the job" },
+      f.paseo,
+    );
+    await f.runtime.trackJob({
+      key: "long-run",
+      roomId: f.room.id,
+      ownerId: agentId,
+      title: "External controller",
+      pid: process.pid,
+    });
+    const first = (await f.runtime.list(f.paseo)).jobs[0];
+    assert.equal(first.state, "running");
+    assert.equal(first.ownerStatus, "available");
+    f.status("closed");
+    assert.equal((await f.runtime.list(f.paseo)).jobs[0].ownerStatus, "needs-owner");
+    await assert.rejects(f.runtime.changeJobOwner("long-run", agentId, 1, f.paseo), /unavailable/);
+    f.status("idle");
+    await f.runtime.changeJobOwner("long-run", agentId, 1, f.paseo);
+    await assert.rejects(f.runtime.changeJobOwner("long-run", agentId, 1, f.paseo), /changed/);
+    assert.equal(f.count().sends, 0, "Tracking never dispatches work or interrupts an owner");
+    const reopened = await new AllianceRuntime(f.home).ready();
+    try {
+      assert.equal((await reopened.list(f.paseo)).jobs[0].revision, 2);
+    } finally {
+      reopened.close();
+    }
   } finally {
     f.runtime.close();
   }

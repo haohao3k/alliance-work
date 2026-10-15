@@ -21,6 +21,12 @@ let checkCommand = [];
 const repeated = { "--input": [], "--artifact": [], "--unverified": [], "--feature": [] };
 const values = new Set([
   "--home",
+  "--room",
+  "--owner",
+  "--pid",
+  "--key",
+  "--title",
+  "--revision",
   "--paseo-home",
   "--port",
   "--bin-dir",
@@ -62,7 +68,10 @@ const help = `Alliance Work — isolated agent rooms on native Paseo
   alliance-work login codex lead      Log in to a separate role (any of the five roles)
   alliance-work login claude peer
   alliance-work login pi peer         Open Pi; use /login
-  alliance-work doctor                Verify homes, skills, auth source and live plugin
+  alliance-work doctor                Verify homes, capabilities, pinned source and live plugin
+  alliance-work status                Read agents, owners, decisions and tracked processes
+  alliance-work jobs track --room ID --owner AGENT --pid PID --key RUN_ID --title TITLE
+  alliance-work jobs owner --key RUN_ID --owner AGENT --revision N
   alliance-work update --check        Read latest private GitHub release; change nothing
   alliance-work update                Verify, stage, check and activate the latest release
   alliance-work rollback              Activate the previous installation when idle
@@ -186,6 +195,43 @@ try {
       const result = await runFailureEval({ cwd, suite: flags["--suite"], output: destination });
       output({ report: result.path, ...result.report.summary });
       if (!["IMPROVED", "NO_CHANGE"].includes(result.report.summary.outcome)) process.exitCode = 1;
+    }
+  } else if (command === "status" || command === "jobs") {
+    const current = await installation(home);
+    if (!current) throw new Error("No Alliance installation exists for this home");
+    const config = JSON.parse(await readFile(join(current.paseoHome, "config.json"), "utf8"));
+    let method = "rooms.list",
+      input = {};
+    if (command === "jobs" && positional[1] === "track") {
+      for (const flag of ["--room", "--owner", "--pid", "--key", "--title"])
+        if (!flags[flag]) throw new Error(`Missing ${flag}`);
+      method = "jobs.track";
+      input = {
+        roomId: flags["--room"],
+        ownerId: flags["--owner"],
+        pid: Number(flags["--pid"]),
+        key: flags["--key"],
+        title: flags["--title"],
+      };
+    } else if (command === "jobs" && positional[1] === "owner") {
+      for (const flag of ["--key", "--owner", "--revision"])
+        if (!flags[flag]) throw new Error(`Missing ${flag}`);
+      method = "jobs.owner";
+      input = { key: flags["--key"], ownerId: flags["--owner"], revision: Number(flags["--revision"]) };
+    } else if (command === "jobs" && positional[1] !== "list")
+      throw new Error("Usage: jobs list|track|owner");
+    const client = new DaemonClient({
+      url: `ws://${config.daemon.listen}/ws`,
+      clientId: "alliance-operations",
+      password: process.env.ALLIANCE_PASEO_PASSWORD,
+      connectTimeoutMs: 10000,
+    });
+    try {
+      await client.connect();
+      const result = await client.invokePluginRpc("alliance-work", method, input);
+      output(command === "jobs" && positional[1] === "list" ? result.jobs : result);
+    } finally {
+      await client.close();
     }
   } else if (command === "accept") {
     if (!flags["--agent"] || !flags["--report"])

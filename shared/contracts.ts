@@ -19,6 +19,28 @@ export const Room = z.object({
   artifacts: z.string(),
   createdAt: z.string(),
 });
+export const Acceptance = z.object({
+  decision: z.enum(["accepted", "rejected"]),
+  kind: z.string().nullable(),
+  candidate: z.string(),
+  target: z.string().nullable(),
+  at: z.string(),
+  evidence: z.string(),
+});
+export const Job = z.object({
+  key: z.string(),
+  roomId: z.string(),
+  ownerId: z.string(),
+  title: z.string(),
+  pid: z.number().int(),
+  processIdentity: z.string(),
+  recordedAt: z.string(),
+  revision: z.number().int(),
+  state: z.enum(["running", "exited", "unknown"]),
+  observationError: z.string().nullable(),
+  ownerLabel: z.string(),
+  ownerStatus: z.string(),
+});
 export const Member = z.object({
   id: z.string(),
   roomId: z.string(),
@@ -36,11 +58,15 @@ export const Member = z.object({
   decisionEvidence: z.string().nullable(),
   status: z.string(),
   error: z.string().nullable(),
+  ownerId: z.string().nullable(),
+  ownerLabel: z.string(),
+  ownerStatus: z.string(),
+  lastAcceptance: Acceptance.nullable(),
 });
 export const roomList = defineRpc({
   name: "rooms.list",
   input: z.object({}),
-  output: z.object({ rooms: z.array(Room), members: z.array(Member) }),
+  output: z.object({ rooms: z.array(Room), members: z.array(Member), jobs: z.array(Job) }),
 });
 export const roomCreate = defineRpc({
   name: "rooms.create",
@@ -113,3 +139,20 @@ export const profileStatus = defineRpc({
 });
 export type RoomRecord = z.infer<typeof Room>;
 export type RoleName = z.infer<typeof Role>;
+
+export const jobTrack = defineRpc({
+  name: "jobs.track",
+  input: z.object({
+    key: z.string().min(1).max(160),
+    roomId: z.string(),
+    ownerId: z.string(),
+    title: z.string().min(1).max(200),
+    pid: z.number().int().min(2),
+  }),
+  output: z.object({ saved: z.literal(true) }),
+});
+export const jobOwner = defineRpc({
+  name: "jobs.owner",
+  input: z.object({ key: z.string(), ownerId: z.string(), revision: z.number().int().positive() }),
+  output: z.object({ saved: z.literal(true) }),
+});

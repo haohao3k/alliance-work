@@ -62,5 +62,21 @@
   "maintenance.release-integrity": {
     "file": "tests/maintenance.test.ts",
     "pattern": "release corruption is rejected"
+  },
+  "operations.owner": {
+    "file": "tests/rooms.test.ts",
+    "pattern": "tracked processes survive reload"
+  },
+  "operations.process": {
+    "file": "tests/operations.test.ts",
+    "pattern": "process exit and PID reuse"
+  },
+  "operations.capabilities": {
+    "file": "tests/operations.test.ts",
+    "pattern": "capability checks reject"
+  },
+  "operations.resume": {
+    "file": "tests/rooms.test.ts",
+    "pattern": "resume refuses unknown"
   }
 }

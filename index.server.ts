@@ -4,6 +4,8 @@ import { composeInstruction } from "./server/instructions";
 import { AllianceRuntime, allianceProvider } from "./server/runtime";
 import {
   directoryList,
+  jobOwner,
+  jobTrack,
   memberDisposition,
   memberLaunch,
   memberResume,
@@ -32,6 +34,10 @@ export default function contribute(server: PluginServerContext) {
         throw error;
       }
     })());
+  server.handle(jobTrack, async (input) => (await get()).trackJob(input));
+  server.handle(jobOwner, async (input, { paseo }) =>
+    (await get()).changeJobOwner(input.key, input.ownerId, input.revision, paseo),
+  );
   server.handle(profileStatus, async () => (await get()).profiles());
   server.handle(roomList, async (_input, { paseo }) => (await get()).list(paseo));
   server.handle(roomCreate, async (input, { paseo }) => (await get()).createRoom(input, paseo));

@@ -4,6 +4,7 @@ import { access, chmod, lstat, mkdir, readFile, rm, rmdir, unlink } from "node:f
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { authStatus, setAuthSource } from "./auth.mjs";
+import { inspectCapabilities } from "./capabilities.mjs";
 import { run } from "./distribution.mjs";
 import { install } from "./install.mjs";
 import {
@@ -181,6 +182,8 @@ export async function activate({
   }
   const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   requireCompatibleDaemon(state?.daemonVersion, pkg.devDependencies["@getpaseo/cli"]);
+  const capabilities = await inspectCapabilities(root);
+  if (!capabilities.ok) throw new Error("Candidate is missing required Alliance capabilities");
   const pi = await bundledPi(root);
   const executables = Object.fromEntries(
     await Promise.all(
@@ -201,6 +204,8 @@ export async function activate({
     await writeLauncher(binPath, home, root);
     const record = {
       version: pkg.version,
+      sourceDigest: capabilities.sourceDigest,
+      capabilities: capabilities.capabilities,
       root,
       home,
       paseoHome,
@@ -259,6 +264,14 @@ export async function doctor(home) {
   const auth = await authStatus(home);
   findings.push({ check: "codex-auth", ok: auth.ready !== false, ...auth });
   const record = await installation(home);
+  try {
+    findings.push({
+      check: "capabilities",
+      ...(await inspectCapabilities(record?.root ?? projectRoot, record?.sourceDigest)),
+    });
+  } catch (error) {
+    findings.push({ check: "capabilities", ok: false, error: error.message });
+  }
   const paseoHome = record?.paseoHome ?? join(homedir(), ".paseo-alliance-work");
   try {
     findings.push({

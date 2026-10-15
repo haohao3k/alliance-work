@@ -42,6 +42,7 @@ The dedicated installation defaults to **http://127.0.0.1:6771**; existing insta
 alliance-work auth codex --from "$HOME/.codex"
 alliance-work auth status
 alliance-work doctor
+alliance-work status                # owners, current acceptance, prior decisions and jobs
 ```
 
 Shared auth covers **HQ, Supervisor, Lead, Peer and Lens**. Alliance reads the original Codex
@@ -173,3 +174,8 @@ credentials and is a separate acceptance check.
 valid metadata pointing to those originals. This private project's provenance does not grant
 redistribution rights. Release packaging and contributor guidance are in [AGENTS.md](AGENTS.md)
 and [operations](docs/operations.md#releasing).
+
+See [operations and ownership](docs/operations.md#ownership-and-background-jobs) for registering
+existing background jobs without restarting them. The monitor separates current turn state from
+the last accepted analysis/test/runtime scope. Native messaging remains interruptible; the room
+contract uses durable progress and owner reconciliation to reduce unnecessary prompts.

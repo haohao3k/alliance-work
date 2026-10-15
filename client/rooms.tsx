@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { directoryList, roomCreate, roomList } from "../shared/contracts";
 import { activityState, relativeTime } from "../shared/monitor";
+import { acceptanceLabel } from "../shared/operations";
 import { ModelSettings } from "./model-settings";
 
 type Props = PluginSurfaceProps;
@@ -229,6 +230,7 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
   }, [paseo, cache, host.id]);
 
   const rooms = data.data?.rooms ?? [];
+  const jobs = data.data?.jobs ?? [];
   const members = (data.data?.members ?? []).filter((member) => archived || !member.archived);
   const counts = {
     all: members.length,
@@ -429,6 +431,30 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
               <Text style={muted}>{rows.length}</Text>
               <Button label="Models" icon="Settings2" colors={c} onPress={() => setModelRoom(room)} />
             </View>
+            {jobs
+              .filter((job) => job.roomId === room.id)
+              .map((job) => (
+                <View key={job.key} style={{ padding: 14, gap: 4, backgroundColor: c.surface1 }}>
+                  <Text style={cell}>
+                    {job.title} ·{" "}
+                    {job.state === "exited"
+                      ? "Process exited · result unverified"
+                      : job.state === "running"
+                        ? "Process running"
+                        : "Process state unknown"}
+                  </Text>
+                  <Text
+                    selectable
+                    style={{
+                      ...muted,
+                      color: job.ownerStatus === "needs-owner" ? c.statusWarning : c.foregroundMuted,
+                    }}
+                  >
+                    Owner: {job.ownerLabel}
+                    {job.ownerStatus === "needs-owner" ? " · needs reassignment" : ""} · PID {job.pid}
+                  </Text>
+                </View>
+              ))}
             {!compact && rows.length > 0 && (
               <View
                 style={{
@@ -472,6 +498,30 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
                     {compact && (
                       <Text numberOfLines={1} style={muted}>
                         {member.role} · {member.model || member.provider.replace(/^alliance-/, "")}
+                      </Text>
+                    )}
+                    <Text
+                      numberOfLines={1}
+                      style={{
+                        ...muted,
+                        color: member.ownerStatus === "needs-owner" ? c.statusWarning : c.foregroundMuted,
+                      }}
+                    >
+                      Owner: {member.ownerLabel}
+                      {member.ownerStatus === "needs-owner" ? " · unavailable" : ""}
+                    </Text>
+                    <Text style={muted}>
+                      {acceptanceLabel({
+                        ...member,
+                        kind: member.decision === "accepted" ? member.lastAcceptance?.kind : null,
+                      })}
+                    </Text>
+                    {member.lastAcceptance && (
+                      <Text numberOfLines={2} style={muted}>
+                        Last decision: {member.lastAcceptance.decision}{" "}
+                        {member.lastAcceptance.kind || "scope unspecified"} ·{" "}
+                        {member.lastAcceptance.target || member.lastAcceptance.candidate.slice(0, 12)} ·{" "}
+                        {relativeTime(member.lastAcceptance.at, now)} ago
                       </Text>
                     )}
                     {member.error && (

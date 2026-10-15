@@ -118,6 +118,19 @@ test("native Paseo switches release roots and restores the previous plugin after
     };
     assert.equal(after.rooms.length, before.rooms.length + 1);
     assert(after.members.some((member) => member.id === created.id));
+    await client.invokePluginRpc("alliance-work", "jobs.track", {
+      key: "native-controller",
+      roomId: policyRoomId,
+      ownerId: created.id,
+      pid: process.pid,
+      title: "Native fixture controller",
+    });
+    const tracked = (await client.invokePluginRpc("alliance-work", "rooms.list", {})) as {
+      jobs: { state: string; ownerId: string; ownerStatus: string }[];
+    };
+    assert.equal(tracked.jobs[0].state, "running");
+    assert.equal(tracked.jobs[0].ownerId, created.id);
+    assert.equal(tracked.jobs[0].ownerStatus, "available");
     const nativeAssignment = after.members.find((member) => member.id === created.id)?.assignment;
     assert(nativeAssignment);
     assert((await readFile(nativeAssignment, "utf8")).includes(created.id));

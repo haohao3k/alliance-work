@@ -20,6 +20,12 @@ export const Room = z.object({
   artifacts: z.string(),
   createdAt: z.string(),
 });
+export const ProductAcceptance = z.object({
+  outcome: z.string().trim().min(1).max(2000),
+  journey: z.string().trim().min(1).max(4000),
+  reviewer: z.string().trim().min(1).max(200),
+  remaining: z.array(z.string().trim().min(1).max(2000)).max(30),
+});
 export const Acceptance = z.object({
   decision: z.enum(["accepted", "rejected"]),
   kind: z.string().nullable(),
@@ -27,6 +33,7 @@ export const Acceptance = z.object({
   target: z.string().nullable(),
   at: z.string(),
   evidence: z.string(),
+  product: ProductAcceptance.optional(),
 });
 export const Job = z.object({
   key: z.string(),
@@ -63,6 +70,10 @@ export const Member = z.object({
   ownerId: z.string().nullable(),
   ownerLabel: z.string(),
   ownerStatus: z.string(),
+  ownerRevision: z.number().int(),
+  ownerEvidence: z.string().nullable(),
+  policyDigest: z.string(),
+  policyAcknowledged: z.boolean(),
   lastAcceptance: Acceptance.nullable(),
 });
 export const roomList = defineRpc({
@@ -134,6 +145,7 @@ export const memberDisposition = defineRpc({
     decision: z.enum(["accepted", "rejected"]),
     candidate: z.string().min(1),
     evidence: z.string().min(1),
+    product: ProductAcceptance.optional(),
   }),
   output: z.object({ saved: z.literal(true) }),
 });
@@ -162,5 +174,26 @@ export const jobTrack = defineRpc({
 export const jobOwner = defineRpc({
   name: "jobs.owner",
   input: z.object({ key: z.string(), ownerId: z.string(), revision: z.number().int().positive() }),
+  output: z.object({ saved: z.literal(true) }),
+});
+
+export const memberOwner = defineRpc({
+  name: "members.owner",
+  input: z.object({
+    agentId: z.string(),
+    ownerId: z.string().nullable(),
+    revision: z.number().int().nonnegative(),
+    evidence: z.string().min(1),
+  }),
+  output: z.object({ saved: z.literal(true) }),
+});
+export const policyRead = defineRpc({
+  name: "policy.read",
+  input: z.object({ agentId: z.string() }),
+  output: z.object({ digest: z.string(), text: z.string(), path: z.string(), acknowledged: z.boolean() }),
+});
+export const policyAck = defineRpc({
+  name: "policy.ack",
+  input: z.object({ agentId: z.string(), digest: z.string().regex(/^[a-f0-9]{64}$/) }),
   output: z.object({ saved: z.literal(true) }),
 });

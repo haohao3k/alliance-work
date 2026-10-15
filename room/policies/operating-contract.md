@@ -89,3 +89,49 @@ when concurrent human work must never be interrupted. Never enable idle delivery
 existing job merely because it is listed. Resolve uncertain deliveries by checking history;
 do not create another wakeup key to bypass ambiguity. Transfer job ownership before transferring
 its wakeup. Closed/archived owners must be reconciled explicitly; they are never auto-resumed.
+
+## Apply current policy at a work boundary
+
+At the next natural assignment start/resume, read `alliance-work policy read --agent
+"$PASEO_AGENT_ID"`, apply the returned operating instructions and acknowledge that exact digest
+with `alliance-work policy ack --agent "$PASEO_AGENT_ID" --digest SHA256`. This records a read
+acknowledgement, not proof of compliance or a replacement of the native session's system prompt.
+An update never injects prompts into busy sessions. Owners pass the current policy to existing
+Peers with their next substantive assignment, not a separate broadcast or acknowledgement loop.
+Read pending wakeups at that boundary. Do not start new product work just to acknowledge policy.
+
+## Frame work and review around a decision
+
+A brief separates the Human's outcome, verified mandatory constraints (and their source), and
+current design choices that may be revised. Name one write owner, the integration/acceptance
+owner, the user journey or other observable result, and what evidence would establish it.
+Keep helper names, algorithms, file layouts and intermediate phases out of the contract unless
+an existing external contract or demonstrated dependency requires them. A write boundary does
+not restrict reading or questioning another component. Discovery starts with an open question;
+a bounded regression review may deliberately check a known invariant.
+
+Before another review or paid rerun, name the unresolved decision and the new evidence or
+competing hypothesis that makes the next round useful. Missing runtime, dependency or identity
+context is a blocker to acquire or expose, not a reason to ask another model the same question.
+No reviewer quota or compulsory challenge. Record material findings, the resulting decision and
+whether the integrated outcome changed. Stop a review loop that adds no decision-relevant evidence.
+
+For user-facing work, establish an integrated user journey early, before polishing separate
+components. Retain technical checks, but inspect actual rendered behavior and the user's task.
+Synthetic transport, citation validity, model completion, assessment admission and semantic
+correctness are different claims. Frozen benchmark cohorts keep their original identities;
+new product fixes cannot retroactively improve their results. Shared-host timings need measured
+resource conditions before claiming comparative performance.
+
+Technical acceptance remains `accept --report REPORT`. Product acceptance additionally uses
+`--product JOURNEY.json` with outcome, observed journey, reviewer and remaining limitations, and
+requires a current candidate-bound runtime report. This is an accountable review statement,
+not automatic proof of usability, model quality or Human approval. Never promote old technical
+receipts to product acceptance without observing the journey.
+
+When a session's native parent is not its responsible owner, record the actual handoff with
+`members owner --agent ID --owner OWNER_ID --revision N --evidence HANDOFF_FILE`. Use `Human`
+only when the Human truly owns the next decision. This changes responsibility metadata, not
+native parentage, permissions, job ownership or receipt acceptance. Reconcile those explicitly.
+A cross-room wakeup may target a documented responsible owner; unrelated rooms cannot be used
+as a broadcast destination. Job exit remains a request to inspect outputs, not proof of success.

@@ -10,9 +10,15 @@ import type { PluginHookAgent, PluginTurnOutcome } from "@getpaseo/plugin/server
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
 import { validateEvidence } from "../server/evidence.mjs";
 import { projectSkills, skillCatalog } from "../server/project-skills.mjs";
-import { Acceptance, type memberLaunch, type RoleName, type RoomRecord } from "../shared/contracts";
+import {
+  Acceptance,
+  type memberLaunch,
+  ProductAcceptance,
+  type RoleName,
+  type RoomRecord,
+} from "../shared/contracts";
 import { policyInstruction, type TaskDifficulty } from "../shared/model-policy";
-import { ownerState } from "../shared/operations";
+import { ownerState, responsibleOwner } from "../shared/operations";
 import { observeJob, processIdentity } from "./jobs.mjs";
 import { chooseModel } from "./model-policy";
 import { verifyProfile } from "./profile-integrity.mjs";
@@ -341,7 +347,99 @@ export class AllianceRuntime {
     });
     return { agentId: id };
   }
+  async readPolicy(id: string) {
+    const member = this.store.member(id);
+    if (!member) throw new Error("Unknown Alliance member");
+    const profile = await this.profile(member.provider);
+    const path = join(profile.home, "root-instructions.md");
+    const text = await readFile(path, "utf8");
+    const digest = createHash("sha256").update(text).digest("hex");
+    return { digest, text, path, acknowledged: member.policyAck?.digest === digest };
+  }
+  async acknowledgePolicy(id: string, digest: string) {
+    const policy = await this.readPolicy(id);
+    if (digest !== policy.digest)
+      throw new Error("Policy changed; read the current policy before acknowledging");
+    this.store.updateMember(id, { policyAck: { digest, at: new Date().toISOString() } });
+    return { saved: true as const };
+  }
+  async changeMemberOwner(
+    id: string,
+    ownerId: string | null,
+    revision: number,
+    evidence: string,
+    paseo: PaseoApi,
+  ) {
+    const member = this.store.member(id);
+    if (!member) throw new Error("Unknown Alliance member");
+    if ((member.ownership?.revision ?? 0) !== revision)
+      throw new Error("Owner changed; refresh before handing off");
+    if (ownerId) {
+      if (!this.store.member(ownerId)) throw new Error("Unknown responsible owner");
+      const live = (await paseo.agents.ref(ownerId).refresh())?.agent;
+      if (!live || live.archivedAt || !["idle", "running", "starting", "initializing"].includes(live.status))
+        throw new Error("Responsible owner is unavailable");
+    }
+    // Reject invalid ownership before writing a handoff receipt.
+    const seen = new Set([id]);
+    let current = ownerId;
+    while (current) {
+      if (seen.has(current)) throw new Error("Ownership cycle refused");
+      seen.add(current);
+      const parent = this.store.member(current);
+      current = parent ? responsibleOwner(parent) : null;
+    }
+    await noLinks(evidence);
+    if (!isAbsolute(evidence) || !(await lstat(evidence)).isFile())
+      throw new Error("Owner handoff needs an absolute evidence file");
+    const digest = createHash("sha256")
+      .update(await readFile(evidence))
+      .digest("hex");
+    const at = new Date().toISOString();
+    const record = join(this.store.room(member.roomId).artifacts, "ownership", `${randomUUID()}.json`);
+    await writeAtomic(
+      record,
+      JSON.stringify(
+        {
+          agentId: id,
+          ownerId,
+          previousOwnerId: responsibleOwner(member),
+          evidence,
+          digest,
+          revision: revision + 1,
+          at,
+        },
+        null,
+        2,
+      ),
+    );
+    // Async evidence reads may have raced another handoff. Validate the graph again.
+    const visited = new Set([id]);
+    current = ownerId;
+    while (current) {
+      if (visited.has(current)) throw new Error("Ownership cycle refused");
+      visited.add(current);
+      const parent = this.store.member(current);
+      current = parent ? responsibleOwner(parent) : null;
+    }
+    this.store.saveOwnership(id, { ownerId, revision: revision + 1, evidence: record, at }, revision);
+    return { saved: true as const };
+  }
   async list(paseo: PaseoApi) {
+    const digests = new Map<string, string>();
+    for (const member of this.store.members()) {
+      if (!digests.has(member.provider)) {
+        const provider = allianceProvider(member.provider);
+        if (!provider) throw new Error(`Unknown Alliance provider: ${member.provider}`);
+        const profile = this.manifest.profiles[provider.id];
+        digests.set(
+          member.provider,
+          createHash("sha256")
+            .update(await readFile(join(profile.home, "root-instructions.md")))
+            .digest("hex"),
+        );
+      }
+    }
     const members = await Promise.all(
       this.store.members().map(async (member) => {
         try {
@@ -389,6 +487,7 @@ export class AllianceRuntime {
             target: d.verification?.target ?? null,
             at: d.at,
             evidence: join(directory, name),
+            product: d.product,
           });
           if (parsed.success && (latest.get(d.agentId)?.at ?? "") < parsed.data.at)
             latest.set(d.agentId, parsed.data);
@@ -401,7 +500,11 @@ export class AllianceRuntime {
       rooms: this.store.rooms(),
       members: members.map((member) => ({
         ...member,
-        ...ownerState(member.parentId, members),
+        ...ownerState(responsibleOwner(member), members),
+        ownerRevision: member.ownership?.revision ?? 0,
+        ownerEvidence: member.ownership?.evidence ?? null,
+        policyDigest: digests.get(member.provider) ?? "",
+        policyAcknowledged: member.policyAck?.digest === digests.get(member.provider),
         lastAcceptance: latest.get(member.id) ?? null,
         lastTurnId: member.lastTurnId ?? null,
       })),
@@ -506,17 +609,36 @@ export class AllianceRuntime {
     if (!current?.lastTurnId || current.lastTurnId === turnId)
       this.store.updateMember(agent.id, { lastOutcome: outcome.kind, resultPath: path });
   }
-  async disposition(id: string, decision: "accepted" | "rejected", candidate: string, evidence: string) {
+  async disposition(
+    id: string,
+    decision: "accepted" | "rejected",
+    candidate: string,
+    evidence: string,
+    claim?: unknown,
+  ) {
     const member = this.store.member(id);
     if (!member) throw new Error("Unknown Alliance member");
     const room = this.store.room(member.roomId);
     const report =
       decision === "accepted" ? await validateEvidence(evidence, member.cwd ?? room.cwd, candidate) : null;
+    const product = claim === undefined ? undefined : ProductAcceptance.parse(claim);
+    if (product && (decision !== "accepted" || report?.kind !== "runtime"))
+      throw new Error(
+        "Product acceptance requires candidate-bound runtime evidence; test/analysis PASS is technical only",
+      );
     const path = join(room.artifacts, "dispositions", `${randomUUID()}.json`);
     await writeAtomic(
       path,
       JSON.stringify(
-        { agentId: id, decision, candidate, evidence, verification: report, at: new Date().toISOString() },
+        {
+          agentId: id,
+          decision,
+          candidate,
+          evidence,
+          verification: report,
+          product,
+          at: new Date().toISOString(),
+        },
         null,
         2,
       ) + "\n",

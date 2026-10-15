@@ -184,3 +184,9 @@ contract uses durable progress and owner reconciliation to reduce unnecessary pr
 Durable wakeups can track a deadline, a registered process exit or an exact child turn.
 They preserve owner/revision and restart state without accepting results. Pull delivery is the
 safe default; idle auto-delivery is opt-in. See [commands and delivery limits](docs/operations.md#durable-wakeups-019).
+
+Current sessions adopt updated operating policy at their next natural work boundary with
+`alliance-work policy read` / `policy ack`; the monitor shows unacknowledged policy. Explicit
+`members owner` handoffs separate responsibility from native parentage and permit related
+cross-room wakeups. Product acceptance adds an observed journey to candidate-bound runtime
+proof. See [operations](docs/operations.md#responsibility-and-policy-adoption-0110).

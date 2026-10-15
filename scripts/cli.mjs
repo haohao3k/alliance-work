@@ -23,6 +23,9 @@ const values = new Set([
   "--home",
   "--room",
   "--owner",
+  "--evidence",
+  "--digest",
+  "--product",
   "--pid",
   "--key",
   "--title",
@@ -79,6 +82,9 @@ const help = `Alliance Work — isolated agent rooms on native Paseo
   alliance-work login pi peer         Open Pi; use /login
   alliance-work doctor                Verify homes, capabilities, pinned source and live plugin
   alliance-work status                Read agents, owners, decisions and tracked processes
+  alliance-work members owner --agent ID --owner ID|Human --revision N --evidence HANDOFF_FILE
+  alliance-work policy read --agent ID
+  alliance-work policy ack --agent ID --digest SHA256
   alliance-work jobs track --room ID --owner AGENT --pid PID --key RUN_ID --title TITLE
   alliance-work jobs owner --key RUN_ID --owner AGENT --revision N
   alliance-work wakeups list
@@ -97,7 +103,7 @@ const help = `Alliance Work — isolated agent rooms on native Paseo
   alliance-work verify --map .alliance/features.json [--feature ID] [--project PATH]
   alliance-work eval --suite .alliance/evals/failure.json [--project PATH]
   alliance-work eval inspect --report /absolute/eval.json [--project PATH]
-  alliance-work accept --agent ID --report /absolute/report.json
+  alliance-work accept --agent ID --report /absolute/report.json [--product /absolute/journey.json]
 
 Verification options: --kind test|runtime|analysis (default test), --target LABEL,
   --input FILE (repeat for ignored runtime inputs), --artifact FILE (repeat),
@@ -212,12 +218,35 @@ try {
       output({ report: result.path, ...result.report.summary });
       if (!["IMPROVED", "NO_CHANGE"].includes(result.report.summary.outcome)) process.exitCode = 1;
     }
-  } else if (command === "status" || command === "jobs" || command === "wakeups") {
+  } else if (["status", "jobs", "wakeups", "members", "policy"].includes(command)) {
     const current = await installation(home);
     if (!current) throw new Error("No Alliance installation exists for this home");
     const config = JSON.parse(await readFile(join(current.paseoHome, "config.json"), "utf8"));
     let method = "rooms.list",
       input = {};
+    if (command === "members") {
+      if (positional[1] !== "owner") throw new Error("Usage: members owner");
+      for (const flag of ["--agent", "--owner", "--revision", "--evidence"])
+        if (flags[flag] === undefined) throw new Error(`Missing ${flag}`);
+      method = "members.owner";
+      input = {
+        agentId: flags["--agent"],
+        ownerId: flags["--owner"] === "Human" ? null : flags["--owner"],
+        revision: Number(flags["--revision"]),
+        evidence: resolve(flags["--evidence"]),
+      };
+    }
+    if (command === "policy") {
+      const agentId = flags["--agent"] ?? process.env.PASEO_AGENT_ID;
+      if (!agentId) throw new Error("Missing --agent");
+      if (positional[1] === "read") {
+        method = "policy.read";
+        input = { agentId };
+      } else if (positional[1] === "ack" && flags["--digest"]) {
+        method = "policy.ack";
+        input = { agentId, digest: flags["--digest"] };
+      } else throw new Error("Usage: policy read|ack --agent ID [--digest SHA256]");
+    }
     if (command === "jobs" && positional[1] === "track") {
       for (const flag of ["--room", "--owner", "--pid", "--key", "--title"])
         if (!flags[flag]) throw new Error(`Missing ${flag}`);
@@ -314,6 +343,9 @@ try {
           decision: "accepted",
           candidate: report.candidate.digest,
           evidence: reportPath,
+          ...(flags["--product"]
+            ? { product: JSON.parse(await readFile(resolve(flags["--product"]), "utf8")) }
+            : {}),
         }),
       );
     } finally {

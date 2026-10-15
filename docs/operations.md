@@ -352,3 +352,52 @@ native send leaves `uncertain`; it is never automatically resent, even after res
 native history, then acknowledge or cancel explicitly. Native delivery is not exactly-once
 execution or proof that the owner read the evidence. The CLI/UI exposes revisions for stale-write
 protection. The plugin releases its timer and waits for in-flight observation on unload.
+
+## Responsibility and policy adoption (0.1.10)
+
+`alliance-work status` exposes the responsible owner, `ownerRevision`, handoff evidence and
+`policyAcknowledged`. The native parent remains separate. Existing members fall back to their
+native parent until an explicit handoff is recorded; a null parent is not evidence that a human
+has taken over a detached job.
+
+```sh
+alliance-work members owner --agent LEAD_ID --owner HQ_ID --revision 0 --evidence /absolute/handoff.md
+alliance-work policy read --agent AGENT_ID
+alliance-work policy ack --agent AGENT_ID --digest DIGEST_FROM_READ
+```
+
+Ownership changes use revision checks and refuse cycles. A handoff records the source file's
+hash. It sends no prompt, changes no native parent or permissions, and transfers neither jobs
+nor wakeups automatically. Cross-room time/turn wakeups require a responsibility link; job
+wakeups follow the explicitly tracked job owner. Reconcile waiting obligations after a transfer.
+
+Policy acknowledgement means the agent reports reading that digest. It does not change the
+saved native system prompt or prove behavior. New policy is applied at the next natural task
+boundary; updating files alone does not update existing session context. If an operator explicitly
+authorizes a one-time idle adoption prompt, use fresh native status and reconcile its result;
+never broadcast to busy/archived/permission-blocked agents. There is still no atomic idle-only
+send in Paseo 0.11.2. Pending policy must remain visible rather than force a turn or restart.
+
+## Product acceptance
+
+Existing `accept --report` remains technical acceptance. For a verified product journey, use a
+runtime report bound to the current candidate and a JSON statement:
+
+```json
+{
+  "outcome": "An operator can reopen a saved run and act on its result",
+  "journey": "Observed login, saved run selection, result and limitations, then reopen after restart",
+  "reviewer": "responsible reviewer agent ID or Human",
+  "remaining": ["External tenant integration was not exercised"]
+}
+```
+
+```sh
+alliance-work accept --agent LEAD_ID --report /absolute/runtime/report.json --product /absolute/journey.json
+```
+
+Test/analysis reports cannot accept a product journey. Runtime PASS is necessary, not sufficient:
+the reviewer must inspect the actual journey and state its limits. The command records this
+attestation; it cannot determine whether an invented journey is true. A new turn still reopens
+current acceptance; historical product acceptance remains labeled historical. Review depth follows
+risk and new evidence, not a fixed number of peers or rounds.

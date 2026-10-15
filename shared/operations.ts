@@ -1,3 +1,10 @@
+export function responsibleOwner(member: {
+  parentId: string | null;
+  ownership?: { ownerId: string | null };
+}) {
+  return member.ownership ? member.ownership.ownerId : member.parentId;
+}
+
 export type OwnerAgent = { id: string; title: string; status: string; archived: boolean };
 export function ownerState(id: string | null, agents: readonly OwnerAgent[]) {
   if (!id) return { ownerId: null, ownerLabel: "Human", ownerStatus: "human" };

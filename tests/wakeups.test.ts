@@ -301,3 +301,35 @@ test("wakeups bound batches and enforce an owner cooldown", async () => {
     f.store.close();
   }
 });
+
+test("cross-room handback targets the explicit owner and is held after ownership changes", async () => {
+  const f = await fixture();
+  try {
+    f.store.addRoom({ ...f.store.room("r"), id: "hq-room", cwd: `${f.home}/hq` });
+    const owner = f.store.member("owner");
+    assert(owner);
+    f.store.saveMember({ ...owner, id: "hq", roomId: "hq-room" });
+    f.store.updateMember("peer", {
+      ownership: { ownerId: "hq", revision: 1, evidence: "handoff", at: "now" },
+    });
+    const w = f.add("cross-room", {
+      ownerId: "hq",
+      delivery: "idle",
+      trigger: { kind: "turn", agentId: "peer", turnId: "turn-1" },
+    });
+    f.store.updateMember("peer", { lastOutcome: "completed", resultPath: "result.json" });
+    await f.wake.tick(f.api);
+    assert.equal(f.wake.list()[0].state, "pending");
+    f.store.updateMember("peer", {
+      ownership: { ownerId: "owner", revision: 2, evidence: "next", at: "later" },
+    });
+    f.idle();
+    await f.wake.tick(f.api);
+    assert.equal(f.sends(), 0);
+    assert.equal((await f.wake.take("hq")).length, 0);
+    assert.equal(f.wake.list()[0].key, w.key);
+    assert.throws(() => f.add("unrelated", { ownerId: "hq" }), /owner/i);
+  } finally {
+    f.store.close();
+  }
+});

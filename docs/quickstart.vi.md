@@ -152,3 +152,18 @@ Mặc định `pull` không gửi prompt. Tại ranh giới task, chạy
 kiểm tra idle và gửi là một thao tác atomic; dùng pull nếu phiên đang làm việc không được ngắt.
 Không tự bật auto-delivery cho các job đang chạy. Nếu delivery là `uncertain`, kiểm tra lịch sử
 trước khi ack/cancel, không tạo key mới để gửi lặp.
+
+### Phiên cũ, owner và nghiệm thu sản phẩm
+
+Đầu assignment/turn tự nhiên tiếp theo, agent chạy `alliance-work policy read --agent ID`, đọc
+policy rồi `policy ack --agent ID --digest SHA256` với digest vừa nhận. Không gửi ping hàng loạt
+để ép phiên đang làm việc cập nhật. Monitor ghi nhận đã đọc, không tuyên bố system prompt đã đổi.
+
+Nếu owner công việc khác native parent, dùng `members owner --agent ID --owner OWNER_ID
+--revision N --evidence /absolute/handoff.md`. HQ khác room được nhận wakeup khi có quan hệ owner
+rõ ràng. Handoff này không tự chuyển job hoặc wakeup; đối soát các nghĩa vụ đang mở riêng.
+
+Brief giữ mục tiêu người dùng, constraint có nguồn gốc, owner và cách chứng minh kết quả;
+phương án kỹ thuật được phép xét lại. Chỉ thêm vòng review khi có câu hỏi quyết định hoặc bằng
+chứng mới. Nghiệm thu sản phẩm dùng `accept --report RUNTIME_REPORT --product JOURNEY_JSON`;
+format và giới hạn nằm trong `docs/operations.md`. Technical PASS không tự thành product acceptance.

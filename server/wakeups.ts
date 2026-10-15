@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { PaseoApi } from "@getpaseo/client";
+import { responsibleOwner } from "../shared/operations";
 import { type WakeRecordValue as Wake, WakeInput } from "../shared/wakeups";
 import { observeJob } from "./jobs.mjs";
 import type { RoomStore } from "./store";
@@ -17,7 +18,22 @@ export class Wakeups {
   list() {
     return this.store.wakeups();
   }
+  private authorized(w: Pick<Wake, "ownerId" | "roomId" | "trigger">) {
+    const owner = this.store.member(w.ownerId);
+    if (!owner) return false;
+    if (owner.roomId === w.roomId) return true;
+    if (w.trigger.kind === "turn") {
+      const child = this.store.member(w.trigger.agentId);
+      return child?.roomId === w.roomId && responsibleOwner(child) === owner.id;
+    }
+    if (w.trigger.kind === "job") {
+      const key = w.trigger.key;
+      return this.store.jobs().some((j) => j.key === key && j.roomId === w.roomId && j.ownerId === owner.id);
+    }
+    return this.store.members(w.roomId).some((m) => responsibleOwner(m) === owner.id);
+  }
   private current(w: Wake) {
+    if (!this.authorized(w)) return false;
     if (w.trigger.kind === "job") {
       const key = w.trigger.key;
       const job = this.store.jobs().find((j) => j.key === key);
@@ -31,15 +47,14 @@ export class Wakeups {
     }
     return true;
   }
-  private owner(id: string, roomId: string) {
-    const owner = this.store.member(id);
-    if (!owner || owner.roomId !== roomId) throw new Error("Owner must be an Alliance member in this room");
-    return owner;
+  private owner(w: Pick<Wake, "ownerId" | "roomId" | "trigger">) {
+    if (!this.authorized(w))
+      throw new Error("Wakeup requires a room member or its explicitly responsible owner");
   }
   add(raw: unknown) {
     const input = WakeInput.parse(raw);
     this.store.room(input.roomId);
-    this.owner(input.ownerId, input.roomId);
+    this.owner(input);
     const inputHash = createHash("sha256").update(JSON.stringify(input)).digest("hex");
     const prior = this.list().find((w) => w.key === input.key);
     if (prior) {
@@ -74,7 +89,8 @@ export class Wakeups {
       record.jobRevision = job.revision;
     }
     if (input.trigger.kind === "turn") {
-      const member = this.owner(input.trigger.agentId, input.roomId);
+      const member = this.store.member(input.trigger.agentId);
+      if (!member || member.roomId !== input.roomId) throw new Error("Child must belong to the source room");
       if (member.lastTurnId !== input.trigger.turnId) throw new Error("Turn is no longer current");
     }
     this.store.saveWakeup(record);
@@ -101,7 +117,7 @@ export class Wakeups {
     if (action === "owner") {
       if (!nextOwnerId || !["scheduled", "pending"].includes(w.state))
         throw new Error("Only waiting wakeups can change owner");
-      this.owner(nextOwnerId, w.roomId);
+      this.owner({ ...w, ownerId: nextOwnerId });
       let jobRevision = w.jobRevision;
       if (w.trigger.kind === "job") {
         const key = w.trigger.key;
@@ -172,6 +188,11 @@ export class Wakeups {
         // Re-read after asynchronous observation: cancellation/owner changes win.
         if (this.list().find((v) => v.key === w.key)?.revision !== w.revision) continue;
         if (result.state !== "exited") continue;
+      }
+      if (!this.authorized(w)) {
+        if (w.note !== "Owner changed; reconcile handoff")
+          this.save(w, { note: "Owner changed; reconcile handoff" });
+        continue;
       }
       if (w.state === "scheduled" && this.now() >= w.dueAt) this.save(w, { state: "pending", note: null });
     }

@@ -8,7 +8,10 @@ import {
   jobTrack,
   memberDisposition,
   memberLaunch,
+  memberOwner,
   memberResume,
+  policyAck,
+  policyRead,
   profileStatus,
   roomCreate,
   roomList,
@@ -60,6 +63,11 @@ export default function contribute(server: PluginServerContext) {
   server.handle(jobOwner, async (input, { paseo }) =>
     (await get()).changeJobOwner(input.key, input.ownerId, input.revision, paseo),
   );
+  server.handle(memberOwner, async (input, { paseo }) =>
+    (await get()).changeMemberOwner(input.agentId, input.ownerId, input.revision, input.evidence, paseo),
+  );
+  server.handle(policyRead, async ({ agentId }) => (await get()).readPolicy(agentId));
+  server.handle(policyAck, async ({ agentId, digest }) => (await get()).acknowledgePolicy(agentId, digest));
   server.handle(profileStatus, async () => (await get()).profiles());
   server.handle(roomList, async (_input, { paseo }) => (await get()).list(paseo));
   server.handle(roomCreate, async (input, { paseo }) => (await get()).createRoom(input, paseo));
@@ -88,7 +96,7 @@ export default function contribute(server: PluginServerContext) {
     (await get()).resume(input.agentId, input.prompt, paseo),
   );
   server.handle(memberDisposition, async (input) =>
-    (await get()).disposition(input.agentId, input.decision, input.candidate, input.evidence),
+    (await get()).disposition(input.agentId, input.decision, input.candidate, input.evidence, input.product),
   );
   server.before("agent.create", async ({ request }, { paseo }) => {
     if (!allianceProvider(request.config.provider)) return;

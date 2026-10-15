@@ -12,6 +12,7 @@ const required = {
   ],
   "failure-learning": ["server/failure-evals.mjs", "room/skills/alliance-learn-from-failure/SKILL.md"],
   wakeups: ["server/wakeups.ts", "shared/wakeups.ts"],
+  "responsible-ownership": ["server/runtime.ts", "shared/contracts.ts", "shared/operations.ts"],
   operations: ["server/jobs.mjs", "shared/operations.ts"],
 };
 const roots = [

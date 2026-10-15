@@ -118,6 +118,33 @@ test("native Paseo switches release roots and restores the previous plugin after
     };
     assert.equal(after.rooms.length, before.rooms.length + 1);
     assert(after.members.some((member) => member.id === created.id));
+    // Read/ack and ownership must cross the real plugin RPC without starting a model turn.
+    const policy = (await client.invokePluginRpc("alliance-work", "policy.read", {
+      agentId: created.id,
+    })) as { digest: string; acknowledged: boolean };
+    assert.equal(policy.acknowledged, false);
+    await client.invokePluginRpc("alliance-work", "policy.ack", {
+      agentId: created.id,
+      digest: policy.digest,
+    });
+    const handoff = join(dir, "handoff.md");
+    await writeFile(handoff, "Fixture: Human retains responsibility for acceptance.");
+    await client.invokePluginRpc("alliance-work", "members.owner", {
+      agentId: created.id,
+      ownerId: null,
+      revision: 0,
+      evidence: handoff,
+    });
+    const adopted = (await client.invokePluginRpc("alliance-work", "rooms.list", {})) as {
+      members: { id: string; policyAcknowledged: boolean; ownerRevision: number; ownerId: string | null }[];
+    };
+    const adoptedMember = adopted.members.find((m) => m.id === created.id);
+    assert(adoptedMember);
+    assert.equal(adoptedMember.policyAcknowledged, true);
+    assert.equal(adoptedMember.ownerRevision, 1);
+    assert.equal(adoptedMember.ownerId, null);
+    assert.equal((await created.refresh())?.agent.status, "idle");
+
     await client.invokePluginRpc("alliance-work", "jobs.track", {
       key: "native-controller",
       roomId: policyRoomId,

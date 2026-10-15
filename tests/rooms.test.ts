@@ -494,3 +494,108 @@ test("tracked processes survive reload, expose missing owners and refuse stale o
     f.runtime.close();
   }
 });
+
+test("explicit ownership survives native rebinding and rejects stale or cyclic handoffs", async () => {
+  const f = await fixture();
+  try {
+    const create = async (key: string) =>
+      (
+        await f.runtime.launch(
+          { roomId: f.room.id, key, role: "lead", harness: "codex", prompt: "Own outcome" },
+          f.paseo,
+        )
+      ).agentId;
+    const lead = await create("lead"),
+      hq = await create("hq");
+    const evidence = join(f.root, "handoff.md");
+    await writeFile(evidence, "Human assigns HQ to own Lead acceptance.");
+    await f.runtime.changeMemberOwner(lead, hq, 0, evidence, f.paseo);
+    await f.runtime.bind({
+      id: lead,
+      provider: "alliance-codex-lead",
+      cwd: f.cwd,
+      workspaceId: "workspace-1",
+      parentAgentId: null,
+      title: null,
+    });
+    const current = (await f.runtime.list(f.paseo)).members.find((m) => m.id === lead);
+    assert(current);
+    assert.equal(current.ownerId, hq);
+    assert.equal(current.ownerRevision, 1);
+    await assert.rejects(f.runtime.changeMemberOwner(lead, null, 0, evidence, f.paseo), /changed/);
+    await assert.rejects(f.runtime.changeMemberOwner(hq, lead, 0, evidence, f.paseo), /cycle/);
+    assert.equal(f.count().sends, 0);
+  } finally {
+    await f.runtime.close();
+  }
+});
+
+test("policy acknowledgement is revision-bound and never starts or changes a native turn", async () => {
+  const f = await fixture();
+  try {
+    const { agentId } = await f.runtime.launch(
+      { roomId: f.room.id, key: "policy", role: "lead", harness: "codex", prompt: "Work" },
+      f.paseo,
+    );
+    const policy = await f.runtime.readPolicy(agentId);
+    assert.equal(policy.acknowledged, false);
+    await assert.rejects(f.runtime.acknowledgePolicy(agentId, "0".repeat(64)), /changed/);
+    await f.runtime.acknowledgePolicy(agentId, policy.digest);
+    assert.equal((await f.runtime.readPolicy(agentId)).acknowledged, true);
+    assert.equal(f.count().sends, 0);
+  } finally {
+    await f.runtime.close();
+  }
+});
+
+test("product acceptance needs runtime proof and retains the observed journey separately from technical PASS", async () => {
+  const f = await fixture();
+  try {
+    const { agentId } = await f.runtime.launch(
+      { roomId: f.room.id, key: "product", role: "lead", harness: "codex", prompt: "Deliver product" },
+      f.paseo,
+    );
+    execFileSync("git", ["init", "-q", f.cwd]);
+    const proof = await runVerification({
+      cwd: f.cwd,
+      output: join(f.root, "technical"),
+      command: [process.execPath, "-e", "process.exit(0)"],
+      scenario: "check",
+      kind: "test",
+    });
+    const product = {
+      outcome: "Operator reads a saved result",
+      journey: "Open saved run, inspect result and limitations",
+      reviewer: "Human",
+      remaining: ["External integration untested"],
+    };
+    await assert.rejects(
+      f.runtime.disposition(agentId, "accepted", proof.report.candidate.digest, proof.path, product),
+      /runtime/,
+    );
+    const runtimeProof = await runVerification({
+      cwd: f.cwd,
+      output: join(f.root, "runtime"),
+      command: [process.execPath, "-e", "process.exit(0)"],
+      scenario: "fixture journey",
+      kind: "runtime",
+    });
+    await f.runtime.disposition(
+      agentId,
+      "accepted",
+      runtimeProof.report.candidate.digest,
+      runtimeProof.path,
+      product,
+    );
+    const decisionEvidence = member(f.runtime, agentId).decisionEvidence;
+    assert(decisionEvidence);
+    const record = JSON.parse(await readFile(decisionEvidence, "utf8"));
+    assert.deepEqual(record.product, product);
+    assert.equal(
+      (await f.runtime.list(f.paseo)).members.find((m) => m.id === agentId)?.lastAcceptance?.product?.outcome,
+      product.outcome,
+    );
+  } finally {
+    await f.runtime.close();
+  }
+});

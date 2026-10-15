@@ -531,6 +531,7 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
                       }}
                     >
                       Owner: {member.ownerLabel}
+                      {member.ownerRevision ? " · assigned" : " · native parent"}
                       {member.ownerStatus === "needs-owner" ? " · unavailable" : ""}
                     </Text>
                     <Text style={muted}>
@@ -539,6 +540,14 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
                         kind: member.decision === "accepted" ? member.lastAcceptance?.kind : null,
                       })}
                     </Text>
+                    <Text style={muted}>
+                      Policy: {member.policyAcknowledged ? "read acknowledged" : "read pending"}
+                    </Text>
+                    {member.lastAcceptance?.product && (
+                      <Text numberOfLines={2} style={muted}>
+                        Last product acceptance: {member.lastAcceptance.product.outcome}
+                      </Text>
+                    )}
                     {member.lastAcceptance && (
                       <Text numberOfLines={2} style={muted}>
                         Last decision: {member.lastAcceptance.decision}{" "}

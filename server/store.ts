@@ -21,6 +21,8 @@ export interface MemberRecord {
   launchHash: string | null;
   launchModel?: string;
   launchEffort?: string;
+  ownership?: { ownerId: string | null; revision: number; evidence: string; at: string };
+  policyAck?: { digest: string; at: string };
   lastTurnId?: string | null;
   lastAcceptance?: {
     decision: "accepted" | "rejected";
@@ -29,6 +31,7 @@ export interface MemberRecord {
     target: string | null;
     at: string;
     evidence: string;
+    product?: { outcome: string; journey: string; reviewer: string; remaining: string[] };
   };
 }
 export interface JobRecord {
@@ -179,6 +182,13 @@ export class RoomStore {
     const current = this.member(id);
     if (!current) throw new Error(`Unknown room member: ${id}`);
     this.saveMember({ ...current, ...change });
+  }
+  saveOwnership(id: string, ownership: NonNullable<MemberRecord["ownership"]>, revision: number) {
+    const result = this.db
+      .prepare(`UPDATE members SET data=json_set(data, '$.ownership', json(?))
+      WHERE id=? AND COALESCE(json_extract(data, '$.ownership.revision'), 0)=?`)
+      .run(JSON.stringify(ownership), id, revision);
+    if (!result.changes) throw new Error("Owner changed; refresh before handing off");
   }
   close() {
     this.db.close();

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { RoleName, RoomRecord } from "../shared/contracts";
 import { defaultModelPolicy, ModelPolicy, type ModelPolicyValue } from "../shared/model-policy";
+import type { WakeRecordValue } from "../shared/wakeups";
 
 export interface MemberRecord {
   id: string;
@@ -49,7 +50,44 @@ export class RoomStore {
       CREATE TABLE IF NOT EXISTS rooms(id TEXT PRIMARY KEY, cwd TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS members(id TEXT PRIMARY KEY, roomId TEXT NOT NULL, launchKey TEXT, data TEXT NOT NULL, UNIQUE(roomId, launchKey));
       CREATE TABLE IF NOT EXISTS jobs(key TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS wakeups(key TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS room_model_policies(roomId TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL);`);
+  }
+  wakeups(): WakeRecordValue[] {
+    return (this.db.prepare("SELECT data FROM wakeups ORDER BY rowid").all() as { data: string }[]).map((r) =>
+      JSON.parse(r.data),
+    );
+  }
+  saveWakeup(w: WakeRecordValue, revision?: number) {
+    const result =
+      revision === undefined
+        ? this.db
+            .prepare("INSERT INTO wakeups(key,revision,data) VALUES(?,?,?) ON CONFLICT DO NOTHING")
+            .run(w.key, w.revision, JSON.stringify(w))
+        : this.db
+            .prepare("UPDATE wakeups SET revision=?,data=? WHERE key=? AND revision=?")
+            .run(w.revision, JSON.stringify(w), w.key, revision);
+    if (!result.changes) throw new Error("Wakeup changed; refresh before retrying");
+  }
+  claimWakeups(batch: WakeRecordValue[], messageId: string, now: number) {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const claimed = batch.map((w) => ({
+        ...w,
+        revision: w.revision + 1,
+        state: "dispatching" as const,
+        runs: w.runs + 1,
+        messageId,
+        lastSentAt: now,
+        updatedAt: now,
+      }));
+      for (let i = 0; i < batch.length; i++) this.saveWakeup(claimed[i], batch[i].revision);
+      this.db.exec("COMMIT");
+      return claimed;
+    } catch {
+      this.db.exec("ROLLBACK");
+      return null;
+    }
   }
   jobs(): JobRecord[] {
     return (this.db.prepare("SELECT data FROM jobs ORDER BY key").all() as { data: string }[]).map((r) =>

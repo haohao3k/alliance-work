@@ -1,0 +1,257 @@
+import { createHash, randomUUID } from "node:crypto";
+import type { PaseoApi } from "@getpaseo/client";
+import { type WakeRecordValue as Wake, WakeInput } from "../shared/wakeups";
+import { observeJob } from "./jobs.mjs";
+import type { RoomStore } from "./store";
+
+const terminal = new Set(["acknowledged", "canceled", "expired"]);
+
+/** Durable review obligations; payloads stay in room artifacts, transport stays native. */
+export class Wakeups {
+  private running: Promise<void> | undefined;
+  private stopped = false;
+  constructor(
+    private store: RoomStore,
+    private now: () => number = Date.now,
+  ) {}
+  list() {
+    return this.store.wakeups();
+  }
+  private current(w: Wake) {
+    if (w.trigger.kind === "job") {
+      const key = w.trigger.key;
+      const job = this.store.jobs().find((j) => j.key === key);
+      return (
+        job?.ownerId === w.ownerId && job.revision === w.jobRevision && job.processIdentity === w.jobIdentity
+      );
+    }
+    if (w.trigger.kind === "turn") {
+      const member = this.store.member(w.trigger.agentId);
+      return member?.lastTurnId === w.trigger.turnId && member.decision !== "accepted";
+    }
+    return true;
+  }
+  private owner(id: string, roomId: string) {
+    const owner = this.store.member(id);
+    if (!owner || owner.roomId !== roomId) throw new Error("Owner must be an Alliance member in this room");
+    return owner;
+  }
+  add(raw: unknown) {
+    const input = WakeInput.parse(raw);
+    this.store.room(input.roomId);
+    this.owner(input.ownerId, input.roomId);
+    const inputHash = createHash("sha256").update(JSON.stringify(input)).digest("hex");
+    const prior = this.list().find((w) => w.key === input.key);
+    if (prior) {
+      if (prior.inputHash !== inputHash) throw new Error("Wakeup key already names different work");
+      return prior;
+    }
+    if (this.list().length >= 1000) throw new Error("Wakeup retention limit reached (1000 records)");
+    const now = this.now();
+    const expiresAt = input.expiresAt ?? now + 30 * 86400000;
+    if (expiresAt <= now || (input.trigger.kind === "time" && input.trigger.at >= expiresAt))
+      throw new Error("Wakeup must be due before a future expiry");
+    const record: Wake = {
+      ...input,
+      inputHash,
+      expiresAt,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+      state: "scheduled",
+      note: null,
+      runs: 0,
+      dueAt: input.trigger.kind === "time" ? input.trigger.at : now,
+      messageId: null,
+      lastSentAt: null,
+    };
+    if (input.trigger.kind === "job") {
+      const key = input.trigger.key;
+      const job = this.store.jobs().find((j) => j.key === key);
+      if (!job || job.roomId !== input.roomId || job.ownerId !== input.ownerId)
+        throw new Error("Job and wakeup must share room and owner");
+      record.jobIdentity = job.processIdentity;
+      record.jobRevision = job.revision;
+    }
+    if (input.trigger.kind === "turn") {
+      const member = this.owner(input.trigger.agentId, input.roomId);
+      if (member.lastTurnId !== input.trigger.turnId) throw new Error("Turn is no longer current");
+    }
+    this.store.saveWakeup(record);
+    return record;
+  }
+  private save(w: Wake, change: Partial<Wake>) {
+    const next = { ...w, ...change, revision: w.revision + 1, updatedAt: this.now() };
+    this.store.saveWakeup(next, w.revision);
+    return next;
+  }
+  action(
+    key: string,
+    ownerId: string,
+    revision: number,
+    action: "ack" | "cancel" | "owner",
+    nextOwnerId?: string,
+  ) {
+    const w = this.list().find((w) => w.key === key);
+    if (!w || w.ownerId !== ownerId || w.revision !== revision)
+      throw new Error("Wakeup changed; refresh owner and revision");
+    if (terminal.has(w.state) || w.state === "dispatching")
+      throw new Error("Wakeup is terminal or being dispatched");
+    if (action === "cancel") return this.save(w, { state: "canceled", note: "Canceled by owner" });
+    if (action === "owner") {
+      if (!nextOwnerId || !["scheduled", "pending"].includes(w.state))
+        throw new Error("Only waiting wakeups can change owner");
+      this.owner(nextOwnerId, w.roomId);
+      let jobRevision = w.jobRevision;
+      if (w.trigger.kind === "job") {
+        const key = w.trigger.key;
+        const job = this.store.jobs().find((j) => j.key === key);
+        if (!job || job.ownerId !== nextOwnerId || job.processIdentity !== w.jobIdentity)
+          throw new Error("Transfer the same tracked job to this owner first");
+        jobRevision = job.revision;
+      }
+      return this.save(w, { ownerId: nextOwnerId, jobRevision, note: null });
+    }
+    if (!["delivered", "uncertain"].includes(w.state))
+      throw new Error("Take or receive the wakeup before acknowledging it");
+    if (w.everyMs && w.runs < w.maxRuns && this.now() + w.everyMs < w.expiresAt)
+      return this.save(w, { state: "scheduled", dueAt: this.now() + w.everyMs, messageId: null, note: null });
+    return this.save(w, {
+      state: "acknowledged",
+      note: "Review acknowledged; no artifact acceptance implied",
+    });
+  }
+  tick(api?: PaseoApi) {
+    if (this.stopped) return Promise.resolve();
+    if (!this.running)
+      this.running = this.round(api).finally(() => {
+        this.running = undefined;
+      });
+    return this.running;
+  }
+  async stop() {
+    this.stopped = true;
+    await this.running;
+  }
+  private async round(api?: PaseoApi) {
+    for (const w of this.list()) {
+      if (terminal.has(w.state) || w.state === "uncertain") continue;
+      if (w.state === "dispatching") {
+        this.save(w, {
+          state: "uncertain",
+          note: "Dispatch interrupted; inspect owner history before ack/cancel",
+        });
+        continue;
+      }
+      if (this.now() >= w.expiresAt) {
+        this.save(w, { state: "expired", note: "Expired" });
+        continue;
+      }
+      if (w.trigger.kind === "turn") {
+        const member = this.store.member(w.trigger.agentId);
+        if (!member || member.lastTurnId !== w.trigger.turnId || member.decision === "accepted") {
+          this.save(w, { state: "canceled", note: "Turn superseded or work accepted" });
+          continue;
+        }
+        if (!member.lastOutcome || !member.resultPath) continue;
+      }
+      if (w.trigger.kind === "job") {
+        const key = w.trigger.key;
+        const job = this.store.jobs().find((j) => j.key === key);
+        if (
+          !job ||
+          job.processIdentity !== w.jobIdentity ||
+          job.revision !== w.jobRevision ||
+          job.ownerId !== w.ownerId
+        ) {
+          if (w.note !== "Job changed; reconcile ownership")
+            this.save(w, { note: "Job changed; reconcile ownership" });
+          continue;
+        }
+        const result = await observeJob(job);
+        // Re-read after asynchronous observation: cancellation/owner changes win.
+        if (this.list().find((v) => v.key === w.key)?.revision !== w.revision) continue;
+        if (result.state !== "exited") continue;
+      }
+      if (w.state === "scheduled" && this.now() >= w.dueAt) this.save(w, { state: "pending", note: null });
+    }
+    if (!api || this.stopped) return;
+    for (const owner of new Set(
+      this.list()
+        .filter((w) => w.state === "pending" && w.delivery === "idle" && !w.note)
+        .map((w) => w.ownerId),
+    )) {
+      if (
+        this.list().some(
+          (w) => w.ownerId === owner && w.lastSentAt !== null && this.now() - w.lastSentAt < 60000,
+        )
+      )
+        continue;
+      const ref = api.agents.ref(owner);
+      const live = await ref.refresh().catch(() => null);
+      if (
+        this.stopped ||
+        !live ||
+        live.agent.status !== "idle" ||
+        live.agent.archivedAt ||
+        (live.agent.pendingPermissions ?? []).length
+      )
+        continue;
+      const batch = this.list()
+        .filter(
+          (w) =>
+            w.ownerId === owner &&
+            w.state === "pending" &&
+            w.delivery === "idle" &&
+            !w.note &&
+            this.current(w),
+        )
+        .slice(0, 8);
+      if (!batch.length) continue;
+      const messageId = randomUUID();
+      // Persist one batch claim before native send. Never retry an ambiguous send automatically.
+      const claimed = this.store.claimWakeups(batch, messageId, this.now());
+      if (!claimed) continue;
+      const body = claimed
+        .map(
+          (w) => `[${w.key}] ${w.reason}\nTrigger: ${JSON.stringify(w.trigger)}; revision: ${w.revision + 1}`,
+        )
+        .join("\n\n");
+      try {
+        await ref.send(
+          `Alliance wakeups for owner ${owner}:\n${body}\n\nInspect the room's durable assignment/results before acting. Process exit or turn completion is not acceptance. Use alliance-work wakeups ack --key KEY --owner ${owner} --revision N after reconciliation.`,
+          { messageId, activeTurnBehavior: "steer" },
+        );
+        for (const w of claimed)
+          this.save(w, { state: "delivered", note: "Native send acknowledged; owner review pending" });
+      } catch {
+        for (const w of claimed)
+          this.save(w, {
+            state: "uncertain",
+            note: "Native delivery outcome unknown; inspect history before ack/cancel",
+          });
+      }
+    }
+  }
+  async take(ownerId: string) {
+    await this.tick();
+    return this.list()
+      .filter(
+        (w) =>
+          w.ownerId === ownerId &&
+          this.current(w) &&
+          ["pending", "delivered"].includes(w.state) &&
+          (w.state === "delivered" || !w.note),
+      )
+      .slice(0, 8)
+      .map((w) =>
+        w.state === "delivered"
+          ? w
+          : this.save(w, {
+              state: "delivered",
+              runs: w.runs + 1,
+              note: "Read through CLI; acknowledgement pending",
+            }),
+      );
+  }
+}

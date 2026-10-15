@@ -17,6 +17,7 @@ import {
   roomModelPolicySave,
   settings,
 } from "./shared/contracts";
+import { wakeAction, wakeAdd, wakeList, wakeTake } from "./shared/wakeups";
 
 export default function contribute(server: PluginServerContext) {
   const configuration = server.registerSettings(settings);
@@ -25,15 +26,36 @@ export default function contribute(server: PluginServerContext) {
     (runtime ??= (async () => {
       const state = await configuration.read();
       if (state.status !== "ready") throw new Error(state.error);
+      if (!state.values.home) throw new Error("Set the Alliance home before starting wakeups");
       const instance = new AllianceRuntime(state.values.home);
       try {
-        return await instance.ready();
+        await instance.ready();
+        instance.startWakeups();
+        return instance;
       } catch (error) {
-        instance.close();
+        await instance.close();
         runtime = undefined;
         throw error;
       }
-    })());
+    })().catch((error) => {
+      runtime = undefined;
+      throw error;
+    }));
+  // Recover durable obligations even before the UI is opened after plugin reload.
+  const unsubscribe = configuration.subscribe(() => {
+    void get().catch(() => undefined);
+  });
+  void get().catch(() => undefined);
+  server.handle(wakeList, async () => {
+    const r = await get();
+    await r.wakeups.tick();
+    return r.wakeups.list();
+  });
+  server.handle(wakeAdd, async (input) => (await get()).wakeups.add(input));
+  server.handle(wakeTake, async ({ ownerId }) => (await get()).wakeups.take(ownerId));
+  server.handle(wakeAction, async (input) =>
+    (await get()).wakeups.action(input.key, input.ownerId, input.revision, input.action, input.nextOwnerId),
+  );
   server.handle(jobTrack, async (input) => (await get()).trackJob(input));
   server.handle(jobOwner, async (input, { paseo }) =>
     (await get()).changeJobOwner(input.key, input.ownerId, input.revision, paseo),
@@ -135,6 +157,7 @@ export default function contribute(server: PluginServerContext) {
       await (await get()).endTurn(event.agent, event.turnId, event.outcome, event.timeline);
   });
   return async () => {
-    if (runtime) (await runtime.catch(() => undefined))?.close();
+    unsubscribe();
+    if (runtime) await (await runtime.catch(() => undefined))?.close();
   };
 }

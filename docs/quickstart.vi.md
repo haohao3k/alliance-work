@@ -138,3 +138,17 @@ Dùng `alliance-work eval --suite .alliance/evals/NAME.json` để so cùng bộ
 sửa. Report lưu failure evidence, candidate, từng lần chạy và regression; `eval inspect --report PATH`
 kiểm tra evidence còn nguyên. Không tự cài skill hoặc đổi policy. Nếu bản sửa có ích, Lead quyết định
 đăng ký skill và link bài học vào notebook/handoff hiện có. Xem [schema và driver](verification.md).
+
+
+## Hẹn quay lại công việc
+
+Dùng `alliance-work wakeups add` khi cần xem lại một job, một lượt của Peer hoặc một thời hạn.
+Gắn đúng room, owner và key duy nhất; xem cú pháp trong [operations](operations.md#durable-wakeups-019).
+Mặc định `pull` không gửi prompt. Tại ranh giới task, chạy
+`alliance-work wakeups take --owner "$PASEO_AGENT_ID"`, đọc kết quả rồi `wakeups ack` với key/revision
+được trả về. Ack chỉ xác nhận đã xem; nghiệm thu candidate vẫn là bước riêng.
+
+`--delivery idle` là tùy chọn tự gửi, có gom sự kiện và giới hạn tần suất. Paseo hiện chưa bảo đảm
+kiểm tra idle và gửi là một thao tác atomic; dùng pull nếu phiên đang làm việc không được ngắt.
+Không tự bật auto-delivery cho các job đang chạy. Nếu delivery là `uncertain`, kiểm tra lịch sử
+trước khi ack/cancel, không tạo key mới để gửi lặp.

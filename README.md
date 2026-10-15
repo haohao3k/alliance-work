@@ -179,3 +179,8 @@ See [operations and ownership](docs/operations.md#ownership-and-background-jobs)
 existing background jobs without restarting them. The monitor separates current turn state from
 the last accepted analysis/test/runtime scope. Native messaging remains interruptible; the room
 contract uses durable progress and owner reconciliation to reduce unnecessary prompts.
+
+
+Durable wakeups can track a deadline, a registered process exit or an exact child turn.
+They preserve owner/revision and restart state without accepting results. Pull delivery is the
+safe default; idle auto-delivery is opt-in. See [commands and delivery limits](docs/operations.md#durable-wakeups-019).

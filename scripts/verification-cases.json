@@ -78,5 +78,41 @@
   "operations.resume": {
     "file": "tests/rooms.test.ts",
     "pattern": "resume refuses unknown"
+  },
+  "wakeups.persistence": {
+    "file": "tests/wakeups.test.ts",
+    "pattern": "wakeups survive restart"
+  },
+  "wakeups.delivery": {
+    "file": "tests/wakeups.test.ts",
+    "pattern": "wakeups batch idle delivery"
+  },
+  "wakeups.repeat": {
+    "file": "tests/wakeups.test.ts",
+    "pattern": "wakeups pull needs acknowledgement"
+  },
+  "wakeups.turn": {
+    "file": "tests/wakeups.test.ts",
+    "pattern": "wakeups bind turn generations"
+  },
+  "wakeups.owner": {
+    "file": "tests/wakeups.test.ts",
+    "pattern": "wakeups do not send"
+  },
+  "wakeups.job": {
+    "file": "tests/wakeups.test.ts",
+    "pattern": "wakeups observe job exit"
+  },
+  "wakeups.recovery": {
+    "file": "tests/wakeups.test.ts",
+    "pattern": "wakeups recover interrupted"
+  },
+  "wakeups.race": {
+    "file": "tests/wakeups.test.ts",
+    "pattern": "wakeups recheck accepted"
+  },
+  "wakeups.bounds": {
+    "file": "tests/wakeups.test.ts",
+    "pattern": "wakeups bound batches"
   }
 }

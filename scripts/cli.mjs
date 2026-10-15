@@ -27,6 +27,15 @@ const values = new Set([
   "--key",
   "--title",
   "--revision",
+  "--reason",
+  "--at",
+  "--job",
+  "--turn",
+  "--delivery",
+  "--every-ms",
+  "--max-runs",
+  "--expires",
+  "--next-owner",
   "--paseo-home",
   "--port",
   "--bin-dir",
@@ -72,6 +81,13 @@ const help = `Alliance Work — isolated agent rooms on native Paseo
   alliance-work status                Read agents, owners, decisions and tracked processes
   alliance-work jobs track --room ID --owner AGENT --pid PID --key RUN_ID --title TITLE
   alliance-work jobs owner --key RUN_ID --owner AGENT --revision N
+  alliance-work wakeups list
+  alliance-work wakeups add --room ID --owner AGENT --key KEY --reason TEXT --at ISO_TIME
+  alliance-work wakeups add --room ID --owner AGENT --key KEY --reason TEXT --job RUN_ID
+  alliance-work wakeups add --room ID --owner AGENT --key KEY --reason TEXT --agent CHILD --turn TURN_ID
+  alliance-work wakeups take --owner AGENT
+  alliance-work wakeups ack|cancel --key KEY --owner AGENT --revision N
+  alliance-work wakeups owner --key KEY --owner OLD --next-owner NEW --revision N
   alliance-work update --check        Read latest private GitHub release; change nothing
   alliance-work update                Verify, stage, check and activate the latest release
   alliance-work rollback              Activate the previous installation when idle
@@ -196,7 +212,7 @@ try {
       output({ report: result.path, ...result.report.summary });
       if (!["IMPROVED", "NO_CHANGE"].includes(result.report.summary.outcome)) process.exitCode = 1;
     }
-  } else if (command === "status" || command === "jobs") {
+  } else if (command === "status" || command === "jobs" || command === "wakeups") {
     const current = await installation(home);
     if (!current) throw new Error("No Alliance installation exists for this home");
     const config = JSON.parse(await readFile(join(current.paseoHome, "config.json"), "utf8"));
@@ -220,6 +236,49 @@ try {
       input = { key: flags["--key"], ownerId: flags["--owner"], revision: Number(flags["--revision"]) };
     } else if (command === "jobs" && positional[1] !== "list")
       throw new Error("Usage: jobs list|track|owner");
+    if (command === "wakeups") {
+      const action = positional[1];
+      const ownerId = flags["--owner"] ?? process.env.PASEO_AGENT_ID;
+      if (action === "list") method = "wakeups.list";
+      else if (action === "add") {
+        for (const flag of ["--room", "--key", "--reason"])
+          if (!flags[flag]) throw new Error(`Missing ${flag}`);
+        if (!ownerId) throw new Error("Missing --owner");
+        if ([flags["--at"], flags["--job"], flags["--agent"]].filter(Boolean).length !== 1)
+          throw new Error("Choose exactly one of --at, --job, or --agent with --turn");
+        method = "wakeups.add";
+        input = {
+          key: flags["--key"],
+          roomId: flags["--room"],
+          ownerId,
+          reason: flags["--reason"],
+          trigger: flags["--at"]
+            ? { kind: "time", at: Date.parse(flags["--at"]) }
+            : flags["--job"]
+              ? { kind: "job", key: flags["--job"] }
+              : { kind: "turn", agentId: flags["--agent"], turnId: flags["--turn"] },
+          delivery: flags["--delivery"] ?? "pull",
+          ...(flags["--every-ms"] ? { everyMs: Number(flags["--every-ms"]) } : {}),
+          ...(flags["--max-runs"] ? { maxRuns: Number(flags["--max-runs"]) } : {}),
+          ...(flags["--expires"] ? { expiresAt: Date.parse(flags["--expires"]) } : {}),
+        };
+      } else if (action === "take") {
+        if (!ownerId) throw new Error("Missing --owner");
+        method = "wakeups.take";
+        input = { ownerId };
+      } else if (["ack", "cancel", "owner"].includes(action)) {
+        if (!ownerId || !flags["--key"] || !flags["--revision"])
+          throw new Error("Requires --key, --owner and --revision");
+        method = "wakeups.action";
+        input = {
+          key: flags["--key"],
+          ownerId,
+          revision: Number(flags["--revision"]),
+          action,
+          nextOwnerId: flags["--next-owner"],
+        };
+      } else throw new Error("Usage: wakeups list|add|take|ack|cancel|owner");
+    }
     const client = new DaemonClient({
       url: `ws://${config.daemon.listen}/ws`,
       clientId: "alliance-operations",

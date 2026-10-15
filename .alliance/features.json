@@ -136,6 +136,50 @@
           "expect": "Unknown and closed recipients receive no resume prompt"
         }
       ]
+    },
+    {
+      "id": "wakeups",
+      "title": "Durable owner wakeups",
+      "entryPoint": "wakeups CLI / native plugin RPC",
+      "preconditions": "Isolated SQLite and native API fixtures",
+      "behaviors": [
+        {
+          "id": "wakeups.persistence",
+          "expect": "Restart keeps obligations and busy owners receive no prompt"
+        },
+        {
+          "id": "wakeups.delivery",
+          "expect": "Batching and ambiguous delivery never trigger an automatic resend"
+        },
+        {
+          "id": "wakeups.repeat",
+          "expect": "Pull delivery persists until acknowledged and repeats skip missed intervals"
+        },
+        {
+          "id": "wakeups.turn",
+          "expect": "Superseded or accepted work cannot wake an owner"
+        },
+        {
+          "id": "wakeups.owner",
+          "expect": "Unavailable owners hold delivery and stale owner edits fail"
+        },
+        {
+          "id": "wakeups.job",
+          "expect": "Job exit never accepts results and owner changes require reconciliation"
+        },
+        {
+          "id": "wakeups.recovery",
+          "expect": "Interrupted claims are quarantined and expired work does not fire"
+        },
+        {
+          "id": "wakeups.race",
+          "expect": "Acceptance during owner readback prevents stale dispatch"
+        },
+        {
+          "id": "wakeups.bounds",
+          "expect": "Idle delivery bounds batch size and enforces owner cooldown"
+        }
+      ]
     }
   ],
   "scenarios": [
@@ -336,6 +380,96 @@
         {
           "id": "operations.resume",
           "behavior": "operations.resume"
+        }
+      ]
+    },
+    {
+      "id": "wakeups.persistence",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "wakeups.persistence"],
+      "assertions": [
+        {
+          "id": "wakeups.persistence",
+          "behavior": "wakeups.persistence"
+        }
+      ]
+    },
+    {
+      "id": "wakeups.delivery",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "wakeups.delivery"],
+      "assertions": [
+        {
+          "id": "wakeups.delivery",
+          "behavior": "wakeups.delivery"
+        }
+      ]
+    },
+    {
+      "id": "wakeups.repeat",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "wakeups.repeat"],
+      "assertions": [
+        {
+          "id": "wakeups.repeat",
+          "behavior": "wakeups.repeat"
+        }
+      ]
+    },
+    {
+      "id": "wakeups.turn",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "wakeups.turn"],
+      "assertions": [
+        {
+          "id": "wakeups.turn",
+          "behavior": "wakeups.turn"
+        }
+      ]
+    },
+    {
+      "id": "wakeups.owner",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "wakeups.owner"],
+      "assertions": [
+        {
+          "id": "wakeups.owner",
+          "behavior": "wakeups.owner"
+        }
+      ]
+    },
+    {
+      "id": "wakeups.job",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "wakeups.job"],
+      "assertions": [
+        {
+          "id": "wakeups.job",
+          "behavior": "wakeups.job"
+        }
+      ]
+    },
+    {
+      "id": "wakeups.recovery",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "wakeups.recovery"],
+      "assertions": [
+        {
+          "id": "wakeups.recovery",
+          "behavior": "wakeups.recovery"
+        }
+      ]
+    },
+    {
+      "id": "wakeups.race",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "wakeups.race"],
+      "assertions": [
+        {
+          "id": "wakeups.race",
+          "behavior": "wakeups.race"
+        }
+      ]
+    },
+    {
+      "id": "wakeups.bounds",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "wakeups.bounds"],
+      "assertions": [
+        {
+          "id": "wakeups.bounds",
+          "behavior": "wakeups.bounds"
         }
       ]
     }

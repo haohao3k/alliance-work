@@ -131,6 +131,25 @@ test("native Paseo switches release roots and restores the previous plugin after
     assert.equal(tracked.jobs[0].state, "running");
     assert.equal(tracked.jobs[0].ownerId, created.id);
     assert.equal(tracked.jobs[0].ownerStatus, "available");
+    const wakeRoomId = after.rooms.find((room) => room.cwd === cwd)?.id;
+    assert(wakeRoomId);
+    await client.invokePluginRpc("alliance-work", "wakeups.add", {
+      key: "native-wakeup",
+      roomId: wakeRoomId,
+      ownerId: created.id,
+      reason: "Inspect test evidence",
+      trigger: { kind: "time", at: Date.now() },
+    });
+    const taken = (await client.invokePluginRpc("alliance-work", "wakeups.take", {
+      ownerId: created.id,
+    })) as { key: string; revision: number; state: string }[];
+    assert.equal(taken[0].state, "delivered");
+    await client.invokePluginRpc("alliance-work", "wakeups.action", {
+      key: taken[0].key,
+      ownerId: created.id,
+      revision: taken[0].revision,
+      action: "ack",
+    });
     const nativeAssignment = after.members.find((member) => member.id === created.id)?.assignment;
     assert(nativeAssignment);
     assert((await readFile(nativeAssignment, "utf8")).includes(created.id));
@@ -244,6 +263,14 @@ test("native Paseo switches release roots and restores the previous plugin after
   assert.equal(current.root, candidate);
   assert.equal(current.previous.root, projectRoot);
   await verifyRuntime(paseoHome, candidate);
+  const retained = JSON.parse(
+    execFileSync(process.execPath, [join(candidate, "scripts/cli.mjs"), "wakeups", "list", "--home", home], {
+      encoding: "utf8",
+      timeout: 30000,
+    }),
+  );
+  assert.equal(retained.find((w: { key: string }) => w.key === "native-wakeup")?.state, "acknowledged");
+
   const broken = join(dir, "broken release");
   await cp(candidate, broken, {
     recursive: true,

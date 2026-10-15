@@ -235,7 +235,7 @@ Push a matching `vMAJOR.MINOR.PATCH` tag when the release is ready. Existing tag
 If the tag event did not start a run, dispatch the same tagged source explicitly:
 
 ```sh
-gh workflow run release.yml --repo haohao3k/alliance-work --ref codex/bootstrap -f tag=v0.1.1
+gh workflow run release.yml --repo haohao3k/alliance-work --ref main -f tag=v0.1.1
 ```
 
 The manual workflow also checks out and validates the requested tag before packaging.
@@ -304,3 +304,51 @@ a replacement for tests. Older records without a pin report `pinned: false`.
 Stage and test candidates separately. Activation still requires all native agents and workspace
 scripts to be idle, uses the owned installer and preserves daemon/process history. External jobs
 must also be observed before/after; if any impact is uncertain, leave the candidate staged.
+
+
+## Durable wakeups (0.1.9)
+
+Wakeups persist in the installation's SQLite database and are evaluated every 15 seconds while
+the plugin is running, including after reload without an open UI. A stopped daemon performs no
+checks; overdue work is reconciled after startup. The previous release ignores the additive table.
+Nothing is registered or enabled automatically for existing assignments or jobs.
+
+```sh
+alliance-work wakeups add --room ROOM --owner OWNER --key review-deadline --reason 'Reconcile outstanding evidence' --at '2026-11-01T09:00:00+07:00'
+alliance-work wakeups add --room ROOM --owner OWNER --key benchmark-result --reason 'Inspect benchmark output and exit status' --job RUN_KEY
+alliance-work wakeups add --room ROOM --owner OWNER --key child-result --reason 'Review child result' --agent CHILD --turn TURN_ID
+alliance-work wakeups list
+alliance-work wakeups take --owner OWNER
+alliance-work wakeups ack --key KEY --owner OWNER --revision N
+alliance-work wakeups cancel --key KEY --owner OWNER --revision N
+alliance-work wakeups owner --key KEY --owner OLD --next-owner NEW --revision N
+```
+
+Use `status` to read member `lastTurnId`. Turn triggers bind that exact generation and cancel
+when superseded or accepted; job triggers bind boot/process identity and the recorded job owner
+revision. Transfer the job first, then its wakeup. A process exit only asks for inspection.
+Owner changes are metadata, not acknowledgement by the new owner. CLI owner defaults to
+`PASEO_AGENT_ID`; local operators can supply it explicitly, as with existing Alliance CLI actions.
+
+The default `pull` delivery never sends a native prompt. `take` returns at most eight pending
+or delivered items; repeated reads keep them available until `ack`. Check durable artifacts and
+reconcile side effects before acknowledging. This does not accept any candidate.
+For optional automatic delivery, add `--delivery idle` when creating the obligation. Native
+readback must be idle, unarchived and free of permissions; missing/busy owners keep pending work.
+At most eight items are sent in a batch, with a one-minute cooldown per owner. This mode is best
+effort: Paseo 0.11.2 has no atomic idle-only send and its steer fallback can replace a concurrent
+turn. Use pull for jobs requiring zero interruption. No closed session is auto-resurrected.
+
+Repeats are time-only: `--every-ms 60000 --max-runs 3` (minimum one minute, maximum 100 runs).
+They rearm only after acknowledgement, from the acknowledgement time; missed intervals never
+produce a catch-up storm. Default expiry is 30 days, overridable with `--expires ISO_TIME`.
+Keys are installation-wide and idempotent for identical input; different input under the same
+key is rejected. There is a hard limit of 1000 retained obligations; creation fails explicitly
+rather than losing pending work. Terminal records remain as audit history.
+
+States distinguish scheduled, pending, dispatching, delivered, acknowledged, canceled, expired
+and uncertain. Dispatch claims are transactional. A crash or failed acknowledgement during
+native send leaves `uncertain`; it is never automatically resent, even after restart. Inspect
+native history, then acknowledge or cancel explicitly. Native delivery is not exactly-once
+execution or proof that the owner read the evidence. The CLI/UI exposes revisions for stale-write
+protection. The plugin releases its timer and waits for in-flight observation on unload.

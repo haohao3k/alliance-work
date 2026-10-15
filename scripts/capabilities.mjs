@@ -11,6 +11,7 @@ const required = {
     ".alliance/features.json",
   ],
   "failure-learning": ["server/failure-evals.mjs", "room/skills/alliance-learn-from-failure/SKILL.md"],
+  wakeups: ["server/wakeups.ts", "shared/wakeups.ts"],
   operations: ["server/jobs.mjs", "shared/operations.ts"],
 };
 const roots = [

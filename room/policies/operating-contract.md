@@ -70,3 +70,22 @@ not a message or acknowledgement from the recipient.
 Acceptance must name its scope: analysis, tests or runtime; keep research answers distinct from
 admitted assessments and verified product behavior. The monitor's last decision is historical;
 a new turn reopens current acceptance. Do not claim product completion from an analysis PASS.
+
+## Durable wakeups
+
+When work must be revisited after a time, tracked process exit or a specific child turn,
+register an explicit Alliance wakeup with a stable key, room, owner and reason. Use
+`alliance-work wakeups add --help` for syntax. This records an obligation; it does not grant
+new authority, accept a result, or restart a process. Choose pull delivery by default.
+At the start/end of an assignment and before going idle, run
+`alliance-work wakeups take --owner "$PASEO_AGENT_ID"`, inspect the referenced durable results,
+then acknowledge each reviewed wakeup with its returned key and revision. Acknowledgement
+is distinct from candidate acceptance. Unacknowledged items remain readable after a crash.
+
+Idle auto-delivery is explicitly opt-in (`--delivery idle`). It checks native status and
+permissions, batches at most eight items and sends at most once per owner per minute.
+Paseo 0.11.2 has no atomic idle-only send; even steer can replace a turn in a race. Use pull
+when concurrent human work must never be interrupted. Never enable idle delivery for an
+existing job merely because it is listed. Resolve uncertain deliveries by checking history;
+do not create another wakeup key to bypass ambiguity. Transfer job ownership before transferring
+its wakeup. Closed/archived owners must be reconciled explicitly; they are never auto-resumed.

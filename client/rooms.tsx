@@ -231,6 +231,7 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
 
   const rooms = data.data?.rooms ?? [];
   const jobs = data.data?.jobs ?? [];
+  const wakeups = data.data?.wakeups ?? [];
   const members = (data.data?.members ?? []).filter((member) => archived || !member.archived);
   const counts = {
     all: members.length,
@@ -283,6 +284,9 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
           <View style={{ flex: 1, gap: 3 }}>
             <Text style={{ color: c.foreground, fontSize: 21, fontWeight: "600" }}>Alliance Work</Text>
             <Text style={muted}>{host.label}</Text>
+            {data.data?.wakeupHealth.error && (
+              <Text style={{ ...muted, color: c.statusWarning }}>{data.data.wakeupHealth.error}</Text>
+            )}
           </View>
           <Button label="Add project" icon="FolderPlus" colors={c} onPress={() => setAdding(true)} />
           {!compact && (
@@ -431,6 +435,25 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
               <Text style={muted}>{rows.length}</Text>
               <Button label="Models" icon="Settings2" colors={c} onPress={() => setModelRoom(room)} />
             </View>
+            {wakeups
+              .filter(
+                (w) => w.roomId === room.id && !["acknowledged", "canceled", "expired"].includes(w.state),
+              )
+              .map((w) => (
+                <View key={w.key} style={{ padding: 14, gap: 4, backgroundColor: c.surface1 }}>
+                  <Text style={cell}>
+                    Wakeup · {w.state} · {w.reason}
+                  </Text>
+                  <Text selectable style={muted}>
+                    Owner: {members.find((m) => m.id === w.ownerId)?.title ?? w.ownerId} ·{" "}
+                    {w.delivery === "pull" ? "Read at next task boundary" : "Idle delivery enabled"}
+                  </Text>
+                  <Text selectable style={muted}>
+                    {w.key} · revision {w.revision}
+                    {w.note ? ` · ${w.note}` : ""}
+                  </Text>
+                </View>
+              ))}
             {jobs
               .filter((job) => job.roomId === room.id)
               .map((job) => (

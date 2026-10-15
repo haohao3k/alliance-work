@@ -4,7 +4,7 @@ import { lstat, mkdir, readdir, readFile, realpath, rename, writeFile } from "no
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
-import type { PaseoApi } from "@getpaseo/client";
+import { createPaseoClient, type PaseoApi, type PaseoClient } from "@getpaseo/client";
 import type { RpcInput } from "@getpaseo/plugin";
 import type { PluginHookAgent, PluginTurnOutcome } from "@getpaseo/plugin/server";
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
@@ -17,6 +17,7 @@ import { observeJob, processIdentity } from "./jobs.mjs";
 import { chooseModel } from "./model-policy";
 import { verifyProfile } from "./profile-integrity.mjs";
 import { RoomStore } from "./store";
+import { Wakeups } from "./wakeups";
 
 interface Profile {
   home: string;
@@ -71,6 +72,12 @@ async function gitRoot(cwd: string) {
 export class AllianceRuntime {
   readonly home: string;
   store!: RoomStore;
+  wakeups!: Wakeups;
+  wakeupHealth: { checkedAt: string | null; error: string | null } = { checkedAt: null, error: null };
+  private wakeTimer?: ReturnType<typeof setTimeout>;
+  private wakeClient?: PaseoClient;
+  private wakeRound?: Promise<void>;
+  private closing = false;
   private manifest!: Manifest;
   private roomWrite: Promise<unknown> = Promise.resolve();
   constructor(home: string) {
@@ -81,7 +88,48 @@ export class AllianceRuntime {
     this.manifest = JSON.parse(await readFile(join(this.home, "profiles.json"), "utf8"));
     if (this.manifest.home !== this.home) throw new Error("Alliance manifest belongs to another home");
     this.store = new RoomStore(this.home);
+    this.wakeups = new Wakeups(this.store);
     return this;
+  }
+  startWakeups() {
+    if (this.wakeTimer || this.wakeRound || this.closing) return;
+    const round = async () => {
+      try {
+        await this.wakeups.tick();
+        this.wakeupHealth = { checkedAt: new Date().toISOString(), error: null };
+        if (this.wakeups.list().some((w) => w.state === "pending" && w.delivery === "idle")) {
+          if (!this.wakeClient) {
+            const installed = JSON.parse(await readFile(join(this.home, "installation.json"), "utf8"));
+            if (installed.home !== this.home) throw new Error("Installation home mismatch");
+            const config = JSON.parse(await readFile(join(installed.paseoHome, "config.json"), "utf8"));
+            this.wakeClient = createPaseoClient({
+              url: `ws://${config.daemon.listen}/ws`,
+              clientId: "alliance-wakeups",
+              password: process.env.ALLIANCE_PASEO_PASSWORD,
+              connectTimeoutMs: 5000,
+            });
+            await this.wakeClient.connect();
+          }
+          if (!this.closing) await this.wakeups.tick(this.wakeClient);
+        }
+      } catch {
+        this.wakeupHealth.error = "Wakeup sweep or native connection failed; obligations retained";
+        // Keep obligations durable. No prompt retries on uncertain delivery.
+        await this.wakeClient?.close().catch(() => undefined);
+        this.wakeClient = undefined;
+      } finally {
+        this.wakeRound = undefined;
+        if (!this.closing) {
+          this.wakeTimer = setTimeout(run, 15000);
+          this.wakeTimer.unref();
+        }
+      }
+    };
+    const run = () => {
+      this.wakeTimer = undefined;
+      this.wakeRound = round();
+    };
+    run();
   }
   async profile(provider: string) {
     const identity = allianceProvider(provider);
@@ -355,7 +403,10 @@ export class AllianceRuntime {
         ...member,
         ...ownerState(member.parentId, members),
         lastAcceptance: latest.get(member.id) ?? null,
+        lastTurnId: member.lastTurnId ?? null,
       })),
+      wakeups: this.wakeups.list(),
+      wakeupHealth: this.wakeupHealth,
       jobs: await Promise.all(
         this.store
           .jobs()
@@ -473,7 +524,12 @@ export class AllianceRuntime {
     this.store.updateMember(id, { decision, decisionEvidence: path });
     return { saved: true as const };
   }
-  close() {
+  async close() {
+    this.closing = true;
+    clearTimeout(this.wakeTimer);
+    await this.wakeups?.stop();
+    await this.wakeRound;
+    await this.wakeClient?.close();
     this.store?.close();
   }
 }

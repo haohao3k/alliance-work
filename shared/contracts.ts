@@ -1,6 +1,7 @@
 import { defineRpc, defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
 import { Difficulty, ModelPolicy } from "./model-policy";
+import { WakeRecord } from "./wakeups";
 
 export const Role = z.enum(["hq", "supervisor", "lead", "peer", "lens"]);
 export const Harness = z.enum(["codex", "claude", "pi"]);
@@ -53,6 +54,7 @@ export const Member = z.object({
   parentId: z.string().nullable(),
   assignment: z.string(),
   lastOutcome: z.string().nullable(),
+  lastTurnId: z.string().nullable(),
   resultPath: z.string().nullable(),
   decision: z.enum(["open", "accepted", "rejected"]),
   decisionEvidence: z.string().nullable(),
@@ -66,7 +68,13 @@ export const Member = z.object({
 export const roomList = defineRpc({
   name: "rooms.list",
   input: z.object({}),
-  output: z.object({ rooms: z.array(Room), members: z.array(Member), jobs: z.array(Job) }),
+  output: z.object({
+    rooms: z.array(Room),
+    members: z.array(Member),
+    jobs: z.array(Job),
+    wakeups: z.array(WakeRecord),
+    wakeupHealth: z.object({ checkedAt: z.string().nullable(), error: z.string().nullable() }),
+  }),
 });
 export const roomCreate = defineRpc({
   name: "rooms.create",

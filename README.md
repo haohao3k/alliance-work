@@ -195,3 +195,9 @@ Current sessions adopt updated operating policy at their next natural work bound
 `members owner` handoffs separate responsibility from native parentage and permit related
 cross-room wakeups. Product acceptance adds an observed journey to candidate-bound runtime
 proof. See [operations](docs/operations.md#responsibility-and-policy-adoption-0110).
+
+New delegated Alliance agents can now continue unfinished assignments across idle turns, retry
+failed turns with bounded backoff, wake their owner for review and archive after evidence-bound
+acceptance. Existing chats opt in with `alliance-work autonomy start --agent ID`; inspect with
+`alliance-work autonomy list`, pause with `autonomy checkpoint --agent ID --phase paused --reason TEXT`.
+See [autonomous assignment operation and real-model acceptance](docs/operations.md#autonomous-assignments-0111).

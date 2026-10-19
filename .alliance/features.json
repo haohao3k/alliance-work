@@ -204,6 +204,42 @@
           "expect": "Session recovery restores common policy and current open obligations without messaging owners"
         }
       ]
+    },
+    {
+      "id": "autonomy",
+      "title": "Autonomous assignment lifecycle",
+      "entryPoint": "autonomy CLI / native lifecycle hooks and SDK",
+      "preconditions": "Isolated SQLite and native API fixtures; model acceptance is separate",
+      "behaviors": [
+        {
+          "id": "autonomy.continuation",
+          "expect": "Idle unfinished work continues once; review wakes the owner without accepting"
+        },
+        {
+          "id": "autonomy.retry",
+          "expect": "Retries are bounded and cancellation/permissions hold execution"
+        },
+        {
+          "id": "autonomy.uncertain",
+          "expect": "Unknown dispatch survives reload without duplicate sending"
+        },
+        {
+          "id": "autonomy.archive",
+          "expect": "Only evidence-accepted idle work can archive"
+        },
+        {
+          "id": "autonomy.reload",
+          "expect": "Retained work continues after reopen while interrupted claims are quarantined"
+        },
+        {
+          "id": "autonomy.race",
+          "expect": "Pause during readback blocks sends and live native children block cascade"
+        },
+        {
+          "id": "autonomy.obligations",
+          "expect": "Prerequisites gate retries and continuations; handoff preserves budget; open obligations prevent archive"
+        }
+      ]
     }
   ],
   "scenarios": [
@@ -534,6 +570,76 @@
         {
           "id": "obligations.recovery",
           "behavior": "obligations.recovery"
+        }
+      ]
+    },
+    {
+      "id": "autonomy.continuation",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "autonomy.continuation"],
+      "assertions": [
+        {
+          "id": "autonomy.continuation",
+          "behavior": "autonomy.continuation"
+        }
+      ]
+    },
+    {
+      "id": "autonomy.retry",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "autonomy.retry"],
+      "assertions": [
+        {
+          "id": "autonomy.retry",
+          "behavior": "autonomy.retry"
+        }
+      ]
+    },
+    {
+      "id": "autonomy.uncertain",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "autonomy.uncertain"],
+      "assertions": [
+        {
+          "id": "autonomy.uncertain",
+          "behavior": "autonomy.uncertain"
+        }
+      ]
+    },
+    {
+      "id": "autonomy.archive",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "autonomy.archive"],
+      "assertions": [
+        {
+          "id": "autonomy.archive",
+          "behavior": "autonomy.archive"
+        }
+      ]
+    },
+    {
+      "id": "autonomy.reload",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "autonomy.reload"],
+      "assertions": [
+        {
+          "id": "autonomy.reload",
+          "behavior": "autonomy.reload"
+        }
+      ]
+    },
+    {
+      "id": "autonomy.race",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "autonomy.race"],
+      "assertions": [
+        {
+          "id": "autonomy.race",
+          "behavior": "autonomy.race"
+        }
+      ]
+    },
+    {
+      "id": "autonomy.obligations",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "autonomy.obligations"],
+      "assertions": [
+        {
+          "id": "autonomy.obligations",
+          "behavior": "autonomy.obligations"
         }
       ]
     }

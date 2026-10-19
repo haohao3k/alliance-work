@@ -135,3 +135,36 @@ only when the Human truly owns the next decision. This changes responsibility me
 native parentage, permissions, job ownership or receipt acceptance. Reconcile those explicitly.
 A cross-room wakeup may target a documented responsible owner; unrelated rooms cannot be used
 as a broadcast destination. Job exit remains a request to inspect outputs, not proof of success.
+
+## Autonomous assignments
+
+New Alliance launches and newly created native children are managed automatically. Existing chats
+are unchanged until their owner runs `alliance-work autonomy start --agent ID`. For a substantive
+new task in a root chat, start autonomy once, with an explicit finite continuation budget if the
+default 20 is insufficient. Do not reset that budget each turn.
+
+Before yielding, record `alliance-work autonomy checkpoint --phase PHASE --reason TEXT` (your
+PASEO_AGENT_ID is the default). `active` records the concrete next step for another turn;
+`waiting` waits for delegated work or an explicitly registered timed/job wakeup; `review` means
+checked results are saved and ready for the responsible owner; `blocked` needs a decision or
+external change; `paused` stops automatic continuation. A completed turn alone is not completion.
+The scheduler continues active assignments, retries failed turns at most twice with backoff, and
+wakes an idle owner for review/blocked handbacks. Do not also send a native finish notification
+for those managed handbacks. A cancellation pauses continuation. If delivery is uncertain,
+inspect native history and side effects before recording a checkpoint; do not blindly resend.
+
+Use the exact Alliance CLI command given in your room instructions, including --home. Do not
+assume a global launcher addresses this instance. On wake, read durable results and advance the
+assignment; avoid acknowledgement-only turns. Review and accept another agent's result with
+candidate-bound evidence. Accepted managed agents are archived once idle with no outstanding
+children, open obligations, jobs or wakeups; set --auto-archive false at start if this assignment must stay open.
+The scheduler does not infer acceptance from prose or bypass permission requests. Native send
+uses steer but Paseo has no atomic idle-only delivery; concurrent human sends can still race.
+
+
+Bind material dependent work with `autonomy start --obligation KEY` once the obligation is
+recorded. Its owner and unexpired conditions gate continuation and retry; use `waiting` while
+prerequisites are missing. Continue independent work in its own assignment. Handoff moves a
+bound lifecycle and its remaining budget to a free idle successor atomically; transfer to Human
+pauses execution. Acknowledged or expired reminders never close the obligation. Do not mark an
+obligation fulfilled merely to enable archive: verify its closeWhen contract first.

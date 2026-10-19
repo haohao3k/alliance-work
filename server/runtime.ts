@@ -19,6 +19,7 @@ import {
 } from "../shared/contracts";
 import { policyInstruction, type TaskDifficulty } from "../shared/model-policy";
 import { ownerState, responsibleOwner } from "../shared/operations";
+import { Autonomy } from "./autonomy";
 import { observeJob, processIdentity } from "./jobs.mjs";
 import { chooseModel } from "./model-policy";
 import { Obligations } from "./obligations";
@@ -81,6 +82,7 @@ export class AllianceRuntime {
   store!: RoomStore;
   wakeups!: Wakeups;
   obligations!: Obligations;
+  autonomy!: Autonomy;
   wakeupHealth: { checkedAt: string | null; error: string | null } = { checkedAt: null, error: null };
   private wakeTimer?: ReturnType<typeof setTimeout>;
   private wakeClient?: PaseoClient;
@@ -98,6 +100,7 @@ export class AllianceRuntime {
     this.store = new RoomStore(this.home);
     this.wakeups = new Wakeups(this.store);
     this.obligations = new Obligations(this.store);
+    this.autonomy = new Autonomy(this.store, this.wakeups);
     return this;
   }
   startWakeups() {
@@ -106,7 +109,10 @@ export class AllianceRuntime {
       try {
         await this.wakeups.tick();
         this.wakeupHealth = { checkedAt: new Date().toISOString(), error: null };
-        if (this.wakeups.list().some((w) => w.state === "pending" && w.delivery === "idle")) {
+        if (
+          this.autonomy.list().some((r) => r.phase !== "archived") ||
+          this.wakeups.list().some((w) => w.state === "pending" && w.delivery === "idle")
+        ) {
           if (!this.wakeClient) {
             const installed = JSON.parse(await readFile(join(this.home, "installation.json"), "utf8"));
             if (installed.home !== this.home) throw new Error("Installation home mismatch");
@@ -119,7 +125,12 @@ export class AllianceRuntime {
             });
             await this.wakeClient.connect();
           }
-          if (!this.closing) await this.wakeups.tick(this.wakeClient);
+          if (!this.closing) {
+            await this.autonomy.tick(this.wakeClient).catch(() => {
+              this.wakeupHealth.error = "Autonomy sweep incomplete; inspect assignments and native status";
+            });
+            await this.wakeups.tick(this.wakeClient);
+          }
         }
       } catch {
         this.wakeupHealth.error = "Wakeup sweep or native connection failed; obligations retained";
@@ -293,6 +304,7 @@ export class AllianceRuntime {
       launchKey: null,
       launchHash: null,
     });
+    if (agent.parentAgentId) this.autonomy.start(agent.id);
   }
   async launch(input: RpcInput<typeof memberLaunch>, paseo: PaseoApi) {
     const room = this.store.room(input.roomId);
@@ -335,6 +347,7 @@ export class AllianceRuntime {
         launchEffort: selected.thinkingOptionId,
       });
     }
+    if (!this.autonomy.get(id)) this.autonomy.start(id);
     const workspace = paseo.workspaces.ref(room.workspaceId);
     await workspace.agents.create({
       agentId: id,
@@ -528,6 +541,7 @@ export class AllianceRuntime {
         lastAcceptance: latest.get(member.id) ?? null,
         lastTurnId: member.lastTurnId ?? null,
       })),
+      autonomy: this.autonomy.list(),
       wakeups: this.wakeups.list(),
       obligations: this.obligations.list().map((o) => ({ ...o, ...ownerState(o.ownerId, members) })),
       wakeupHealth: this.wakeupHealth,
@@ -609,6 +623,7 @@ export class AllianceRuntime {
   }
   async startTurn(agent: PluginHookAgent, turnId: string | null) {
     await this.bind(agent);
+    this.autonomy.started(agent.id, turnId);
     this.store.updateMember(agent.id, {
       lastTurnId: turnId,
       lastOutcome: null,
@@ -639,8 +654,10 @@ export class AllianceRuntime {
       JSON.stringify({ agentId: agent.id, turnId, outcome, final: final ?? null }, null, 2) + "\n",
     );
     const current = this.store.member(agent.id);
-    if (!current?.lastTurnId || current.lastTurnId === turnId)
+    if (!current?.lastTurnId || current.lastTurnId === turnId) {
       this.store.updateMember(agent.id, { lastOutcome: outcome.kind, resultPath: path });
+      this.autonomy.ended(agent.id, turnId, outcome.kind);
+    }
   }
   async disposition(
     id: string,
@@ -682,6 +699,7 @@ export class AllianceRuntime {
   async close() {
     this.closing = true;
     clearTimeout(this.wakeTimer);
+    await this.autonomy?.stop();
     await this.wakeups?.stop();
     await this.wakeRound;
     await this.wakeClient?.close();

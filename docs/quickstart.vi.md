@@ -185,3 +185,31 @@ Bàn giao chuyển đồng thời nghĩa vụ và reminder/job gắn riêng vớ
 Reminders gắn `--obligation KEY` chỉ dùng pull. Đến giờ chưa chắc đủ điều kiện; nhận/ACK/hết hạn
 reminder không hoàn tất nghĩa vụ. Khi vi phạm luật, dừng đúng hành động phụ thuộc, xem lại premise,
 đối chiếu evidence/quyền/owner rồi tiếp tục. Việc độc lập vẫn được tự chủ làm tiếp.
+## Tự tiếp tục task dài
+
+Từ 0.1.12, agent được giao việc qua Alliance launch hoặc tạo làm native child được bật autonomy.
+Chat cũ giữ nguyên; với task mới ở root, agent chạy `autonomy start` một lần theo room contract.
+Có thể bật thủ công bằng CLI đúng instance:
+
+```sh
+alliance-work autonomy start --agent AGENT_ID --max-continuations 20 --max-retries 2
+alliance-work autonomy list
+alliance-work autonomy checkpoint --agent AGENT_ID --phase paused --reason 'Tạm dừng'
+```
+
+Cuối mỗi lượt, agent ghi checkpoint: `active` để làm bước kế tiếp, `waiting` để chờ dependency,
+`review` khi có kết quả đã kiểm tra, `blocked` khi cần quyết định, `paused` để dừng tự tiếp tục.
+Scheduler tự wake agent idle, retry lượt lỗi có backoff và giới hạn, rồi wake owner để nghiệm thu.
+Hủy một lượt sẽ pause; permission đang chờ duyệt vẫn cần người có thẩm quyền xử lý.
+
+Archive chỉ diễn ra sau `accept` có bằng chứng gắn với candidate, khi agent idle và không còn
+child, trách nhiệm, job hay wakeup chưa xử lý. Muốn giữ chat sau nghiệm thu, dùng
+`--auto-archive false` khi start. Không reset budget mỗi lượt. `status` hiển thị state/counter;
+`uncertain` cần kiểm tra native history trước khi checkpoint lại, tránh thực hiện trùng side effect.
+Chi tiết giới hạn và bài test agent thật ở [operations](operations.md#autonomous-assignments-0112).
+
+
+Với việc phụ thuộc điều kiện, dùng `autonomy start --agent ID --obligation KEY`: chưa đủ
+bằng chứng thì không tự tiếp tục/retry và không tiêu budget. Handoff chuyển cả lifecycle/budget;
+owner cũ pause, successor phải idle và chưa có assignment tự chạy khác. Còn nghĩa vụ mở thì
+không auto-archive, kể cả reminder đã ACK/hết hạn. Bàn giao cho Human không tự gửi prompt.

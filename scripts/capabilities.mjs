@@ -11,6 +11,7 @@ const required = {
     ".alliance/features.json",
   ],
   "failure-learning": ["server/failure-evals.mjs", "room/skills/alliance-learn-from-failure/SKILL.md"],
+  autonomy: ["server/autonomy.ts", "shared/autonomy.ts"],
   wakeups: ["server/wakeups.ts", "shared/wakeups.ts"],
   "durable-obligations": [
     "server/obligations.ts",

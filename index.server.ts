@@ -2,6 +2,7 @@ import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { directorySuggestions } from "./server/directories";
 import { composeInstruction } from "./server/instructions";
 import { AllianceRuntime, allianceProvider } from "./server/runtime";
+import { autonomyCheckpoint, autonomyList, autonomyStart } from "./shared/autonomy";
 import {
   directoryList,
   jobOwner,
@@ -54,6 +55,13 @@ export default function contribute(server: PluginServerContext) {
   server.handle(obligationHistory, async ({ key }) => (await get()).store.obligationHistory(key));
   server.handle(obligationAdd, async (input, { paseo }) => (await get()).obligations.add(input, paseo));
   server.handle(obligationAction, async (input, { paseo }) => (await get()).obligations.action(input, paseo));
+  server.handle(autonomyList, async () => (await get()).autonomy.list());
+  server.handle(autonomyStart, async ({ agentId, ...options }) =>
+    (await get()).autonomy.start(agentId, options),
+  );
+  server.handle(autonomyCheckpoint, async ({ agentId, phase, reason, turnId }) =>
+    (await get()).autonomy.checkpoint(agentId, phase, reason, turnId),
+  );
   server.handle(wakeList, async () => {
     const r = await get();
     await r.wakeups.tick();
@@ -161,7 +169,11 @@ export default function contribute(server: PluginServerContext) {
     };
   });
   server.on("agent.created", async ({ agent }) => {
-    if (allianceProvider(agent.provider)) await (await get()).bind(agent);
+    if (allianceProvider(agent.provider)) {
+      const instance = await get();
+      await instance.bind(agent);
+      if (agent.parentAgentId && !instance.autonomy.get(agent.id)) instance.autonomy.start(agent.id);
+    }
   });
   server.on("agent.turn_started", async ({ agent, turnId }) => {
     if (!allianceProvider(agent.provider)) return;

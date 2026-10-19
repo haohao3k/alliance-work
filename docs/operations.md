@@ -492,3 +492,91 @@ when live; recovery snapshots are derived, not the source of truth. New tables a
 old fields/notifications remain compatible, but older plugins cannot enforce the new ledger:
 the current installer refuses targets missing the durable core. Do not bypass that check with
 an older installer; preserve and reconcile the ledger before any manually managed downgrade.
+## Autonomous assignments (0.1.12)
+
+The plugin owns a durable assignment policy; Paseo still owns execution, sessions, permissions
+and transport. New Alliance launches and native Alliance children are enabled automatically.
+Existing sessions are not retroactively enabled. Root chats enable themselves once for a
+substantive task, following the room contract; operators can enable an existing assignment:
+
+```sh
+alliance-work autonomy start --agent AGENT_ID --max-continuations 20 --max-retries 2
+alliance-work autonomy list
+alliance-work autonomy checkpoint --agent AGENT_ID --phase paused --reason 'Operator pause'
+```
+
+`--agent` defaults to `PASEO_AGENT_ID`. Use the exact CLI and `--home` from room instructions.
+`status` includes autonomy phase, reason, counters and delivery state. `start` explicitly resets
+the finite budget; do not repeat it each turn. `--auto-archive false` keeps accepted work open.
+A start on an existing assignment adopts its retained last turn; archived agents require explicit
+native reopening first. A native new turn reopens a prior review, never a deliberate pause.
+
+Before ending a managed turn, agents checkpoint `active` with the next concrete step, `waiting`
+for a dependency, `review` with checked results, `blocked` for a decision, or `paused` to stop.
+An optional `--turn TURN_ID` rejects stale checkpoints. Waiting work uses child handbacks or an
+explicit time/job wakeup. Completion of a model turn alone never means task acceptance.
+
+Every 15 seconds, eligible active work receives a native SDK continuation after at least 15
+seconds of idle time following its recorded outcome. Failed turns retry after 30 then 60 seconds,
+with a default two retries across the assignment. Limits are 0–5 retries and 1–100 continuations
+(default 20). Exhaustion becomes blocked and requests owner review. Cancellation pauses the
+assignment; permissions, busy/unknown agents and archived agents are never bypassed. A known
+failed turn may resume an error/closed session using the native SDK. Shared-auth renewal still
+requires its original auth owner as described above; retries do not renew credentials.
+
+Review/blocked handbacks create one durable idle-delivery wakeup for the current owner and turn.
+They reuse the existing wakeup queue and acknowledgement protocol. Disable native finish pings
+for managed handbacks to avoid duplicate notifications. The owner must inspect and explicitly
+accept candidate-bound evidence. Only then may the plugin archive an idle agent, with no pending
+permissions, live native children, unfinished responsibilities, tracked jobs or unresolved owner
+wakeups. Native children are archived separately before their parent so native cascade cannot
+silently archive unreviewed or unmanaged children. Paused assignments stay open.
+
+State and counters survive plugin reload and daemon restart. Dispatch is claimed before send;
+a crash or ambiguous response is quarantined as `uncertain` and never automatically replayed.
+Inspect native history and side effects, then checkpoint/resume deliberately. Paseo hooks are
+best effort with no replay; if both the native hook and its durable outcome were lost, Alliance
+holds the assignment rather than inventing an outcome. Inspect and resume via a native turn.
+A stopped daemon runs no scheduler. These bounds prevent an unattended infinite retry loop;
+they do not guarantee arbitrary work will finish without a human decision.
+
+Paseo 0.11.2 has no atomic idle-only send/archive. Fresh status and revision checks reduce races,
+but a concurrent human/native action can still race an SDK mutation. Native `steer` is not a
+queue guarantee. No Paseo core modification, extra daemon or coordination MCP is installed.
+
+Real-model acceptance, including plugin reload between turns, owner wake, evidence-gated archive
+and recovery from an actual provider rejection:
+
+```sh
+node scripts/acceptance-autonomy.mjs /absolute/new-output "$HOME/.codex"
+```
+
+It uses isolated homes and a disposable native daemon with read-only shared auth, sends one
+initial worker prompt, and checks generated artifacts across three turns. The receipt records
+measured outcomes; portable fixture tests additionally exercise cancellation, permission holds,
+ambiguous dispatch, stale events and native-child archive protection.
+
+
+## Combined lifecycle and obligations (0.1.12)
+
+Version 0.1.12 unifies the two local 0.1.11 candidates. It pins Paseo CLI/client/plugin 0.12.0
+and retains tested compatibility with existing 0.11.2 daemons. Installing the Alliance plugin
+never restarts a running daemon; a host Paseo upgrade is separate, explicit maintenance.
+
+Bind dependent continuation with `autonomy start --agent ID --obligation KEY`. The obligation
+must be open and owned by that agent. Both ordinary continuation and failed-turn retry wait for
+all unexpired prerequisite observations; waiting does not consume budget. `waiting` with a bound
+condition resumes when it becomes ready. Independent unbound assignments may keep working.
+Linked pull reminders remain informational; their expiry or ACK never authorizes execution.
+
+A managed obligation handoff transfers the binding and remaining retry/continuation budget in
+the same transaction as the obligation, history, linked notifications and exclusively owned jobs.
+The old owner is paused. The successor must be idle, without pending permissions or another
+managed assignment; in-flight or uncertain deliveries must be reconciled first. Handoff to Human
+pauses the old owner and sends nothing. An explicit paused assignment remains paused on transfer.
+All open obligations prevent auto-archive, including obligations with expired/ACKed reminders.
+Evidence-based obligation fulfillment and candidate acceptance remain separate checks.
+
+Run `scripts/acceptance-autonomy.mjs` for real-agent verification of prerequisite holds across
+reload, readiness-gated provider retries, handoff/reload preserving budgets, and acceptance held
+until the obligation closes. Source fingerprints bind these receipts to the tested implementation.

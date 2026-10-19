@@ -1,6 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { AutonomyState } from "../shared/autonomy";
 import type { RoleName, RoomRecord } from "../shared/contracts";
 import { defaultModelPolicy, ModelPolicy, type ModelPolicyValue } from "../shared/model-policy";
 import type { Obligation } from "../shared/obligations";
@@ -54,6 +55,7 @@ export class RoomStore {
       CREATE TABLE IF NOT EXISTS rooms(id TEXT PRIMARY KEY, cwd TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS members(id TEXT PRIMARY KEY, roomId TEXT NOT NULL, launchKey TEXT, data TEXT NOT NULL, UNIQUE(roomId, launchKey));
       CREATE TABLE IF NOT EXISTS jobs(key TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS autonomy(agentId TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS wakeups(key TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS obligations(key TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS obligation_history(key TEXT NOT NULL, revision INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(key,revision));
@@ -97,6 +99,22 @@ export class RoomStore {
     this.db
       .prepare("INSERT INTO obligation_history(key,revision,data) VALUES(?,?,?)")
       .run(o.key, o.revision, data);
+  }
+  autonomous(): AutonomyState[] {
+    return (this.db.prepare("SELECT data FROM autonomy ORDER BY agentId").all() as { data: string }[]).map(
+      (r) => JSON.parse(r.data),
+    );
+  }
+  saveAutonomy(record: AutonomyState, revision?: number) {
+    const result =
+      revision === undefined
+        ? this.db
+            .prepare("INSERT INTO autonomy(agentId,revision,data) VALUES(?,?,?) ON CONFLICT DO NOTHING")
+            .run(record.agentId, record.revision, JSON.stringify(record))
+        : this.db
+            .prepare("UPDATE autonomy SET revision=?,data=? WHERE agentId=? AND revision=?")
+            .run(record.revision, JSON.stringify(record), record.agentId, revision);
+    if (!result.changes) throw new Error("Autonomy changed; refresh before retrying");
   }
   wakeups(): WakeRecordValue[] {
     return (this.db.prepare("SELECT data FROM wakeups ORDER BY rowid").all() as { data: string }[]).map((r) =>

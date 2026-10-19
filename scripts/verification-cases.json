@@ -130,5 +130,33 @@
   "obligations.recovery": {
     "file": "tests/rooms.test.ts",
     "pattern": "session recovery restores"
+  },
+  "autonomy.continuation": {
+    "file": "tests/autonomy.test.ts",
+    "pattern": "unfinished assignments"
+  },
+  "autonomy.retry": {
+    "file": "tests/autonomy.test.ts",
+    "pattern": "failed turns retry"
+  },
+  "autonomy.uncertain": {
+    "file": "tests/autonomy.test.ts",
+    "pattern": "uncertain delivery"
+  },
+  "autonomy.archive": {
+    "file": "tests/autonomy.test.ts",
+    "pattern": "only accepted idle"
+  },
+  "autonomy.reload": {
+    "file": "tests/autonomy.test.ts",
+    "pattern": "reload continues"
+  },
+  "autonomy.race": {
+    "file": "tests/autonomy.test.ts",
+    "pattern": "pause during"
+  },
+  "autonomy.obligations": {
+    "file": "tests/autonomy.test.ts",
+    "pattern": "bound continuation|accepted work cannot archive|obligation handoff"
   }
 }

@@ -641,3 +641,37 @@ test("product acceptance needs runtime proof and retains the observed journey se
     await f.runtime.close();
   }
 });
+
+test("launched work keeps an active autonomous assignment after a completed turn", async () => {
+  const f = await fixture();
+  try {
+    const { agentId } = await f.runtime.launch(
+      {
+        roomId: f.room.id,
+        key: "long-task",
+        role: "peer",
+        harness: "codex",
+        model: "gpt-6.1-sol",
+        prompt: "Deliver three verified stages",
+      },
+      f.paseo,
+    );
+    const agent = {
+      id: agentId,
+      provider: "alliance-codex-peer",
+      cwd: f.cwd,
+      workspaceId: "workspace-1",
+      parentAgentId: null,
+      title: "Worker",
+    };
+    await f.runtime.startTurn(agent, "first");
+    await f.runtime.endTurn(agent, "first", { kind: "completed" }, []);
+    const snapshot = await f.runtime.list(f.paseo);
+    const assignment = snapshot.autonomy?.find((r) => r.agentId === agentId);
+    assert.equal(assignment?.phase, "active", "completed turn retains enabled continuation policy");
+    assert.equal(assignment?.outcome, "completed");
+    assert.equal(member(f.runtime, agentId).decision, "open");
+  } finally {
+    await f.runtime.close();
+  }
+});

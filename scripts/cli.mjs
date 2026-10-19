@@ -20,6 +20,10 @@ const positional = [];
 let checkCommand = [];
 const repeated = { "--input": [], "--artifact": [], "--unverified": [], "--feature": [] };
 const values = new Set([
+  "--phase",
+  "--max-retries",
+  "--max-continuations",
+  "--auto-archive",
   "--home",
   "--room",
   "--owner",
@@ -93,6 +97,9 @@ const help = `Alliance Work — isolated agent rooms on native Paseo
   alliance-work obligations history --key KEY
   alliance-work jobs track --room ID --owner AGENT --pid PID --key RUN_ID --title TITLE
   alliance-work jobs owner --key RUN_ID --owner AGENT --revision N
+  alliance-work autonomy start [--agent ID] [--max-retries 2] [--max-continuations 20] [--auto-archive true|false]
+  alliance-work autonomy checkpoint [--agent ID] --phase active|waiting|review|blocked|paused --reason TEXT [--turn ID]
+  alliance-work autonomy list
   alliance-work wakeups list
   alliance-work wakeups add --room ID --owner AGENT --key KEY --reason TEXT --at ISO_TIME
   alliance-work wakeups add --room ID --owner AGENT --key KEY --reason TEXT --job RUN_ID
@@ -224,7 +231,9 @@ try {
       output({ report: result.path, ...result.report.summary });
       if (!["IMPROVED", "NO_CHANGE"].includes(result.report.summary.outcome)) process.exitCode = 1;
     }
-  } else if (["status", "jobs", "wakeups", "members", "policy", "obligations"].includes(command)) {
+  } else if (
+    ["status", "jobs", "wakeups", "members", "policy", "obligations", "autonomy"].includes(command)
+  ) {
     const current = await installation(home);
     if (!current) throw new Error("No Alliance installation exists for this home");
     const config = JSON.parse(await readFile(join(current.paseoHome, "config.json"), "utf8"));
@@ -245,6 +254,25 @@ try {
         throw new Error(
           "Usage: obligations list [--owner ID|Human] | add|action --file FILE | history --key KEY",
         );
+    } else if (command === "autonomy") {
+      const agentId = flags["--agent"] ?? process.env.PASEO_AGENT_ID;
+      const action = positional[1];
+      if (action === "list") method = "autonomy.list";
+      else if (action === "start" && agentId) {
+        if (flags["--auto-archive"] && !["true", "false"].includes(flags["--auto-archive"]))
+          throw new Error("--auto-archive must be true or false");
+        method = "autonomy.start";
+        input = {
+          agentId,
+          obligationKey: flags["--obligation"],
+          maxRetries: Number(flags["--max-retries"] ?? 2),
+          maxContinuations: Number(flags["--max-continuations"] ?? 20),
+          autoArchive: flags["--auto-archive"] !== "false",
+        };
+      } else if (action === "checkpoint" && agentId && flags["--phase"] && flags["--reason"]) {
+        method = "autonomy.checkpoint";
+        input = { agentId, phase: flags["--phase"], reason: flags["--reason"], turnId: flags["--turn"] };
+      } else throw new Error("Usage: autonomy start|checkpoint|list (see --help)");
     }
     if (command === "members") {
       if (positional[1] !== "owner") throw new Error("Usage: members owner");

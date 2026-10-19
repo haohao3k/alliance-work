@@ -1,5 +1,6 @@
 import { defineRpc, defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
+import { AutonomyRecord } from "./autonomy";
 import { Difficulty, ModelPolicy } from "./model-policy";
 import { ObligationRecord } from "./obligations";
 import { WakeRecord } from "./wakeups";
@@ -84,6 +85,7 @@ export const roomList = defineRpc({
     rooms: z.array(Room),
     members: z.array(Member),
     jobs: z.array(Job),
+    autonomy: z.array(AutonomyRecord),
     wakeups: z.array(WakeRecord),
     obligations: z.array(
       ObligationRecord.safeExtend({

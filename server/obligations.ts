@@ -59,9 +59,34 @@ export class Obligations {
     if (!old || old.ownerId !== input.ownerId || old.revision !== input.revision)
       throw new Error("Obligation changed; refresh owner and revision");
     if (old.state !== "open") throw new Error("Obligation is terminal; retain its history");
+    const managed =
+      input.action === "handoff"
+        ? this.store.autonomous().find((r) => r.agentId === old.ownerId && r.obligationKey === old.key)
+        : undefined;
+    const target = input.nextOwnerId
+      ? this.store.autonomous().find((r) => r.agentId === input.nextOwnerId)
+      : undefined;
     if (input.action === "handoff") {
       if (input.nextOwnerId === undefined) throw new Error("Handoff requires nextOwnerId (null for Human)");
       await this.available(input.nextOwnerId, api);
+      if (managed) {
+        if (input.nextOwnerId === old.ownerId) throw new Error("Managed handoff needs a different owner");
+        if (managed.delivery !== "none")
+          throw new Error("Reconcile in-flight or ambiguous autonomy delivery before handoff");
+        if (target) throw new Error("Successor already has a managed assignment; choose a free successor");
+        for (const id of [old.ownerId, input.nextOwnerId]) {
+          if (!id) continue;
+          const live = await api.agents.ref(id).refresh();
+          if (
+            !live ||
+            live.agent.pendingPermissions?.length ||
+            !["idle", "error", "closed"].includes(live.agent.status)
+          )
+            throw new Error("Managed handoff requires idle owners without pending permissions");
+        }
+        if (input.nextOwnerId && this.store.member(input.nextOwnerId)?.decision === "accepted")
+          throw new Error("Successor assignment is already accepted");
+      }
     }
     if (!isAbsolute(input.evidence)) throw new Error("Evidence must be an absolute regular file");
     for (let p = input.evidence; p !== dirname(p); p = dirname(p)) {
@@ -113,6 +138,36 @@ export class Obligations {
     return this.store.atomic(() => {
       // CAS occurs after all asynchronous reads; rollback covers notifications and jobs too.
       this.store.saveObligation(next, old.revision);
+      if (managed) {
+        // CAS rolls the entire handoff back if a turn/checkpoint changed during evidence reads.
+        this.store.saveAutonomy(
+          {
+            ...managed,
+            revision: managed.revision + 1,
+            phase: "paused",
+            reason: `Obligation handed to ${next.ownerId ?? "Human"}`,
+            updatedAt: now,
+          },
+          managed.revision,
+        );
+        if (next.ownerId) {
+          const successor = this.store.member(next.ownerId);
+          if (!successor) throw new Error("Successor disappeared during handoff");
+          this.store.saveAutonomy({
+            ...managed,
+            agentId: next.ownerId,
+            revision: 1,
+            phase: managed.phase === "paused" ? "paused" : "active",
+            reason: `Continue obligation ${old.key} under recorded handoff; ${next.nextAction}`,
+            turnId: successor.lastTurnId ?? null,
+            outcome: successor.lastOutcome ?? "completed",
+            delivery: "none",
+            messageId: null,
+            dueAt: now + 15000,
+            updatedAt: now,
+          });
+        }
+      }
       const related = this.store.wakeups().filter((w) => w.obligationKey === old.key);
       const linked = related.filter((w) => activeWake(w.state));
       if (linked.some((w) => ["dispatching", "uncertain"].includes(w.state)))

@@ -47,13 +47,6 @@ export function defaultModelPolicy(): ModelPolicyValue {
       },
       {
         harness: "claude",
-        model: "claude-opus-5-5",
-        effort: "medium",
-        priority: 2,
-        difficulties: ["standard", "complex"],
-      },
-      {
-        harness: "claude",
         model: "claude-sonnet-5-5",
         effort: "xhigh",
         priority: 3,
@@ -72,23 +65,24 @@ export function defaultModelPolicy(): ModelPolicyValue {
 }
 
 // Pi model IDs include the backend. Do not accept arbitrary aliases or suffix matches.
-export function isPreferredLeadModel(harness: string, model: string): boolean {
-  if (harness === "codex") return model === "gpt-6-astra";
-  if (harness === "claude") return model === "claude-opus-5-5";
+export function isEconomicalOwnerModel(harness: string, model: string): boolean {
+  if (harness === "codex") return model === "gpt-6.1-sol";
+  if (harness === "claude") return model === "claude-sonnet-5-5";
   return (
     harness === "pi" &&
-    ["openai/gpt-6-astra", "openai-codex/gpt-6-astra", "anthropic/claude-opus-5-5"].includes(model)
+    ["openai/gpt-6.1-sol", "openai-codex/gpt-6.1-sol", "anthropic/claude-sonnet-5-5"].includes(model)
   );
 }
 
 export function policyInstruction(policy: ModelPolicyValue, revision: number): string {
   return `# Room model policy (revision ${revision})
-Lead: prefer gpt-6-astra or claude-opus-5-5 at medium/high, but choose any live-catalog model/effort that fits the task.
-Preferred Lead effort when omitted: ${policy.leadEffort}; otherwise use the selected model's supported default.
+HQ/Supervisor/Lead default to gpt-6.1-sol or claude-sonnet-5-5. Select Astra/Opus explicitly for a named hard decision, diagnosis or integration risk; record why the cheaper route is insufficient.
+Preferred owner effort when omitted: ${policy.leadEffort}; otherwise use the selected model's supported default.
+Peer is the default implementation role. Add a Lead for integration, a Supervisor for multiple workstreams, or HQ for cross-project decisions only when that responsibility is needed. Do not create a hierarchy just to forward work.
 Peer and Lens allowlist below. Lower priority numbers are preferred within each difficulty.
 Lead chooses the difficulty and final route; Supervisor/HQ may intervene with reasons and evidence.
 Difficulty is a judgment, not an automatic classifier. Native delegation enforces the union of allowed routes;
-the difficulty bands guide your choice. Never inherit a parent's expensive model without assessing the task.
+the difficulty bands guide your choice. Omitted worker model/difficulty uses the standard band, never the frontier fallback. Never inherit a parent's expensive model without assessing the task.
 Record difficulty, chosen provider/model/effort and a short justification in the durable assignment.
 Reassess when evidence, verification failures or task scope change. Peer/Lens selections stay inside their allowlist.
 ${policy.routes.map((route) => `- ${route.harness}/${route.model}, ${route.effort}; priority ${route.priority}; ${route.difficulties.join(", ")}`).join("\n")}

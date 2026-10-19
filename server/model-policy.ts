@@ -1,6 +1,6 @@
 import type { AgentModelDefinition } from "@getpaseo/protocol/agent-types";
 import type { RoleName } from "../shared/contracts";
-import { isPreferredLeadModel, type ModelPolicyValue, type TaskDifficulty } from "../shared/model-policy";
+import { isEconomicalOwnerModel, type ModelPolicyValue, type TaskDifficulty } from "../shared/model-policy";
 
 export function chooseModel(
   policy: ModelPolicyValue,
@@ -19,13 +19,12 @@ export function chooseModel(
   const id = requested?.id ?? model;
   if (model && !requested) throw new Error(`Model ${model} is unavailable in the ${harness} ${role} catalog`);
 
-  if (role === "lead") {
-    const lead =
-      requested ??
-      available.find((entry) => isPreferredLeadModel(harness, entry.id)) ??
-      available.find((entry) => entry.isDefault) ??
-      available[0];
-    if (!lead) throw new Error(`No available ${harness} Lead model in the live provider catalog`);
+  if (role === "lead" || role === "hq" || role === "supervisor") {
+    const lead = requested ?? available.find((entry) => isEconomicalOwnerModel(harness, entry.id));
+    if (!lead)
+      throw new Error(
+        `No available economical ${harness} ${role} model; select an explicit live-catalog model`,
+      );
     const options = lead.thinkingOptions ?? [];
     if (effort && !options.some((option) => option.id === effort))
       throw new Error(`Effort ${effort} is unavailable for ${lead.id}; no silent effort fallback`);
@@ -39,17 +38,17 @@ export function chooseModel(
     };
   }
   let selected: { model: string; effort: string } | undefined;
-  if (role === "hq" || role === "supervisor") {
-    const owner = requested ?? available.find((entry) => isPreferredLeadModel(harness, entry.id));
-    if (owner) selected = { model: owner.id, effort: effort ?? owner.defaultThinkingOptionId ?? "medium" };
-  } else {
+  {
+    // Explicit models retain the room allowlist union. Omitted models stay in the
+    // assessed band (standard by default), never falling through to frontier.
+    const band = difficulty ?? (model ? undefined : "standard");
     const routes = policy.routes
       .filter(
         (route) =>
           route.harness === harness &&
           (!id || route.model === id) &&
           (!effort || route.effort === effort) &&
-          (!difficulty || route.difficulties.includes(difficulty)),
+          (!band || route.difficulties.includes(band)),
       )
       .sort(
         (a, b) =>

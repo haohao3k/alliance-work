@@ -580,3 +580,13 @@ Evidence-based obligation fulfillment and candidate acceptance remain separate c
 Run `scripts/acceptance-autonomy.mjs` for real-agent verification of prerequisite holds across
 reload, readiness-gated provider retries, handoff/reload preserving budgets, and acceptance held
 until the obligation closes. Source fingerprints bind these receipts to the tested implementation.
+
+## Cost-aware roles (0.1.13)
+
+New launches use Peer for substantive implementation by instruction; extra coordination roles
+are justified by integration, multiple workstreams or cross-project decisions. This is a
+responsibility default, not a role quota or capability ban. HQ/Supervisor/Lead omitted models
+select Sol/Sonnet; premium models require explicit selection. Omitted worker model/difficulty
+uses the standard band and cannot fall through to a frontier route because a cheaper model is
+unavailable. Explicit saved room policies remain authoritative. Existing native sessions retain
+their model and prompt; use policy read at their next work boundary, with no broadcast or restart.

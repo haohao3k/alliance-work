@@ -89,16 +89,18 @@ function Editor({
     });
   return (
     <View style={{ gap: 14 }}>
-      <Text style={{ color: c.foreground, fontSize: 14, fontWeight: "600" }}>Lead · preferred defaults</Text>
+      <Text style={{ color: c.foreground, fontSize: 14, fontWeight: "600" }}>
+        HQ / Supervisor / Lead · defaults
+      </Text>
       <Text style={hint}>
-        Prefer GPT-6 Astra or Claude Opus 5.5 at medium/high. Lead can choose any model and effort in the live
-        catalog. This effort is preferred when omitted; otherwise the model's supported default is used.
+        Default to GPT-6.1 Sol or Claude Sonnet 5.5. Select Astra/Opus explicitly when the task warrants it.
+        Owners can choose any live-catalog model. This effort is preferred when omitted.
       </Text>
       <View style={row}>
         {Effort.options.map((effort) => (
           <Action
             key={effort}
-            label={`Lead ${effort}`}
+            label={`Owner ${effort}`}
             colors={c}
             selected={policy.leadEffort === effort}
             disabled={save.isPending}

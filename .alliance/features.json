@@ -42,6 +42,10 @@
         {
           "id": "models.policy-persistence",
           "expect": "Policies persist and reject stale edits"
+        },
+        {
+          "id": "models.economical-defaults",
+          "expect": "Omitted models use economical owner or standard worker routes; premium selection is deliberate and saved policies remain authoritative"
         }
       ]
     },
@@ -640,6 +644,16 @@
         {
           "id": "autonomy.obligations",
           "behavior": "autonomy.obligations"
+        }
+      ]
+    },
+    {
+      "id": "models.economical-defaults",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "models.economical-defaults"],
+      "assertions": [
+        {
+          "id": "models.economical-defaults",
+          "behavior": "models.economical-defaults"
         }
       ]
     }

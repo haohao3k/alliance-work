@@ -213,3 +213,12 @@ Với việc phụ thuộc điều kiện, dùng `autonomy start --agent ID --ob
 bằng chứng thì không tự tiếp tục/retry và không tiêu budget. Handoff chuyển cả lifecycle/budget;
 owner cũ pause, successor phải idle và chưa có assignment tự chạy khác. Còn nghĩa vụ mở thì
 không auto-archive, kể cả reminder đã ACK/hết hạn. Bàn giao cho Human không tự gửi prompt.
+
+### Chọn role/model từ 0.1.13
+
+Giao implementation cho Peer với Sol/Sonnet; chỉ thêm Lead khi cần framing/integration/acceptance,
+Supervisor khi có nhiều workstream và HQ khi có quyết định hoặc dependency xuyên project.
+Không cần tạo đủ các tầng. Owner có thể sửa nhỏ hoặc xử lý quyết định khó trực tiếp; việc build
+kéo dài giao lại Peer. Model mặc định của owner là Sol/Sonnet; Astra/Opus phải chọn rõ với lý do.
+Worker không chỉ định model/difficulty dùng band standard, không tự rơi xuống model frontier.
+Room policy đã lưu và model của session đang tồn tại được giữ nguyên.

@@ -18,13 +18,19 @@ are judgments, not a mandatory escalation ladder. Start with the least costly se
 to meet the acceptance conditions; go directly to a stronger choice when the evidence warrants
 it. Reassess after failed checks or a change in scope. Avoid repeating unsuccessful cheap runs.
 
-Room priorities are preferences, not a vote or a forced first choice. Sol high and Opus 5.5
-medium are useful defaults for substantial implementation. Sonnet 5.5 xhigh is an available
-choice for complex work when its quality gain justifies the extra tokens and latency. Reserve
-Astra worker runs for tasks that warrant them. Prefer GPT-6 Astra or Claude Opus 5.5 at medium/high
-for the Lead itself, but treat this as a starting preference. Lead may choose any model and
-supported effort in its live catalog when that fits the task; the worker allowlist does not
-constrain Lead's own model. Supervisor/HQ may advise or intervene with evidence.
+Room priorities express the Human's preferences. The default worker policy uses Sol medium for
+routine work, Sol high or Sonnet medium for standard implementation, and Sol high or Sonnet xhigh
+for complex work. Opus/Astra are frontier routes, available through an explicit model selection or
+frontier assessment. If no model or difficulty is supplied, selection uses the standard band; an
+unavailable economical route is reported rather than silently falling through to a premium model.
+A saved custom room allowlist remains authoritative and is never rewritten by an update.
+
+HQ, Supervisor and Lead default to Sol/Sonnet, with the room's owner effort preference. They may
+explicitly select any available model/effort. Use Astra/Opus for a named hard decision, uncertain
+diagnosis or integration risk; explain why the economical setting is insufficient. Role seniority
+alone is not a reason for a premium model. Do not inherit an expensive parent model into a worker.
+Peer owns sustained implementation; expensive owners should make the decision and hand back the
+bounded work. Small direct fixes and work where handoff costs more remain legitimate exceptions.
 
 Consult the target role's live provider catalog and pass model and effort explicitly. Never
 assume that an API feature is supported by an installed harness. If a requested setting is

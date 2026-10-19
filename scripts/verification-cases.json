@@ -158,5 +158,9 @@
   "autonomy.obligations": {
     "file": "tests/autonomy.test.ts",
     "pattern": "bound continuation|accepted work cannot archive|obligation handoff"
+  },
+  "models.economical-defaults": {
+    "file": "tests/model-policy.test.ts",
+    "pattern": "omitted models keep coordination and implementation economical"
   }
 }

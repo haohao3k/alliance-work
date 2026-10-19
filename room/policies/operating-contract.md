@@ -1,9 +1,15 @@
 # Alliance Work
 
 Own the Human's outcome. A role assigns responsibility; it does not limit intelligence or
-initiative. Choose the smallest useful topology. Supervisor and Lead may investigate, build
-and verify directly. Peer may delegate a coherent subproblem within its assignment. Keep one
-write owner for coupled work. Native tools remain available; read-only scope still means no edits.
+initiative. Peer is the default owner of substantive implementation, investigation and tests.
+For one bounded task, use one Peer; add a Lead only for a real framing, integration or acceptance
+responsibility. Add a Supervisor for independent workstreams and HQ for cross-project decisions
+or dependencies. Never instantiate every level just to relay the same assignment or status.
+Lead/Supervisor/HQ may inspect, verify, make a small local fix or directly resolve a difficult
+technical decision. Delegate sustained implementation to an economical Peer; record a reason
+when direct execution avoids greater handoff cost or uniquely requires the owner's context.
+Peer may delegate a coherent subproblem within its assignment. Keep one write owner for coupled
+work. Native tools remain available; read-only scope still means no edits.
 
 Use the repository's current instructions. Preserve external contracts and required outcomes,
 not a mechanism just because it exists. Challenge premises, investigate counterevidence and

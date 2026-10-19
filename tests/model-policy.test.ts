@@ -63,7 +63,7 @@ test("Lead preferences permit deliberate overrides and fall back to available pr
     thinkingOptionId: "xhigh",
   });
   assert.deepEqual(chooseModel(policy, "lead", "codex", catalog), {
-    model: "gpt-6-astra",
+    model: "gpt-6.1-sol",
     thinkingOptionId: "medium",
   });
   assert.deepEqual(chooseModel(policy, "lead", "claude", catalog, "opus", "high"), {
@@ -83,7 +83,13 @@ test("Lead preferences permit deliberate overrides and fall back to available pr
     thinkingOptionId: "low",
   });
   assert.deepEqual(
-    chooseModel(policy, "lead", "pi", [{ ...catalog[0], id: "other/model", thinkingOptions: [] }]),
+    chooseModel(
+      policy,
+      "lead",
+      "pi",
+      [{ ...catalog[0], id: "other/model", thinkingOptions: [] }],
+      "other/model",
+    ),
     {
       model: "other/model",
       thinkingOptionId: undefined,
@@ -126,4 +132,67 @@ test("room policy persists independently, validates coverage and rejects stale e
   } finally {
     store.close();
   }
+});
+
+test("omitted models keep coordination and implementation economical without silent premium fallback", () => {
+  const policy = defaultModelPolicy();
+  for (const role of ["hq", "supervisor", "lead"] as const) {
+    assert.equal(chooseModel(policy, role, "codex", catalog).model, "gpt-6.1-sol");
+    assert.equal(chooseModel(policy, role, "claude", catalog).model, "claude-sonnet-5-5");
+    assert.equal(chooseModel(policy, role, "codex", catalog, "gpt-6-astra", "high").model, "gpt-6-astra");
+    assert.throws(
+      () =>
+        chooseModel(
+          policy,
+          role,
+          "codex",
+          catalog.filter((m) => m.id === "gpt-6-astra"),
+        ),
+      /explicit|available/i,
+    );
+  }
+  for (const role of ["peer", "lens"] as const) {
+    assert.equal(chooseModel(policy, role, "claude", catalog).model, "claude-sonnet-5-5");
+    assert.throws(
+      () =>
+        chooseModel(
+          policy,
+          role,
+          "claude",
+          catalog.filter((m) => m.id === "claude-opus-5-5"),
+        ),
+      /No allowed/,
+    );
+    assert.throws(
+      () =>
+        chooseModel(
+          policy,
+          role,
+          "codex",
+          catalog.filter((m) => m.id === "gpt-6-astra"),
+        ),
+      /No allowed/,
+    );
+    assert.equal(
+      chooseModel(policy, role, "claude", catalog, "claude-opus-5-5", "high").model,
+      "claude-opus-5-5",
+    );
+    assert.equal(
+      chooseModel(policy, role, "claude", catalog, undefined, undefined, "frontier").model,
+      "claude-opus-5-5",
+    );
+  }
+  // An explicit saved room policy remains authoritative, including deliberate premium defaults.
+  const custom = {
+    ...policy,
+    routes: policy.routes.map((r) =>
+      r.model === "claude-opus-5-5"
+        ? { ...r, priority: 1, difficulties: ["standard", "frontier"] as const }
+        : r,
+    ),
+  };
+  assert.equal(
+    chooseModel(custom as ReturnType<typeof defaultModelPolicy>, "peer", "claude", catalog).model,
+    "claude-opus-5-5",
+  );
 });

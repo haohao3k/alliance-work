@@ -194,6 +194,10 @@ export async function activate({
       }),
     ),
   );
+  const agy = await findExecutable("agy").catch(() => undefined);
+  if (agy) executables.agy = agy;
+  else if (oldManifest?.profiles["agy-peer"])
+    throw new Error("Installed agy profiles require agy on PATH; update refused.");
   run("npm", ["run", "typecheck"], { cwd: root, stdio: "inherit" });
   const saved = await snapshot(home, paseoHome, binPath);
   try {

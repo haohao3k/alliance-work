@@ -1,0 +1,43 @@
+{
+  "package": "@getpaseo/server",
+  "version": "0.12.0",
+  "source": "dist/server/builtin-plugins/antigravity-provider/server",
+  "files": [
+    {
+      "path": "server/agy-native/LICENSE",
+      "sha256": "79d5aedce6aa0adc547336dc1bd34c5cc9308ba110fac7079ed97515ee573ad3"
+    },
+    {
+      "path": "server/agy-native/internal/catalog.ts",
+      "sha256": "96cd72b6f1fa293eb36c19903b7b7a0685048d9d04e5ba7e0b7adb7d06d9d31c"
+    },
+    {
+      "path": "server/agy-native/internal/process.ts",
+      "sha256": "f1040d0e8cdebd917d04d226d98d2afaaf9f5b519202f4cefcf865c8059dd69e"
+    },
+    {
+      "path": "server/agy-native/internal/prompt.ts",
+      "sha256": "e72dbc2896bd873b536f885a17db5c2f7fb41b9528e36c4ac0769649ecacec12"
+    },
+    {
+      "path": "server/agy-native/internal/session.ts",
+      "sha256": "c6b8b50a380ef47ef5f14a9d343a4dde8b4540a8a10005217ddee257f27e1fc4"
+    },
+    {
+      "path": "server/agy-native/internal/signals.ts",
+      "sha256": "d30f7656d1ffe462cad1014bdace5df7544e52588235b6e53d4bd68857b08ad8"
+    },
+    {
+      "path": "server/agy-native/internal/timeline.ts",
+      "sha256": "b574824cfc1afff9405a965970c080660557cad446dd5e8db28102ed1bafd5a2"
+    },
+    {
+      "path": "server/agy-native/internal/wire.ts",
+      "sha256": "2bd42b61992fc2af8730939dee0b651dda6cc172d333821f923a28c54fb67ce0"
+    },
+    {
+      "path": "server/agy-native/provider.ts",
+      "sha256": "84b0a5c8f75d8ba4aa549da2d79aaac6f17266c73a5edcd4054ee429f65ec50c"
+    }
+  ]
+}

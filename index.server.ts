@@ -1,4 +1,5 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
+import { createAllianceAgyProvider } from "./server/agy-provider";
 import { directorySuggestions } from "./server/directories";
 import { composeInstruction } from "./server/instructions";
 import { AllianceRuntime, allianceProvider } from "./server/runtime";
@@ -25,6 +26,8 @@ import { obligationAction, obligationAdd, obligationHistory, obligationList } fr
 import { wakeAction, wakeAdd, wakeList, wakeTake } from "./shared/wakeups";
 
 export default function contribute(server: PluginServerContext) {
+  for (const role of ["hq", "supervisor", "lead", "peer", "lens"])
+    server.registerProvider(createAllianceAgyProvider(role));
   const configuration = server.registerSettings(settings);
   let runtime: Promise<AllianceRuntime> | undefined;
   const get = () =>

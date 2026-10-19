@@ -3,7 +3,7 @@ import { z } from "zod";
 export const Difficulty = z.enum(["routine", "standard", "complex", "frontier"]);
 export const Effort = z.enum(["low", "medium", "high", "xhigh", "max"]);
 export const ModelRoute = z.object({
-  harness: z.enum(["codex", "claude", "pi"]),
+  harness: z.enum(["codex", "claude", "pi", "agy"]),
   model: z.string().trim().min(1).max(200),
   effort: Effort,
   priority: z.number().int().min(1).max(99),
@@ -30,6 +30,27 @@ export function defaultModelPolicy(): ModelPolicyValue {
   return {
     leadEffort: "medium",
     routes: [
+      {
+        harness: "agy",
+        model: "claude-sonnet-5-5-medium",
+        effort: "medium",
+        priority: 3,
+        difficulties: ["routine", "standard"],
+      },
+      {
+        harness: "agy",
+        model: "claude-sonnet-5-5-high",
+        effort: "high",
+        priority: 3,
+        difficulties: ["complex"],
+      },
+      {
+        harness: "agy",
+        model: "claude-opus-5-5-high",
+        effort: "high",
+        priority: 3,
+        difficulties: ["frontier"],
+      },
       { harness: "codex", model: "gpt-6.1-sol", effort: "medium", priority: 1, difficulties: ["routine"] },
       {
         harness: "codex",
@@ -68,6 +89,7 @@ export function defaultModelPolicy(): ModelPolicyValue {
 export function isEconomicalOwnerModel(harness: string, model: string): boolean {
   if (harness === "codex") return model === "gpt-6.1-sol";
   if (harness === "claude") return model === "claude-sonnet-5-5";
+  if (harness === "agy") return model === "claude-sonnet-5-5-medium";
   return (
     harness === "pi" &&
     ["openai/gpt-6.1-sol", "openai-codex/gpt-6.1-sol", "anthropic/claude-sonnet-5-5"].includes(model)

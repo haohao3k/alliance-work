@@ -68,7 +68,7 @@ function Editor({
 }) {
   const [policy, setPolicy] = useState(initial);
   const [difficulty, setDifficulty] = useState<TaskDifficulty>("standard");
-  const [harness, setHarness] = useState<"codex" | "claude" | "pi">("codex");
+  const [harness, setHarness] = useState<"codex" | "claude" | "pi" | "agy">("codex");
   const [role, setRole] = useState<"peer" | "lens">("peer");
   const [model, setModel] = useState("");
   const catalogRpc = useRpc(roomModelCatalog);
@@ -198,7 +198,7 @@ function Editor({
       )}
       <Text style={{ color: c.foreground, fontSize: 14, fontWeight: "600" }}>Add from live catalog</Text>
       <View style={row}>
-        {(["codex", "claude", "pi"] as const).map((value) => (
+        {(["codex", "claude", "pi", "agy"] as const).map((value) => (
           <Action
             key={value}
             label={value}

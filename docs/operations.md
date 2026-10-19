@@ -14,7 +14,7 @@ The bootstrap verifies `checksums.txt`, installs `package-lock.json` dependencie
 candidate before activation. Native Codex and Claude must be on PATH. Pi is installed with the
 release. Harness versions affect configuration/discovery; run `npm run test:native` after upgrading one.
 
-This release pins and validates Paseo `0.11.2`; activation does not upgrade or restart
+This release pins the Paseo `0.12.0` SDK/CLI and validates running daemons `0.11.2` and `0.12.0`; activation does not upgrade or restart
 the daemon. Other version mismatches remain blocked. To exercise a different installed
 daemon binary in a disposable test instance, set `ALLIANCE_TEST_DAEMON_CLI` to its absolute
 `bin/paseo` path when running `npm run test:maintenance`.
@@ -590,3 +590,50 @@ select Sol/Sonnet; premium models require explicit selection. Omitted worker mod
 uses the standard band and cannot fall through to a frontier route because a cheaper model is
 unavailable. Explicit saved room policies remain authoritative. Existing native sessions retain
 their model and prompt; use policy read at their next work boundary, with no broadcast or restart.
+
+## AGY role profiles
+
+When `agy` is on the installation PATH, preparation adds `agy-hq`, `agy-supervisor`,
+`agy-lead`, `agy-peer` and `agy-lens`. Each has its own `~/.agy-alliance-work/<role>`
+home and private HOME/XDG directories. Existing installations retain their other
+role homes and saved room policies. A refresh refuses to remove an existing AGY
+role set if its executable becomes unavailable.
+
+Sign in through `alliance-work login agy peer` using a dedicated Alliance account.
+To share that login across this installation's five roles, run:
+
+```sh
+alliance-work auth agy --from ~/.agy-alliance-work/peer/os-home/.gemini/antigravity-cli/antigravity-oauth-token
+```
+
+Only the native credential file is linked. Native AGY manages refresh; HOME,
+configuration, skills and history remain separate. Existing different role credentials
+are never overwritten. No daily configuration, plugins, instructions or skills are imported.
+Repeat login independently on each host. To keep accounts separate per role instead,
+omit the shared-source command and log in to each role.
+
+The Alliance provider reuses the Antigravity driver from the exact pinned Paseo
+0.12.0 dependency, registers each role directly, and creates a private native
+agent definition for every session. The definition selects only the role and
+explicit project skills. The generated MCP configuration contains the native
+Paseo endpoint bound to that agent, and is removed when the session closes.
+This is a provider adapter, not another coordination server.
+
+AGY's live model IDs encode effort (for example `claude-sonnet-5-5-medium`). The
+catalog exposes only that matching effort; it never translates an unsupported
+selection. New rooms include AGY Sonnet medium/high and Opus high routes.
+Existing saved policies remain unchanged: add the desired AGY routes in the
+room's Model settings before launching a Peer or Lens there.
+
+Before activation, qualify authenticated MCP calls, two simultaneous native agents,
+and a real owner → peer → owner handback on each target host with
+`scripts/acceptance-agy.mjs NEW_OUTPUT ALLIANCE_TOKEN_PATH`. Steering and exact MCP preapproval are unsupported; explicit
+preapproval requests fail rather than being silently ignored. Native AGY owns
+compaction; the 300k policy verified for the other harnesses is not claimed for
+AGY. Only Full access is exposed, matching the pinned native provider.
+
+The 0.1.14 qualification on macOS and Linux (Ryzen) passed native agent discovery,
+concurrent Lead/Peer sessions and a model-driven owner → peer → owner handback on
+Paseo 0.11.2. The peer wrote its proof file, notified its owner through native Paseo
+MCP, and the owner read the file before writing the reviewed result. The Mac also
+passed this flow on 0.12.0. Disposable daemons were stopped after qualification.

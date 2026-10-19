@@ -47,6 +47,8 @@ export async function prepareProfiles({ home, executables, isolatedRoot = undefi
     if (e.code === "ENOENT") return null;
     throw e;
   });
+  if (prior?.profiles["agy-peer"] && !executables.agy)
+    throw new Error("An existing AGY role set requires its executable; profiles were not removed.");
   isolatedRoot ??= prior?.isolatedRoot;
   const pi = await bundledPi(root);
   const writes = new Map();
@@ -69,7 +71,7 @@ export async function prepareProfiles({ home, executables, isolatedRoot = undefi
   await collect(join(root, "room/skills"));
   /** @type {Record<string, Profile>} */
   const profiles = {};
-  for (const harness of harnesses) {
+  for (const harness of [...harnesses, ...(executables.agy ? ["agy"] : [])]) {
     if (!isAbsolute(executables[harness] ?? ""))
       throw new Error(`An absolute ${harness} executable is required`);
     for (const role of roles) {
@@ -223,7 +225,7 @@ export async function prepareProfiles({ home, executables, isolatedRoot = undefi
     Object.entries(profiles).map(([id, profile]) => [
       `alliance-${id}`,
       {
-        extends: profile.harness,
+        ...(profile.harness === "agy" ? {} : { extends: profile.harness }),
         label: `Alliance · ${profile.harness} · ${profile.role}`,
         command: [process.execPath, join(root, "scripts/launch.mjs"), home, id],
         enabled: true,

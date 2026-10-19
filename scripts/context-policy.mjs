@@ -17,6 +17,8 @@ export function contextPolicy(harness, args, environment) {
     env.DISABLE_COMPACT = "0";
   } else if (harness === "pi") {
     if (!args.includes(piContextExtension)) args.push("-e", piContextExtension);
+  } else if (harness === "agy") {
+    // AGY owns its compaction; no verified 300k override is advertised.
   } else {
     throw new Error(`No verified context policy for harness: ${harness}`);
   }

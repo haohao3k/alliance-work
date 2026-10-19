@@ -8,6 +8,7 @@ import { Evidence, runVerification } from "../server/evidence.mjs";
 import { inspectFailureEval, runFailureEval } from "../server/failure-evals.mjs";
 import { runFeatureVerification } from "../server/feature-verification.mjs";
 import { projectSkills, registerSkill } from "../server/project-skills.mjs";
+import { setAgyAuthSource } from "./agy-auth.mjs";
 import { authStatus, setAuthSource } from "./auth.mjs";
 import { downloadRelease, isNewerRelease, releaseInfo, run } from "./distribution.mjs";
 import { activate, doctor, installation, withMaintenance } from "./maintenance.mjs";
@@ -86,6 +87,8 @@ const help = `Alliance Work — isolated agent rooms on native Paseo
   alliance-work login codex lead      Log in to a separate role (any of the five roles)
   alliance-work login claude peer
   alliance-work login pi peer         Open Pi; use /login
+  alliance-work login agy peer        Sign in using the isolated Alliance HOME
+  alliance-work auth agy --from /absolute/native-token-path
   alliance-work doctor                Verify homes, capabilities, pinned source and live plugin
   alliance-work status                Read agents, owners, decisions and tracked processes
   alliance-work members owner --agent ID --owner ID|Human --revision N --evidence HANDOFF_FILE
@@ -415,6 +418,9 @@ try {
       const status = await authStatus(home);
       output(status);
       if (status.ready === false) process.exitCode = 1;
+    } else if (positional[1] === "agy" && flags["--from"]) {
+      await withMaintenance(home, () => setAgyAuthSource(home, resolve(flags["--from"])));
+      output("Dedicated Alliance AGY login selected. Native AGY owns refresh; role homes remain separate.");
     } else if (positional[1] === "codex" && !!flags["--from"] !== !!flags["--separate"]) {
       await withMaintenance(home, async () => {
         await setAuthSource(home, flags["--from"] ?? null);
@@ -425,15 +431,15 @@ try {
       );
     } else
       throw new Error(
-        "Usage: alliance-work auth status | auth codex --from ~/.codex | auth codex --separate",
+        "Usage: alliance-work auth status | auth codex --from ~/.codex | auth codex --separate | auth agy --from /absolute/native-token-path",
       );
   } else if (command === "login") {
     const [, harness, role] = positional;
     if (
-      !["codex", "claude", "pi"].includes(harness) ||
+      !["codex", "claude", "pi", "agy"].includes(harness) ||
       !["hq", "supervisor", "lead", "peer", "lens"].includes(role)
     )
-      throw new Error("Usage: alliance-work login <codex|claude|pi> <hq|supervisor|lead|peer|lens>");
+      throw new Error("Usage: alliance-work login <codex|claude|pi|agy> <hq|supervisor|lead|peer|lens>");
     run(
       process.execPath,
       [

@@ -43,7 +43,7 @@ interface Manifest {
 }
 const execute = promisify(execFile);
 export function allianceProvider(provider: string): { harness: string; role: RoleName; id: string } | null {
-  const match = /^alliance-(codex|claude|pi)-(hq|supervisor|lead|peer|lens)$/.exec(provider);
+  const match = /^alliance-(codex|claude|pi|agy)-(hq|supervisor|lead|peer|lens)$/.exec(provider);
   return match ? { harness: match[1], role: match[2] as RoleName, id: `${match[1]}-${match[2]}` } : null;
 }
 async function noLinks(path: string) {

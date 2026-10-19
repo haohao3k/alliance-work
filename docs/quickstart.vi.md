@@ -222,3 +222,13 @@ Không cần tạo đủ các tầng. Owner có thể sửa nhỏ hoặc xử l�
 kéo dài giao lại Peer. Model mặc định của owner là Sol/Sonnet; Astra/Opus phải chọn rõ với lý do.
 Worker không chỉ định model/difficulty dùng band standard, không tự rơi xuống model frontier.
 Room policy đã lưu và model của session đang tồn tại được giữ nguyên.
+
+### AGY
+
+Khi `agy` có trong PATH lúc setup, Alliance tạo năm role riêng:
+HQ, Supervisor, Lead, Peer và Lens. Đăng nhập tài khoản dành riêng cho Alliance bằng
+`alliance-work login agy peer`, rồi chọn file đăng nhập này làm nguồn dùng chung
+cho bộ role theo [hướng dẫn vận hành](operations.md#agy-role-profiles).
+HOME, config, skills và lịch sử của từng role vẫn tách biệt.
+Room đã lưu model policy cần thêm route AGY trong Model settings trước khi tạo
+Peer/Lens. Model AGY mã hóa effort trong tên, ví dụ `claude-sonnet-5-5-medium`.

@@ -6,7 +6,7 @@ import { ObligationRecord } from "./obligations";
 import { WakeRecord } from "./wakeups";
 
 export const Role = z.enum(["hq", "supervisor", "lead", "peer", "lens"]);
-export const Harness = z.enum(["codex", "claude", "pi"]);
+export const Harness = z.enum(["codex", "claude", "pi", "agy"]);
 export const settings = defineSettings({
   id: "alliance",
   scope: "host",

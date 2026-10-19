@@ -1,7 +1,7 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.15/schema.json",
   "files": {
-    "includes": ["**", "!vendor", "!node_modules", "!.runtime"]
+    "includes": ["**", "!vendor", "!node_modules", "!.runtime", "!server/agy-native"]
   },
   "formatter": {
     "enabled": true,

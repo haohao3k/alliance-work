@@ -201,3 +201,8 @@ failed turns with bounded backoff, wake their owner for review and archive after
 acceptance. Existing chats opt in with `alliance-work autonomy start --agent ID`; inspect with
 `alliance-work autonomy list`, pause with `autonomy checkpoint --agent ID --phase paused --reason TEXT`.
 See [autonomous assignment operation and real-model acceptance](docs/operations.md#autonomous-assignments-0111).
+
+With `agy` installed, setup adds isolated AGY HQ, Supervisor, Lead, Peer and Lens
+profiles. Use a dedicated Alliance login shared only within that role set. See
+[AGY setup and supported behavior](docs/operations.md#agy-role-profiles)
+for authentication and native coordination qualification.

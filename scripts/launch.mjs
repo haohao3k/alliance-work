@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 import { lstat, readFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { claudeSkillPlugin, projectSkills } from "../server/project-skills.mjs";
+import { linkAgyAuth } from "./agy-auth.mjs";
 import { authSource, authStatus, bridgeCodexAuth } from "./auth.mjs";
 import { discoverCodex } from "./codex-discovery.mjs";
 import { contextPolicy } from "./context-policy.mjs";
@@ -14,7 +15,7 @@ export function profileEnvironment(profile, home, ambient = process.env, credent
   for (const [key, value] of Object.entries(ambient)) {
     if (
       value !== undefined &&
-      /^(PATH|LANG|LC_.*|TZ|TERM|COLORTERM|TMPDIR|TMP|TEMP|USER|LOGNAME|PASEO_.*|ALLIANCE_BOUND_ROOM|ALLIANCE_ASSIGNMENT|ALLIANCE_ARTIFACTS|ALLIANCE_CONTEXT|SSL_CERT_FILE|SSL_CERT_DIR|HTTPS?_PROXY|NO_PROXY)$/i.test(
+      /^(PATH|LANG|LC_.*|TZ|TERM|COLORTERM|TMPDIR|TMP|TEMP|USER|LOGNAME|PASEO_.*|ALLIANCE_AGY_SESSION_DIR|ALLIANCE_BOUND_ROOM|ALLIANCE_WORKSPACE_CWD|ALLIANCE_ASSIGNMENT|ALLIANCE_ARTIFACTS|ALLIANCE_CONTEXT|SSL_CERT_FILE|SSL_CERT_DIR|HTTPS?_PROXY|NO_PROXY)$/i.test(
         key,
       )
     )
@@ -100,6 +101,7 @@ export async function launchPlan(
     }
   }
   const env = profileEnvironment(profile, home, ambient, credentials);
+  if (profile.harness === "agy") await linkAgyAuth(home, profile);
   const source = profile.harness === "codex" ? await authSource(home) : undefined;
   // Account/setup/help commands still use the isolated home, but need no session flags.
   const metadataCommand = args.some((arg) => ["--version", "--help", "-h"].includes(arg));
@@ -145,6 +147,15 @@ export async function launchPlan(
     for (const skill of profile.skillEntries) args.push("--skill", skill);
     for (const skill of bundle.skills) args.push("--skill", join(skill.directory, "SKILL.md"));
     args = replaceFlag(args, "--session-dir", join(profile.home, "sessions"));
+  } else if (profile.harness === "agy") {
+    if (["models", "agent", "agents"].includes(args[0]) || args.length === 0)
+      return { executable: profile.executable, args, env, cwd };
+    const sessionDir = ambient.ALLIANCE_AGY_SESSION_DIR;
+    if (!sessionDir) throw new Error("AGY requires its Alliance provider session configuration");
+    await assertNoLinks(sessionDir);
+    if (!resolve(sessionDir).startsWith(`${resolve(profile.home)}/sessions/`))
+      throw new Error("AGY session directory is outside the role home");
+    args.push("--add-dir", sessionDir, "--agent", `alliance-${basename(sessionDir)}`);
   } else {
     const configArgs = [];
     if (source) configArgs.push("-c", 'cli_auth_credentials_store="ephemeral"');

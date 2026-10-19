@@ -27,12 +27,16 @@ async function executable(name) {
   throw new Error(`${name} not found. Pass --${name} /absolute/path/to/${name}`);
 }
 try {
+  const agy = await executable("agy").catch(() => undefined);
   const manifest = await prepareProfiles({
     home: option("--home") ?? join(homedir(), ".alliance-work"),
     isolatedRoot: option("--isolated-root"),
-    executables: Object.fromEntries(
-      await Promise.all(["codex", "claude", "pi"].map(async (name) => [name, await executable(name)])),
-    ),
+    executables: {
+      ...(agy ? { agy } : {}),
+      ...Object.fromEntries(
+        await Promise.all(["codex", "claude", "pi"].map(async (name) => [name, await executable(name)])),
+      ),
+    },
   });
   console.log(
     `Prepared ${Object.keys(manifest.profiles).length} independent role homes.\nManifest: ${join(manifest.home, "profiles.json")}\nProvider configuration: ${join(manifest.home, "providers.json")}`,

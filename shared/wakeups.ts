@@ -12,6 +12,7 @@ export const WakeInput = z
     roomId: z.string().min(1),
     ownerId: z.string().min(1),
     reason: z.string().trim().min(1).max(2000),
+    obligationKey: z.string().min(1).max(160).optional(),
     trigger: WakeTrigger,
     delivery: z.enum(["pull", "idle"]).default("pull"),
     everyMs: z
@@ -24,6 +25,11 @@ export const WakeInput = z
     expiresAt: z.number().int().nonnegative().optional(),
   })
   .superRefine((v, ctx) => {
+    if (v.obligationKey && v.delivery !== "pull")
+      ctx.addIssue({
+        code: "custom",
+        message: "Obligation wakeups require pull: this native API has no atomic idle-only send",
+      });
     if (v.everyMs && (v.trigger.kind !== "time" || v.maxRuns < 2))
       ctx.addIssue({ code: "custom", message: "Repeats need a time trigger and maxRuns >= 2" });
     if (!v.everyMs && v.maxRuns !== 1) ctx.addIssue({ code: "custom", message: "maxRuns requires everyMs" });
@@ -33,6 +39,7 @@ export const WakeRecord = z.object({
   roomId: z.string(),
   ownerId: z.string(),
   reason: z.string(),
+  obligationKey: z.string().optional(),
   trigger: WakeTrigger,
   delivery: z.enum(["pull", "idle"]),
   everyMs: z.number().optional(),

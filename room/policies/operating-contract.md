@@ -75,7 +75,7 @@ a new turn reopens current acceptance. Do not claim product completion from an a
 
 When work must be revisited after a time, tracked process exit or a specific child turn,
 register an explicit Alliance wakeup with a stable key, room, owner and reason. Use
-`alliance-work wakeups add --help` for syntax. This records an obligation; it does not grant
+`alliance-work wakeups add --help` for syntax. This records a reminder; it does not grant
 new authority, accept a result, or restart a process. Choose pull delivery by default.
 At the start/end of an assignment and before going idle, run
 `alliance-work wakeups take --owner "$PASEO_AGENT_ID"`, inspect the referenced durable results,
@@ -93,8 +93,8 @@ its wakeup. Closed/archived owners must be reconciled explicitly; they are never
 ## Apply current policy at a work boundary
 
 At the next natural assignment start/resume, read `alliance-work policy read --agent
-"$PASEO_AGENT_ID"`, apply the returned operating instructions and acknowledge that exact digest
-with `alliance-work policy ack --agent "$PASEO_AGENT_ID" --digest SHA256`. This records a read
+"$PASEO_AGENT_ID"`, apply the returned operating instructions and reconcile the returned open
+obligations. An optional `alliance-work policy ack --agent "$PASEO_AGENT_ID" --digest SHA256` records a read
 acknowledgement, not proof of compliance or a replacement of the native session's system prompt.
 An update never injects prompts into busy sessions. Owners pass the current policy to existing
 Peers with their next substantive assignment, not a separate broadcast or acknowledgement loop.

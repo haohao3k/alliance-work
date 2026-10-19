@@ -548,6 +548,48 @@ test("policy acknowledgement is revision-bound and never starts or changes a nat
   }
 });
 
+test("session recovery restores open obligations under the current common policy without prompting owners", async () => {
+  const f = await fixture();
+  try {
+    const { agentId } = await f.runtime.launch(
+      { roomId: f.room.id, key: "recover", role: "peer", harness: "codex", prompt: "Work" },
+      f.paseo,
+    );
+    const evidence = join(f.root, "handoff.md");
+    await writeFile(evidence, "Human now owns the next decision.");
+    await f.runtime.obligations.add(
+      {
+        key: "future-work",
+        roomId: f.room.id,
+        ownerId: agentId,
+        assignment: member(f.runtime, agentId).assignment,
+        authority: "Human brief",
+        nextAction: "Review accepted scope",
+        closeWhen: "Review recorded",
+        conditions: [{ id: "permission", requires: "Human decides scope" }],
+      },
+      f.paseo,
+    );
+    const first = await f.runtime.recoveryContext(agentId);
+    assert((await readFile(first, "utf8")).includes("future-work"));
+    const policy = await f.runtime.readPolicy(agentId);
+    assert.equal(policy.obligations.length, 1);
+    assert.equal(policy.obligations[0].blockedOn.length, 1);
+    f.archived(true);
+    assert.equal((await f.runtime.list(f.paseo)).obligations[0].ownerStatus, "needs-owner");
+    await f.runtime.obligations.action(
+      { key: "future-work", ownerId: agentId, revision: 1, action: "handoff", nextOwnerId: null, evidence },
+      f.paseo,
+    );
+    await f.runtime.recoveryContext(agentId);
+    assert(!(await readFile(first, "utf8")).includes('"key": "future-work"'));
+    assert.equal((await f.runtime.list(f.paseo)).obligations[0].ownerStatus, "human");
+    assert.equal(f.count().sends, 0);
+  } finally {
+    await f.runtime.close();
+  }
+});
+
 test("product acceptance needs runtime proof and retains the observed journey separately from technical PASS", async () => {
   const f = await fixture();
   try {

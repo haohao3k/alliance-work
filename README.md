@@ -181,6 +181,11 @@ the last accepted analysis/test/runtime scope. Native messaging remains interrup
 contract uses durable progress and owner reconciliation to reduce unnecessary prompts.
 
 
+All roles share [engineering laws](room/policies/engineering-laws.md). Material future work can
+keep an owner, authority reference, waiting conditions and evidence across sessions and handoffs
+in the [durable obligation ledger](docs/operations.md#durable-obligations-0111). Recovery reads
+current policy and open obligations together; no compulsory review or acknowledgement loop.
+
 Durable wakeups can track a deadline, a registered process exit or an exact child turn.
 They preserve owner/revision and restart state without accepting results. Pull delivery is the
 safe default; idle auto-delivery is opt-in. See [commands and delivery limits](docs/operations.md#durable-wakeups-019).

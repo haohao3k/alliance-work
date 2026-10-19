@@ -343,7 +343,7 @@ Repeats are time-only: `--every-ms 60000 --max-runs 3` (minimum one minute, maxi
 They rearm only after acknowledgement, from the acknowledgement time; missed intervals never
 produce a catch-up storm. Default expiry is 30 days, overridable with `--expires ISO_TIME`.
 Keys are installation-wide and idempotent for identical input; different input under the same
-key is rejected. There is a hard limit of 1000 retained obligations; creation fails explicitly
+key is rejected. There is a hard limit of 1000 retained reminders; creation fails explicitly
 rather than losing pending work. Terminal records remain as audit history.
 
 States distinguish scheduled, pending, dispatching, delivered, acknowledged, canceled, expired
@@ -401,3 +401,94 @@ the reviewer must inspect the actual journey and state its limits. The command r
 attestation; it cannot determine whether an invented journey is true. A new turn still reopens
 current acceptance; historical product acceptance remains labeled historical. Review depth follows
 risk and new evidence, not a fixed number of peers or rounds.
+
+
+## Durable obligations (0.1.11)
+
+The shared [engineering laws](../room/policies/engineering-laws.md) apply to every role.
+They guide decisions; the ledger enforces revision checks, waiting prerequisites for linked
+reminders, explicit closure and transactional handoff. It does not intercept every native tool
+call, verify arbitrary external claims or grant new authority. Stop only the action dependent
+on a violated condition; continue unrelated authorized work. No mandatory council or extra reviewer.
+
+Record material future work once, using an installation-wide key independent of session/turn ID:
+
+```json
+{
+  "key": "adopt-release",
+  "roomId": "ROOM",
+  "ownerId": "OWNER",
+  "assignment": "/absolute/brief.md",
+  "authority": "Human's assignment: activate at an idle boundary; no interruption",
+  "nextAction": "Verify the loaded version and changed behavior",
+  "closeWhen": "The requested version and behavior are verified in the target environment",
+  "conditions": [{"id": "activation", "requires": "Target version actually loaded, not merely staged"}]
+}
+```
+
+```sh
+alliance-work obligations add --file obligation.json
+alliance-work obligations list --owner OWNER
+alliance-work wakeups add --room ROOM --owner OWNER --key adoption-notice --obligation adopt-release --reason 'Verify adoption after activation' --at '2026-11-01T09:00:00+07:00'
+alliance-work obligations history --key adopt-release
+```
+
+`ownerId: null` means the Human owns the next decision, not ownerless automatic work. The
+assignment and authority are references to the actual brief/permission; they are not new grants.
+Existing wakeups are not migrated from prose. Linked reminders require pull delivery because
+Paseo 0.11.2 cannot atomically guarantee idle-only sends. Their timer becoming due, expiry,
+acknowledgement, job exit or child acceptance never fulfills the obligation. `status` and the
+room UI retain open obligations and expose missing/archived owners. There is no automatic resurrection.
+
+An action JSON passed to `obligations action --file action.json` always carries `key`, current
+`ownerId`, current `revision`, `action` and an absolute regular `evidence` file (at most 4 MiB).
+The record preserves its SHA-256 digest and observation time. Supported actions:
+
+| Action | Additional fields | Effect |
+|---|---|---|
+| `observe` | `conditionId`, `validUntil` (Unix milliseconds) | Accountable evidence that this condition holds until the stated deadline; expired observations block again. |
+| `reconcile` | Optional `nextAction`, `authority`, `conditions` | Update the premise and invalidate old observations, including reused condition IDs. |
+| `handoff` | `nextOwnerId` (agent ID or null for Human) | Transfer the obligation without sending a prompt or changing native sessions. |
+| `fulfill` | None | Require unexpired condition observations and evidence for `closeWhen`; does not create product acceptance. |
+| `cancel` | None | Explicitly retire the obligation with its reason/evidence retained. |
+
+```json
+{
+  "key": "adopt-release", "ownerId": "OWNER", "revision": 1,
+  "action": "observe", "conditionId": "activation",
+  "evidence": "/absolute/runtime-readback.md", "validUntil": 1793527200000
+}
+```
+
+Use a validity deadline appropriate to the external fact and refresh before dependent side
+effects. The example timestamp must be replaced with a future deadline. Evidence should name
+the candidate, environment, observed predicate, time and limits. The engine checks presence,
+identity and expiry of the observation; it cannot prove the file's semantic truth or detect an
+external runtime changing early. Native permissions remain authoritative. This API follows the
+existing trusted-host RPC model; supplied owner IDs are concurrency metadata, not authentication.
+
+Handoff commits the obligation, history, pending linked reminders and any exclusively linked
+tracked jobs together. It preserves waiting conditions and valid observations. Shared/changed
+jobs or ambiguous delivery fail without partial transfer. The handoff receipt reconciles an
+already pulled reminder in the same transaction; no separate acknowledgement step is required.
+Expired/acknowledged reminders retain their history and do not erase job associations. Handoff to Human
+cancels pending reminders and retains the open obligation; it does not transfer a running
+process's tracking record to a nonexistent agent. Old terminal notification records stay historical.
+The `members owner` command changes supervisory responsibility, not execution ownership of an
+obligation. Use obligation handoff for material future work; no per-turn ledger entry is needed.
+
+`policy read --agent ID` returns current policy plus that owner's open obligations and blockers.
+New agent creation injects the common laws. Each native session open regenerates a recovery
+snapshot at `$ALLIANCE_CONTEXT`, containing current policy and open obligations; harness env
+preserves that path. The role instruction asks the model to read it and refresh before acting.
+This does not rewrite a saved native prompt, guarantee that a model reads the file, or supply a
+universal compaction hook. Existing sessions adopt policy at their next natural recovery read;
+there is no broadcast to running agents. `policy ack` remains optional audit metadata.
+
+SQLite keeps every obligation revision and its evidence receipt. No session end, archive, restart
+or notification TTL deletes it. Updates use compare-and-swap after asynchronous evidence reads;
+a stale writer must reread and reconcile. Back up `rooms.sqlite` consistently, including its WAL
+when live; recovery snapshots are derived, not the source of truth. New tables are additive and
+old fields/notifications remain compatible, but older plugins cannot enforce the new ledger:
+the current installer refuses targets missing the durable core. Do not bypass that check with
+an older installer; preserve and reconcile the ledger before any manually managed downgrade.

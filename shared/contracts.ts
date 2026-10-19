@@ -1,6 +1,7 @@
 import { defineRpc, defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
 import { Difficulty, ModelPolicy } from "./model-policy";
+import { ObligationRecord } from "./obligations";
 import { WakeRecord } from "./wakeups";
 
 export const Role = z.enum(["hq", "supervisor", "lead", "peer", "lens"]);
@@ -84,6 +85,13 @@ export const roomList = defineRpc({
     members: z.array(Member),
     jobs: z.array(Job),
     wakeups: z.array(WakeRecord),
+    obligations: z.array(
+      ObligationRecord.safeExtend({
+        blockedOn: z.array(z.string()),
+        ownerStatus: z.string(),
+        ownerLabel: z.string(),
+      }),
+    ),
     wakeupHealth: z.object({ checkedAt: z.string().nullable(), error: z.string().nullable() }),
   }),
 });
@@ -190,7 +198,13 @@ export const memberOwner = defineRpc({
 export const policyRead = defineRpc({
   name: "policy.read",
   input: z.object({ agentId: z.string() }),
-  output: z.object({ digest: z.string(), text: z.string(), path: z.string(), acknowledged: z.boolean() }),
+  output: z.object({
+    digest: z.string(),
+    text: z.string(),
+    path: z.string(),
+    acknowledged: z.boolean(),
+    obligations: z.array(ObligationRecord.safeExtend({ blockedOn: z.array(z.string()) })),
+  }),
 });
 export const policyAck = defineRpc({
   name: "policy.ack",

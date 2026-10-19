@@ -14,7 +14,7 @@ export function profileEnvironment(profile, home, ambient = process.env, credent
   for (const [key, value] of Object.entries(ambient)) {
     if (
       value !== undefined &&
-      /^(PATH|LANG|LC_.*|TZ|TERM|COLORTERM|TMPDIR|TMP|TEMP|USER|LOGNAME|PASEO_.*|ALLIANCE_BOUND_ROOM|ALLIANCE_ASSIGNMENT|ALLIANCE_ARTIFACTS|SSL_CERT_FILE|SSL_CERT_DIR|HTTPS?_PROXY|NO_PROXY)$/i.test(
+      /^(PATH|LANG|LC_.*|TZ|TERM|COLORTERM|TMPDIR|TMP|TEMP|USER|LOGNAME|PASEO_.*|ALLIANCE_BOUND_ROOM|ALLIANCE_ASSIGNMENT|ALLIANCE_ARTIFACTS|ALLIANCE_CONTEXT|SSL_CERT_FILE|SSL_CERT_DIR|HTTPS?_PROXY|NO_PROXY)$/i.test(
         key,
       )
     )

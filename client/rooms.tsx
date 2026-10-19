@@ -435,6 +435,32 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
               <Text style={muted}>{rows.length}</Text>
               <Button label="Models" icon="Settings2" colors={c} onPress={() => setModelRoom(room)} />
             </View>
+            {(data.data?.obligations ?? [])
+              .filter((o) => o.roomId === room.id && o.state === "open")
+              .map((o) => (
+                <View key={o.key} style={{ padding: 14, gap: 4, backgroundColor: c.surface1 }}>
+                  <Text style={cell}>
+                    Obligation · {o.key} · {o.blockedOn.length ? "Waiting" : "Conditions recorded"}
+                  </Text>
+                  <Text
+                    selectable
+                    style={{
+                      ...muted,
+                      color: o.ownerStatus === "needs-owner" ? c.statusWarning : c.foregroundMuted,
+                    }}
+                  >
+                    Owner: {o.ownerLabel} · {o.ownerStatus} · revision {o.revision}
+                  </Text>
+                  <Text selectable style={muted}>
+                    {o.nextAction}
+                  </Text>
+                  {o.blockedOn.map((reason) => (
+                    <Text key={reason} selectable style={muted}>
+                      {reason}
+                    </Text>
+                  ))}
+                </View>
+              ))}
             {wakeups
               .filter(
                 (w) => w.roomId === room.id && !["acknowledged", "canceled", "expired"].includes(w.state),

@@ -12,6 +12,11 @@ const required = {
   ],
   "failure-learning": ["server/failure-evals.mjs", "room/skills/alliance-learn-from-failure/SKILL.md"],
   wakeups: ["server/wakeups.ts", "shared/wakeups.ts"],
+  "durable-obligations": [
+    "server/obligations.ts",
+    "shared/obligations.ts",
+    "room/policies/engineering-laws.md",
+  ],
   "responsible-ownership": ["server/runtime.ts", "shared/contracts.ts", "shared/operations.ts"],
   operations: ["server/jobs.mjs", "shared/operations.ts"],
 };

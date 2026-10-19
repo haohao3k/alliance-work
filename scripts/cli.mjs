@@ -26,6 +26,8 @@ const values = new Set([
   "--evidence",
   "--digest",
   "--product",
+  "--file",
+  "--obligation",
   "--pid",
   "--key",
   "--title",
@@ -85,6 +87,10 @@ const help = `Alliance Work — isolated agent rooms on native Paseo
   alliance-work members owner --agent ID --owner ID|Human --revision N --evidence HANDOFF_FILE
   alliance-work policy read --agent ID
   alliance-work policy ack --agent ID --digest SHA256
+  alliance-work obligations list [--owner ID|Human]
+  alliance-work obligations add --file OBLIGATION.json
+  alliance-work obligations action --file ACTION.json
+  alliance-work obligations history --key KEY
   alliance-work jobs track --room ID --owner AGENT --pid PID --key RUN_ID --title TITLE
   alliance-work jobs owner --key RUN_ID --owner AGENT --revision N
   alliance-work wakeups list
@@ -218,12 +224,28 @@ try {
       output({ report: result.path, ...result.report.summary });
       if (!["IMPROVED", "NO_CHANGE"].includes(result.report.summary.outcome)) process.exitCode = 1;
     }
-  } else if (["status", "jobs", "wakeups", "members", "policy"].includes(command)) {
+  } else if (["status", "jobs", "wakeups", "members", "policy", "obligations"].includes(command)) {
     const current = await installation(home);
     if (!current) throw new Error("No Alliance installation exists for this home");
     const config = JSON.parse(await readFile(join(current.paseoHome, "config.json"), "utf8"));
     let method = "rooms.list",
       input = {};
+    if (command === "obligations") {
+      const action = positional[1];
+      if (action === "list") {
+        method = "obligations.list";
+        input = flags["--owner"] ? { ownerId: flags["--owner"] === "Human" ? null : flags["--owner"] } : {};
+      } else if (action === "history" && flags["--key"]) {
+        method = "obligations.history";
+        input = { key: flags["--key"] };
+      } else if (["add", "action"].includes(action) && flags["--file"]) {
+        method = `obligations.${action}`;
+        input = JSON.parse(await readFile(resolve(flags["--file"]), "utf8"));
+      } else
+        throw new Error(
+          "Usage: obligations list [--owner ID|Human] | add|action --file FILE | history --key KEY",
+        );
+    }
     if (command === "members") {
       if (positional[1] !== "owner") throw new Error("Usage: members owner");
       for (const flag of ["--agent", "--owner", "--revision", "--evidence"])
@@ -281,6 +303,7 @@ try {
           roomId: flags["--room"],
           ownerId,
           reason: flags["--reason"],
+          ...(flags["--obligation"] ? { obligationKey: flags["--obligation"] } : {}),
           trigger: flags["--at"]
             ? { kind: "time", at: Date.parse(flags["--at"]) }
             : flags["--job"]

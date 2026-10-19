@@ -167,3 +167,21 @@ Brief giữ mục tiêu người dùng, constraint có nguồn gốc, owner và 
 phương án kỹ thuật được phép xét lại. Chỉ thêm vòng review khi có câu hỏi quyết định hoặc bằng
 chứng mới. Nghiệm thu sản phẩm dùng `accept --report RUNTIME_REPORT --product JOURNEY_JSON`;
 format và giới hạn nằm trong `docs/operations.md`. Technical PASS không tự thành product acceptance.
+
+
+## Luật chung và nghĩa vụ qua session
+
+Mọi role dùng cùng [10 luật lõi](../room/policies/engineering-laws.md). Khi resume hoặc compact,
+`alliance-work policy read --agent "$PASEO_AGENT_ID"` trả policy hiện tại và nghĩa vụ còn mở.
+Snapshot `$ALLIANCE_CONTEXT` được tạo lại khi mở native session; cần đọc lại trạng thái trước
+hành động phụ thuộc. Không có vòng ACK bắt buộc hay broadcast làm ngắt agent.
+
+Chỉ ghi nghĩa vụ cho phần việc cần sống qua lượt làm/session, không ghi từng tool call:
+`obligations add --file FILE.json`. Giữ assignment, owner, nguồn quyền, nextAction, closeWhen và
+điều kiện chờ. Dùng `obligations action --file FILE.json` để ghi bằng chứng điều kiện, điều chỉnh
+premise, bàn giao hoặc đóng có bằng chứng; xem [schema và ví dụ](operations.md#durable-obligations-0111).
+Bàn giao chuyển đồng thời nghĩa vụ và reminder/job gắn riêng với nó. Chờ Human là trạng thái hợp lệ.
+
+Reminders gắn `--obligation KEY` chỉ dùng pull. Đến giờ chưa chắc đủ điều kiện; nhận/ACK/hết hạn
+reminder không hoàn tất nghĩa vụ. Khi vi phạm luật, dừng đúng hành động phụ thuộc, xem lại premise,
+đối chiếu evidence/quyền/owner rồi tiếp tục. Việc độc lập vẫn được tự chủ làm tiếp.

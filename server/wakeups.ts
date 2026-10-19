@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { PaseoApi } from "@getpaseo/client";
+import { blockedOn } from "../shared/obligations";
 import { responsibleOwner } from "../shared/operations";
 import { type WakeRecordValue as Wake, WakeInput } from "../shared/wakeups";
 import { observeJob } from "./jobs.mjs";
@@ -7,7 +8,7 @@ import type { RoomStore } from "./store";
 
 const terminal = new Set(["acknowledged", "canceled", "expired"]);
 
-/** Durable review obligations; payloads stay in room artifacts, transport stays native. */
+/** Durable notifications. Their expiry/acknowledgement never closes an obligation. */
 export class Wakeups {
   private running: Promise<void> | undefined;
   private stopped = false;
@@ -18,9 +19,13 @@ export class Wakeups {
   list() {
     return this.store.wakeups();
   }
-  private authorized(w: Pick<Wake, "ownerId" | "roomId" | "trigger">) {
+  private authorized(w: Pick<Wake, "ownerId" | "roomId" | "trigger" | "obligationKey">) {
     const owner = this.store.member(w.ownerId);
     if (!owner) return false;
+    if (w.obligationKey) {
+      const o = this.store.obligations().find((o) => o.key === w.obligationKey);
+      return o?.roomId === w.roomId && o.ownerId === w.ownerId && o.state === "open";
+    }
     if (owner.roomId === w.roomId) return true;
     if (w.trigger.kind === "turn") {
       const child = this.store.member(w.trigger.agentId);
@@ -34,6 +39,10 @@ export class Wakeups {
   }
   private current(w: Wake) {
     if (!this.authorized(w)) return false;
+    if (w.obligationKey) {
+      const o = this.store.obligations().find((o) => o.key === w.obligationKey);
+      if (!o || blockedOn(o, this.now()).length) return false;
+    }
     if (w.trigger.kind === "job") {
       const key = w.trigger.key;
       const job = this.store.jobs().find((j) => j.key === key);
@@ -47,7 +56,7 @@ export class Wakeups {
     }
     return true;
   }
-  private owner(w: Pick<Wake, "ownerId" | "roomId" | "trigger">) {
+  private owner(w: Pick<Wake, "ownerId" | "roomId" | "trigger" | "obligationKey">) {
     if (!this.authorized(w))
       throw new Error("Wakeup requires a room member or its explicitly responsible owner");
   }
@@ -115,6 +124,8 @@ export class Wakeups {
       throw new Error("Wakeup is terminal or being dispatched");
     if (action === "cancel") return this.save(w, { state: "canceled", note: "Canceled by owner" });
     if (action === "owner") {
+      if (w.obligationKey)
+        throw new Error("Hand off the obligation to transfer its pending wakeups atomically");
       if (!nextOwnerId || !["scheduled", "pending"].includes(w.state))
         throw new Error("Only waiting wakeups can change owner");
       this.owner({ ...w, ownerId: nextOwnerId });

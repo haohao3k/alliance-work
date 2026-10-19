@@ -145,6 +145,50 @@ test("native Paseo switches release roots and restores the previous plugin after
     assert.equal(adoptedMember.ownerId, null);
     assert.equal((await created.refresh())?.agent.status, "idle");
 
+    await client.invokePluginRpc("alliance-work", "obligations.add", {
+      key: "native-obligation",
+      roomId: policyRoomId,
+      ownerId: created.id,
+      assignment: handoff,
+      authority: "Fixture permits metadata only",
+      nextAction: "Read activated policy",
+      closeWhen: "Scope verified",
+      conditions: [{ id: "loaded", requires: "Activation readback" }],
+    });
+    await client.invokePluginRpc("alliance-work", "wakeups.add", {
+      key: "native-obligation-notice",
+      roomId: policyRoomId,
+      ownerId: created.id,
+      obligationKey: "native-obligation",
+      reason: "Read policy when loaded",
+      trigger: { kind: "time", at: Date.now() },
+    });
+    assert.deepEqual(
+      await client.invokePluginRpc("alliance-work", "wakeups.take", { ownerId: created.id }),
+      [],
+    );
+    const recovered = (await client.invokePluginRpc("alliance-work", "policy.read", {
+      agentId: created.id,
+    })) as {
+      obligations: { key: string; blockedOn: string[] }[];
+    };
+    assert.equal(recovered.obligations[0].key, "native-obligation");
+    assert.equal(recovered.obligations[0].blockedOn.length, 1);
+    await client.invokePluginRpc("alliance-work", "obligations.action", {
+      key: "native-obligation",
+      ownerId: created.id,
+      revision: 1,
+      action: "handoff",
+      nextOwnerId: null,
+      evidence: handoff,
+    });
+    const history = (await client.invokePluginRpc("alliance-work", "obligations.history", {
+      key: "native-obligation",
+    })) as { ownerId: string | null }[];
+    assert.equal(history.length, 2);
+    assert.equal(history[1].ownerId, null);
+    assert.equal((await created.refresh())?.agent.status, "idle");
+
     await client.invokePluginRpc("alliance-work", "jobs.track", {
       key: "native-controller",
       roomId: policyRoomId,

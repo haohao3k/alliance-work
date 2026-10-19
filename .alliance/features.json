@@ -180,6 +180,30 @@
           "expect": "Idle delivery bounds batch size and enforces owner cooldown"
         }
       ]
+    },
+    {
+      "id": "obligations",
+      "title": "Durable obligations and shared engineering laws",
+      "entryPoint": "policy read / obligations / linked wakeups",
+      "preconditions": "Node 24, isolated fixtures; external claims remain evidence-backed attestations",
+      "behaviors": [
+        {
+          "id": "obligations.wait",
+          "expect": "Due reminders wait for unexpired condition evidence; ack and TTL do not fulfill work"
+        },
+        {
+          "id": "obligations.handoff",
+          "expect": "Handoff and job ownership persist atomically across sessions and receipt expiry"
+        },
+        {
+          "id": "obligations.autonomy",
+          "expect": "Human waits, local-only scope and independent work remain valid without automatic sends"
+        },
+        {
+          "id": "obligations.recovery",
+          "expect": "Session recovery restores common policy and current open obligations without messaging owners"
+        }
+      ]
     }
   ],
   "scenarios": [
@@ -470,6 +494,46 @@
         {
           "id": "wakeups.bounds",
           "behavior": "wakeups.bounds"
+        }
+      ]
+    },
+    {
+      "id": "obligations.wait",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "obligations.wait"],
+      "assertions": [
+        {
+          "id": "obligations.wait",
+          "behavior": "obligations.wait"
+        }
+      ]
+    },
+    {
+      "id": "obligations.handoff",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "obligations.handoff"],
+      "assertions": [
+        {
+          "id": "obligations.handoff",
+          "behavior": "obligations.handoff"
+        }
+      ]
+    },
+    {
+      "id": "obligations.autonomy",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "obligations.autonomy"],
+      "assertions": [
+        {
+          "id": "obligations.autonomy",
+          "behavior": "obligations.autonomy"
+        }
+      ]
+    },
+    {
+      "id": "obligations.recovery",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "obligations.recovery"],
+      "assertions": [
+        {
+          "id": "obligations.recovery",
+          "behavior": "obligations.recovery"
         }
       ]
     }

@@ -114,5 +114,21 @@
   "wakeups.bounds": {
     "file": "tests/wakeups.test.ts",
     "pattern": "wakeups bound batches"
+  },
+  "obligations.wait": {
+    "file": "tests/obligations.test.ts",
+    "pattern": "due activation waits"
+  },
+  "obligations.handoff": {
+    "file": "tests/obligations.test.ts",
+    "pattern": "stable obligations|handoff transfers|shared job|notification expiry|handoff receipt"
+  },
+  "obligations.autonomy": {
+    "file": "tests/obligations.test.ts",
+    "pattern": "Human decision|reconciliation invalidates|obligation reminders"
+  },
+  "obligations.recovery": {
+    "file": "tests/rooms.test.ts",
+    "pattern": "session recovery restores"
   }
 }

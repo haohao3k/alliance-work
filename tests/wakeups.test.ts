@@ -91,6 +91,16 @@ async function fixture() {
   };
 }
 
+test("unknown obligation prerequisites fail closed instead of becoming an ordinary due reminder", async () => {
+  const f = await fixture();
+  try {
+    assert.throws(() => f.add("activation", { obligationKey: "not-recorded" }), /owner|obligation/i);
+    assert.equal((await f.wake.take("owner")).length, 0);
+  } finally {
+    f.store.close();
+  }
+});
+
 test("wakeups survive restart, deduplicate and remain pending for busy owners", async () => {
   const f = await fixture();
   try {

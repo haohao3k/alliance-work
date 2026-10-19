@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { RoleName, RoomRecord } from "../shared/contracts";
 import { defaultModelPolicy, ModelPolicy, type ModelPolicyValue } from "../shared/model-policy";
+import type { Obligation } from "../shared/obligations";
 import type { WakeRecordValue } from "../shared/wakeups";
 
 export interface MemberRecord {
@@ -54,7 +55,48 @@ export class RoomStore {
       CREATE TABLE IF NOT EXISTS members(id TEXT PRIMARY KEY, roomId TEXT NOT NULL, launchKey TEXT, data TEXT NOT NULL, UNIQUE(roomId, launchKey));
       CREATE TABLE IF NOT EXISTS jobs(key TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS wakeups(key TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS obligations(key TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS obligation_history(key TEXT NOT NULL, revision INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(key,revision));
       CREATE TABLE IF NOT EXISTS room_model_policies(roomId TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL);`);
+  }
+  obligations(): Obligation[] {
+    return (this.db.prepare("SELECT data FROM obligations ORDER BY rowid").all() as { data: string }[]).map(
+      (r) => JSON.parse(r.data),
+    );
+  }
+  obligationHistory(key: string): Obligation[] {
+    return (
+      this.db.prepare("SELECT data FROM obligation_history WHERE key=? ORDER BY revision").all(key) as {
+        data: string;
+      }[]
+    ).map((r) => JSON.parse(r.data));
+  }
+  atomic<T>(action: () => T): T {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = action();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  // Caller includes this and related wakeup/job changes in one synchronous transaction.
+  saveObligation(o: Obligation, revision?: number) {
+    const data = JSON.stringify(o);
+    const result =
+      revision === undefined
+        ? this.db
+            .prepare("INSERT INTO obligations(key,revision,data) VALUES(?,?,?) ON CONFLICT DO NOTHING")
+            .run(o.key, o.revision, data)
+        : this.db
+            .prepare("UPDATE obligations SET revision=?,data=? WHERE key=? AND revision=?")
+            .run(o.revision, data, o.key, revision);
+    if (!result.changes) throw new Error("Obligation changed; refresh owner and revision");
+    this.db
+      .prepare("INSERT INTO obligation_history(key,revision,data) VALUES(?,?,?)")
+      .run(o.key, o.revision, data);
   }
   wakeups(): WakeRecordValue[] {
     return (this.db.prepare("SELECT data FROM wakeups ORDER BY rowid").all() as { data: string }[]).map((r) =>

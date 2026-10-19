@@ -20,6 +20,7 @@ import {
   roomModelPolicySave,
   settings,
 } from "./shared/contracts";
+import { obligationAction, obligationAdd, obligationHistory, obligationList } from "./shared/obligations";
 import { wakeAction, wakeAdd, wakeList, wakeTake } from "./shared/wakeups";
 
 export default function contribute(server: PluginServerContext) {
@@ -49,6 +50,10 @@ export default function contribute(server: PluginServerContext) {
     void get().catch(() => undefined);
   });
   void get().catch(() => undefined);
+  server.handle(obligationList, async ({ ownerId }) => (await get()).obligations.list(ownerId));
+  server.handle(obligationHistory, async ({ key }) => (await get()).store.obligationHistory(key));
+  server.handle(obligationAdd, async (input, { paseo }) => (await get()).obligations.add(input, paseo));
+  server.handle(obligationAction, async (input, { paseo }) => (await get()).obligations.action(input, paseo));
   server.handle(wakeList, async () => {
     const r = await get();
     await r.wakeups.tick();
@@ -133,6 +138,7 @@ export default function contribute(server: PluginServerContext) {
       cwd: request.cwd,
       title: null,
     });
+    const recovery = await instance.recoveryContext(request.agentId);
     return {
       ...request,
       env: {
@@ -147,6 +153,7 @@ export default function contribute(server: PluginServerContext) {
         ALLIANCE_ROLE: profile.role,
         ALLIANCE_ARTIFACTS: room.artifacts,
         ALLIANCE_ASSIGNMENT: instance.store.member(request.agentId)?.assignment ?? "",
+        ALLIANCE_CONTEXT: recovery,
         CODEX_HOME: profile.harness === "codex" ? profile.home : `${profile.osHome}/.codex`,
         CLAUDE_CONFIG_DIR: profile.harness === "claude" ? profile.home : `${profile.osHome}/.claude`,
         PI_CODING_AGENT_DIR: profile.harness === "pi" ? profile.home : `${profile.osHome}/.pi`,

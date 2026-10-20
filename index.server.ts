@@ -9,6 +9,7 @@ import {
   jobOwner,
   jobTrack,
   memberDisposition,
+  memberKeep,
   memberLaunch,
   memberOwner,
   memberResume,
@@ -111,8 +112,17 @@ export default function contribute(server: PluginServerContext) {
   server.handle(memberResume, async (input, { paseo }) =>
     (await get()).resume(input.agentId, input.prompt, paseo),
   );
-  server.handle(memberDisposition, async (input) =>
-    (await get()).disposition(input.agentId, input.decision, input.candidate, input.evidence, input.product),
+  server.handle(memberKeep, async ({ agentId, keep, actorId }) => (await get()).keep(agentId, keep, actorId));
+  server.handle(memberDisposition, async (input, { paseo }) =>
+    (await get()).disposition(
+      input.agentId,
+      input.decision,
+      input.candidate,
+      input.evidence,
+      input.product,
+      input.actorId,
+      paseo,
+    ),
   );
   server.before("agent.create", async ({ request }, { paseo }) => {
     if (!allianceProvider(request.config.provider)) return;

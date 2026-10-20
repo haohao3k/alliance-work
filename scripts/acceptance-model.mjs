@@ -78,6 +78,7 @@ try {
     decision: "accepted",
     candidate: proof.candidate.digest,
     evidence: handback.verificationReport,
+    actorId: null, // the test driver decides as the Human
   });
   assert.deepEqual(acceptance, { saved: true });
   receipt.lead = { id: lead.id, ...handback, acceptance };

@@ -1,9 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { PaseoApi } from "@getpaseo/client";
-import type { AutonomyState } from "../shared/autonomy";
+import { type AutonomyState, pauseKind } from "../shared/autonomy";
 import { blockedOn } from "../shared/obligations";
 import { responsibleOwner } from "../shared/operations";
-import { observeJob } from "./jobs.mjs";
 import type { RoomStore } from "./store";
 import type { Wakeups } from "./wakeups";
 
@@ -24,6 +23,11 @@ export class Autonomy {
   }
   private save(r: AutonomyState, change: Partial<AutonomyState>) {
     const next = { ...r, ...change, revision: r.revision + 1, updatedAt: this.now() };
+    // Pause provenance describes only a current pause.
+    if (next.phase !== "paused") {
+      next.pausedBy = undefined;
+      next.pausedAt = undefined;
+    }
     this.store.saveAutonomy(next, r.revision);
     return next;
   }
@@ -35,6 +39,8 @@ export class Autonomy {
   ) {
     const member = this.store.member(id);
     if (!member) throw new Error("Unknown Alliance member");
+    // Omitted options keep their recorded value (an earlier --auto-archive false survives).
+    options = Object.fromEntries(Object.entries(options).filter(([, v]) => v !== undefined));
     const prior = this.get(id);
     const key = options.obligationKey ?? prior?.obligationKey;
     if (key) {
@@ -53,6 +59,8 @@ export class Autonomy {
         reason: "Assignment resumed",
         retries: 0,
         continuations: 0,
+        pausedBy: undefined,
+        pausedAt: undefined,
         ...options,
       });
     }
@@ -89,18 +97,35 @@ export class Autonomy {
     if (turnId && r.turnId !== turnId) throw new Error("Checkpoint belongs to an old turn");
     if (r.delivery === "dispatching")
       throw new Error("Delivery in progress; retry checkpoint after dispatch");
-    return this.save(r, { phase, reason, delivery: "none", messageId: null, dueAt: this.now() + 15000 });
+    return this.save(r, {
+      phase,
+      reason,
+      delivery: "none",
+      messageId: null,
+      dueAt: this.now() + 15000,
+      pausedBy: phase === "paused" ? "checkpoint" : undefined,
+      pausedAt: phase === "paused" ? this.now() : undefined,
+    });
+  }
+  /** The lifecycle sweep archived this agent, or Paseo reports it archived. */
+  markArchived(id: string) {
+    const r = this.get(id);
+    if (r && r.phase !== "archived")
+      this.save(r, { phase: "archived", reason: "Accepted assignment archived through Paseo" });
   }
   started(id: string, turnId: string | null) {
     const r = this.get(id);
     if (!r || (turnId && r.turnId === turnId && !r.outcome)) return;
+    // An explicitly started turn reopens a prior handback. A turn sent after a cancellation is
+    // the resume; checkpoint and handoff pauses still need an explicit autonomy start.
+    const resumed = pauseKind(r) === "cancel";
     this.save(r, {
       turnId,
       outcome: null,
       delivery: "none",
       messageId: null,
-      // An explicitly started turn reopens a prior handback, but not a paused assignment.
-      phase: ["review", "archived"].includes(r.phase) ? "active" : r.phase,
+      phase: ["review", "archived"].includes(r.phase) || resumed ? "active" : r.phase,
+      ...(resumed ? { reason: "Resumed after cancellation", pausedBy: undefined, pausedAt: undefined } : {}),
     });
   }
   ended(id: string, turnId: string | null, outcome: string) {
@@ -114,6 +139,7 @@ export class Autonomy {
       turnId,
       outcome,
       phase,
+      ...(outcome === "canceled" ? { pausedBy: "cancel" as const, pausedAt: this.now() } : {}),
       delivery: "none",
       messageId: null,
       reason:
@@ -190,73 +216,6 @@ export class Autonomy {
               trigger: { kind: "turn", agentId: r.agentId, turnId: r.turnId },
               delivery: "idle",
             });
-        }
-        if (
-          member.decision === "accepted" &&
-          member.decisionEvidence &&
-          r.autoArchive &&
-          r.phase !== "paused" &&
-          r.delivery !== "uncertain"
-        ) {
-          if (live.agent.status !== "idle") continue;
-          if (this.store.obligations().some((o) => o.ownerId === r.agentId && o.state === "open")) continue;
-          // Native archive cascades even to non-Alliance children. Archive leaves only;
-          // parent becomes eligible on a later sweep after native children are archived.
-          const nativeChildren = await api.agents.list({
-            filter: { labels: { "paseo.parent-agent-id": r.agentId }, includeArchived: false },
-            page: { limit: 1 },
-          });
-          if (nativeChildren.entries.length) continue;
-          // Explicit responsibilities may differ from native parentage.
-          const children = this.store
-            .members()
-            .filter((m) => responsibleOwner(m) === r.agentId || m.parentId === r.agentId);
-          if (children.some((m) => m.decision !== "accepted")) continue;
-          let blocked = false;
-          for (const child of children) {
-            const state = await api.agents
-              .ref(child.id)
-              .refresh()
-              .catch(() => null);
-            if (
-              !state ||
-              (!state.agent.archivedAt &&
-                (state.agent.status !== "idle" || state.agent.pendingPermissions?.length))
-            )
-              blocked = true;
-          }
-          for (const job of this.store.jobs().filter((j) => j.ownerId === r.agentId)) {
-            if ((await observeJob(job)).state !== "exited") blocked = true;
-          }
-          if (
-            this.wakes
-              .list()
-              .some(
-                (w) => w.ownerId === r.agentId && !["acknowledged", "canceled", "expired"].includes(w.state),
-              )
-          )
-            blocked = true;
-          if (
-            blocked ||
-            this.stopped ||
-            this.get(r.agentId)?.revision !== r.revision ||
-            this.store.member(r.agentId)?.decision !== "accepted"
-          )
-            continue;
-          const fresh = await ref.refresh().catch(() => null);
-          if (
-            fresh?.agent.status !== "idle" ||
-            fresh.agent.pendingPermissions?.length ||
-            this.store.obligations().some((o) => o.ownerId === r.agentId && o.state === "open") ||
-            this.get(r.agentId)?.revision !== r.revision ||
-            this.store.member(r.agentId)?.decision !== "accepted"
-          )
-            continue;
-          await ref.archive();
-          const current = this.get(r.agentId);
-          if (current?.revision === r.revision)
-            this.save(current, { phase: "archived", reason: "Accepted assignment archived through Paseo" });
-          continue;
         }
         if (
           (r.phase !== "active" && !(r.phase === "waiting" && r.obligationKey)) ||

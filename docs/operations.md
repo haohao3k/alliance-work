@@ -158,7 +158,46 @@ dependency changes, verified by native tests and shipped with a new release.
 | `setup --refresh` | Rebuild managed assets from the current version, preserving private state |
 | `update --check` | Read latest stable release from `haohao3k/alliance-work`; no file changes |
 | `update` | Verify/download a release, check it, then activate it when idle |
+| `update --wait-idle MIN` | Stage and check now; activate as soon as readback is idle, for at most MIN minutes |
+| `update --bundle DIR` | Same staged update from a release `deploy` copied here; needs no GitHub access |
+| `deploy --host H …` | From a machine with `gh`, push the release over SSH and run `update --bundle` on each host |
 | `rollback` | Activate the previous installation root, preserving current rooms and credentials |
+
+### Deploy to other machines (0.1.16)
+
+Only the controller needs GitHub access. Targets need SSH (key-based, non-interactive) and an
+existing installation; nvm or `~/.local/bin` need not be on the SSH `PATH` because the remote side
+uses the Node recorded in the Alliance launcher and the harness paths of the installed profiles.
+
+```sh
+alliance-work deploy --host ryzen --host i5 --host iznogouds-mac-mini --remember
+alliance-work deploy --wait-idle 240 --detach   # later: reuse the remembered fleet
+```
+
+`deploy` downloads the latest stable release (or `--version-tag vX.Y.Z`) once, verifies its
+checksum, copies the archive and `checksums.txt` to a temporary directory on each host and runs
+`alliance-work update --bundle` there under `nohup`, logging to `deploy.log` in that directory.
+Installations older than 0.1.16 cannot read bundles; for them the remote side verifies the
+archive and runs the candidate's own CLI once to perform the same staged update. Each host
+still verifies the checksum, runs `npm ci` and `npm run check`, and activates only when idle.
+Without `--detach` the controller follows each log until the host records its exit status, then
+removes the temporary directory on success. Interrupting the controller does not stop a remote
+update; its log stays on the host. `--remember` saves the host list to `~/.alliance-work/fleet.json`.
+
+`--wait-idle MIN` stages and checks first, then waits for idleness instead of failing. If an
+agent starts between the idle readback and activation, the restored candidate waits again until
+the deadline. A staged copy that never became active is removed, including after Ctrl-C during
+the wait; if activation itself was interrupted or failed after switching, the copy is kept and
+the command says to run `doctor`. Over SSH (`--bundle`) a
+stopped daemon is refused rather than started with the remote shell's environment: start Paseo
+on that host normally, then rerun. An agent cannot run a non-detached wait (it would wait for
+itself). Ctrl-C or a hang-up releases the maintenance lock; a lock whose process has died on
+the same host is treated as stale.
+
+The scheduler pause during the wait exists only in a running 0.1.16 plugin. For the first
+deploy to hosts that still run 0.1.15, their plugin keeps continuing active assignments, so a
+busy host may never be idle within the wait. Choose a quiet window, or pause busy assignments
+there first (`alliance-work autonomy checkpoint --agent ID --phase paused --reason …`).
 
 Updates do not rewrite the development checkout. Release code lives under
 `~/.alliance-work/releases/`; the CLI launcher and native provider commands switch to the
@@ -342,9 +381,10 @@ turn. Use pull for jobs requiring zero interruption. No closed session is auto-r
 Repeats are time-only: `--every-ms 60000 --max-runs 3` (minimum one minute, maximum 100 runs).
 They rearm only after acknowledgement, from the acknowledgement time; missed intervals never
 produce a catch-up storm. Default expiry is 30 days, overridable with `--expires ISO_TIME`.
-Keys are installation-wide and idempotent for identical input; different input under the same
-key is rejected. There is a hard limit of 1000 retained reminders; creation fails explicitly
-rather than losing pending work. Terminal records remain as audit history.
+Keys are installation-wide and idempotent for identical input while the record is retained;
+different input under the same key is rejected. At most 1000 unfinished reminders may exist;
+creation fails explicitly rather than losing pending work. Finished records remain as audit
+history for seven days (see 0.1.16 below).
 
 States distinguish scheduled, pending, dispatching, delivered, acknowledged, canceled, expired
 and uncertain. Dispatch claims are transactional. A crash or failed acknowledgement during
@@ -531,6 +571,50 @@ accept candidate-bound evidence. Only then may the plugin archive an idle agent,
 permissions, live native children, unfinished responsibilities, tracked jobs or unresolved owner
 wakeups. Native children are archived separately before their parent so native cascade cannot
 silently archive unreviewed or unmanaged children. Paused assignments stay open.
+
+### Closing work by decision (0.1.16)
+
+Archive follows the owner's decision for every Alliance agent, including sessions created before
+autonomy existed; continuation remains opt-in for those. The rules:
+
+- Only an agent in the member's responsible owner chain, or the Human, may accept or reject. The
+  CLI sends the caller's `PASEO_AGENT_ID`; outside an agent session the caller is the Human. An
+  agent cannot accept itself, and a sibling or child cannot accept its owner.
+- A Peer or Lens closes on its owner's technical acceptance. A Lead, Supervisor or HQ closes on
+  product acceptance (`accept --product` with a runtime report) by its owner, or on the Human's
+  decision. Decisions recorded before 0.1.16 count by role and by whether their disposition file
+  carries a product journey.
+- A decision binds to the turn it reviewed. `accept` is refused while the agent is running, when
+  its state cannot be read, and when a new turn starts during evidence validation. A later turn
+  reopens the decision; so does any newer message Paseo records for the agent, even if the
+  turn's start hook was lost.
+- A cancellation pauses continuation; the next turn sent to that agent resumes it. Acceptance
+  recorded after a cancellation closes it. A deliberate `checkpoint --phase paused` keeps the
+  agent open until it is started again. While an owner is paused by a cancellation, the plugin
+  sends it no reminders; they wait for `wakeups take` or the Human's next message.
+- `alliance-work members keep --agent ID` keeps an agent open whatever its decision (`--off`
+  clears it). Its owner chain, the Human or the agent itself may set it. `autonomy start`
+  without `--auto-archive` keeps the previously recorded choice.
+- Children archived or deleted natively no longer hold their parent open. An agent restored
+  natively after an earlier auto-archive stays open until it gets new work or a new decision.
+- A completed turn nobody decides on for 48 hours wakes the responsible owner once per turn and
+  owner (idle delivery), unless a review reminder for that turn is still unfinished, and at most
+  four per ten-minute scan. Undecided Human-owned work is never prompted; the Human's own
+  acceptance closes it like any other. Records from before 0.1.16 start that clock after
+  upgrade, spread over the following day.
+- The Human is whoever runs the CLI outside an agent session (no `PASEO_AGENT_ID`, no Alliance
+  role variables). The plugin cannot prove that; an agent that deliberately strips its session
+  identity could claim it. Treat agent instructions, not the CLI, as that boundary.
+
+`alliance-work status` shows `lifecycle.state` (`archivable`, `held`, `awaiting-decision`,
+`rejected`, `archived`) and the blockers for each member, plus `decisionBy` and `decisionScope`.
+
+Finished wakeups (acknowledged, canceled, expired) are removed seven days after their last change,
+except a reminder that still names the member's current turn and anything linked to an open
+obligation. The 1000-record cap applies to unfinished wakeups only. While a maintenance lock is
+held (an update waiting for idleness), the plugin starts no continuation, retry or reminder
+turns, and `status` reports the pause in `wakeupHealth`. A lock whose process died, or that
+predates a reboot, is ignored by the plugin and replaced by the next maintenance command.
 
 State and counters survive plugin reload and daemon restart. Dispatch is claimed before send;
 a crash or ambiguous response is quarantined as `uncertain` and never automatically replayed.

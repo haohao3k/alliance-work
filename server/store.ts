@@ -26,6 +26,20 @@ export interface MemberRecord {
   ownership?: { ownerId: string | null; revision: number; evidence: string; at: string };
   policyAck?: { digest: string; at: string };
   lastTurnId?: string | null;
+  /** Epoch ms when the latest turn ended; drives the stale-decision reminder. */
+  lastTurnEndedAt?: number;
+  /** Baseline for members recorded before turn end times existed. */
+  staleSince?: number;
+  /** Who recorded the decision: an agent ID, null for the Human, absent for legacy records. */
+  decisionBy?: string | null;
+  decisionAt?: string;
+  decisionScope?: "technical" | "product";
+  /** The turn the decision reviewed; a later turn needs its own decision. */
+  decisionTurnId?: string | null;
+  /** Explicitly kept open by its owner chain or the Human; never auto-archived. */
+  keep?: { by: string; at: string };
+  /** Set once Paseo reports the agent archived; a reopened agent clears it on its next turn. */
+  archivedAt?: string;
   lastAcceptance?: {
     decision: "accepted" | "rejected";
     kind: string | null;
@@ -131,6 +145,10 @@ export class RoomStore {
             .prepare("UPDATE wakeups SET revision=?,data=? WHERE key=? AND revision=?")
             .run(w.revision, JSON.stringify(w), w.key, revision);
     if (!result.changes) throw new Error("Wakeup changed; refresh before retrying");
+  }
+  /** Removes one finished record only if nobody changed it since it was read. */
+  deleteWakeup(key: string, revision: number) {
+    this.db.prepare("DELETE FROM wakeups WHERE key=? AND revision=?").run(key, revision);
   }
   claimWakeups(batch: WakeRecordValue[], messageId: string, now: number) {
     this.db.exec("BEGIN IMMEDIATE");

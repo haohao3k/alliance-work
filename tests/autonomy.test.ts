@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { PaseoApi } from "@getpaseo/client";
 import { Autonomy } from "../server/autonomy";
+import { Lifecycle } from "../server/lifecycle";
 import { Obligations } from "../server/obligations";
 import { RoomStore } from "../server/store";
 import { Wakeups } from "../server/wakeups";
@@ -48,6 +49,7 @@ async function fixture() {
   let onRefresh = () => {};
   const wakes = new Wakeups(store, () => now);
   const autonomy = new Autonomy(store, wakes, () => now);
+  const lifecycle = new Lifecycle(store, wakes, autonomy, () => now);
   const api = {
     agents: {
       list: async () => ({ entries: children }),
@@ -76,8 +78,14 @@ async function fixture() {
     store,
     home,
     autonomy,
+    lifecycle,
     wakes,
     api,
+    // One scheduler round: continuation/review first, then the archive sweep.
+    tick: async () => {
+      await autonomy.tick(api);
+      await lifecycle.sweep(api);
+    },
     end,
     advance: () => {
       now += 120000;
@@ -188,12 +196,12 @@ test("accepted work cannot archive with open obligations even after reminder exp
     f.advance();
     await f.wakes.tick();
     assert.equal(f.wakes.list()[0].state, "expired");
-    await f.autonomy.tick(f.api);
+    await f.tick();
     assert.equal(f.counts().archives, 0);
     const evidence = join(f.home, "close.txt");
     await writeFile(evidence, "verified");
     await ledger.action({ key: "open", ownerId: "worker", revision: 1, action: "fulfill", evidence }, f.api);
-    await f.autonomy.tick(f.api);
+    await f.tick();
     assert.equal(f.counts().archives, 1);
   } finally {
     f.store.close();
@@ -226,6 +234,9 @@ test("obligation handoff moves managed continuation and budget atomically withou
       f.api,
     );
     assert.equal(f.autonomy.get("worker")?.phase, "paused");
+    assert.equal(f.autonomy.get("worker")?.pausedBy, "handoff");
+    f.autonomy.started("worker", "after-handoff");
+    assert.equal(f.autonomy.get("worker")?.phase, "paused", "a handoff pause is not resumed by a new turn");
     assert.equal(f.autonomy.get("owner")?.obligationKey, "move");
     assert.equal(f.autonomy.get("owner")?.maxContinuations, 3);
     await f.autonomy.tick(f.api);
@@ -317,11 +328,11 @@ test("only accepted idle work with no outstanding dependents is archived", async
     f.end("t1");
     f.store.updateMember("worker", { decision: "accepted", decisionEvidence: "acceptance.json" });
     f.status("running");
-    await f.autonomy.tick(f.api);
+    await f.tick();
     assert.equal(f.counts().archives, 0);
     f.status("idle");
-    await f.autonomy.tick(f.api);
-    await f.autonomy.tick(f.api);
+    await f.tick();
+    await f.tick();
     assert.equal(f.counts().archives, 1);
   } finally {
     f.store.close();
@@ -364,18 +375,18 @@ test("pause during native readback prevents send and native children prevent cas
     f.onRefresh(() => {
       f.autonomy.checkpoint("worker", "paused", "Operator paused");
     });
-    await f.autonomy.tick(f.api);
+    await f.tick();
     assert.equal(f.counts().sends, 0);
     f.onRefresh(() => {});
     f.store.updateMember("worker", { decision: "accepted", decisionEvidence: "acceptance.json" });
-    await f.autonomy.tick(f.api);
+    await f.tick();
     assert.equal(f.counts().archives, 0, "paused work remains open even after acceptance");
     f.autonomy.checkpoint("worker", "review", "Ready");
     f.children([{ agent: { id: "unmanaged-native-child", status: "idle" } }]);
-    await f.autonomy.tick(f.api);
+    await f.tick();
     assert.equal(f.counts().archives, 0, "all native children must be archived separately");
     f.children([]);
-    await f.autonomy.tick(f.api);
+    await f.tick();
     assert.equal(f.counts().archives, 1);
   } finally {
     f.store.close();
@@ -401,6 +412,37 @@ test("continuation exhaustion requests review and preserves an explicit blocker"
     f.autonomy.checkpoint("worker", "blocked", "Need external credentials");
     f.end("t3");
     assert.equal(f.autonomy.get("worker")?.reason, "Need external credentials");
+  } finally {
+    f.store.close();
+  }
+});
+
+test("handing off an obligation keeps a Human's cancellation hold on the old owner", async () => {
+  const f = await fixture();
+  try {
+    const ledger = new Obligations(f.store, () => 100000);
+    await ledger.add(
+      {
+        key: "held",
+        roomId: "room",
+        ownerId: "worker",
+        assignment: "brief",
+        authority: "test",
+        nextAction: "finish",
+        closeWhen: "verified",
+      },
+      f.api,
+    );
+    f.autonomy.start("worker", { obligationKey: "held" });
+    f.autonomy.started("worker", "t1");
+    f.end("t1", "canceled");
+    const evidence = join(f.home, "handoff-held.txt");
+    await writeFile(evidence, "successor owns remaining work");
+    await ledger.action(
+      { key: "held", ownerId: "worker", revision: 1, action: "handoff", nextOwnerId: "owner", evidence },
+      f.api,
+    );
+    assert.equal(f.autonomy.get("worker")?.pausedBy, "cancel");
   } finally {
     f.store.close();
   }

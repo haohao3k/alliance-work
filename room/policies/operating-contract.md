@@ -162,8 +162,14 @@ inspect native history and side effects before recording a checkpoint; do not bl
 Use the exact Alliance CLI command given in your room instructions, including --home. Do not
 assume a global launcher addresses this instance. On wake, read durable results and advance the
 assignment; avoid acknowledgement-only turns. Review and accept another agent's result with
-candidate-bound evidence. Accepted managed agents are archived once idle with no outstanding
-children, open obligations, jobs or wakeups; set --auto-archive false at start if this assignment must stay open.
+candidate-bound evidence. Only its responsible owner chain or the Human may accept or reject;
+never accept your own work. Accepting is the closing decision: an accepted agent is archived once
+idle with no outstanding children, open obligations, jobs or wakeups. For a Peer or Lens the
+owner's technical acceptance is enough. A Lead, Supervisor or HQ closes only on product
+acceptance (`accept --product`, runtime evidence of the Human's outcome) by its owner, or on the
+Human's own decision. Decide after the agent hands back, not while it runs; a later turn reopens
+the decision. To keep an accepted agent open, run `alliance-work members keep --agent ID`. A
+completed handback nobody decides on for 48 hours wakes its owner once; decide, do not ignore it.
 The scheduler does not infer acceptance from prose or bypass permission requests. Native send
 uses steer but Paseo has no atomic idle-only delivery; concurrent human sends can still race.
 

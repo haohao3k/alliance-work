@@ -176,6 +176,7 @@ try {
     decision: "accepted",
     candidate: proof.report.candidate.digest,
     evidence: proof.path,
+    actorId: null, // the test driver decides as the Human
   });
   await new Promise((r) => setTimeout(r, 35000));
   assert.ok(

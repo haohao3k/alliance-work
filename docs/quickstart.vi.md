@@ -69,6 +69,8 @@ alliance-work auth status
 alliance-work doctor
 alliance-work update --check
 alliance-work update
+alliance-work deploy --host ryzen --host i5 --host iznogouds-mac-mini --remember  # từ máy có gh
+alliance-work deploy --wait-idle 240 --detach   # lần sau: dùng lại danh sách máy đã lưu
 ```
 
 Xem [cài đặt và auth](../README.md) và [vận hành](operations.md). Cập nhật chờ agent và workspace
@@ -203,7 +205,14 @@ Scheduler tự wake agent idle, retry lượt lỗi có backoff và giới hạn
 Hủy một lượt sẽ pause; permission đang chờ duyệt vẫn cần người có thẩm quyền xử lý.
 
 Archive chỉ diễn ra sau `accept` có bằng chứng gắn với candidate, khi agent idle và không còn
-child, trách nhiệm, job hay wakeup chưa xử lý. Muốn giữ chat sau nghiệm thu, dùng
+child, trách nhiệm, job hay wakeup chưa xử lý. Từ 0.1.16 quy tắc này áp dụng cho mọi agent
+Alliance, kể cả chat cũ. Chỉ owner (hoặc owner cấp trên) và Human được accept; agent không tự
+accept chính mình. Peer/Lens đóng khi owner accept kỹ thuật. Lead/Supervisor/HQ chỉ đóng khi
+owner accept kèm `--product` (bằng chứng runtime đúng yêu cầu của Human) hoặc Human tự quyết.
+Quyết định gắn với lượt đã review: không accept được khi agent đang chạy, lượt mới sẽ mở lại
+quyết định. Lượt bị hủy thì pause; gửi lượt mới cho agent đó là tự chạy lại. Bàn giao xong mà
+48 giờ không ai quyết định thì owner được nhắc một lần (tối đa 4 lời nhắc mỗi 10 phút). Muốn giữ
+chat sau nghiệm thu: `alliance-work members keep --agent ID` (bỏ giữ: thêm `--off`), hoặc
 `--auto-archive false` khi start. Không reset budget mỗi lượt. `status` hiển thị state/counter;
 `uncertain` cần kiểm tra native history trước khi checkpoint lại, tránh thực hiện trùng side effect.
 Chi tiết giới hạn và bài test agent thật ở [operations](operations.md#autonomous-assignments-0112).

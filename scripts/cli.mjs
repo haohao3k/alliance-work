@@ -1,6 +1,8 @@
 #!/usr/bin/env node
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { rmSync } from "node:fs";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
@@ -10,17 +12,26 @@ import { runFeatureVerification } from "../server/feature-verification.mjs";
 import { projectSkills, registerSkill } from "../server/project-skills.mjs";
 import { setAgyAuthSource } from "./agy-auth.mjs";
 import { authStatus, setAuthSource } from "./auth.mjs";
+import { BUSY_EXIT, bundleRelease, deploy, harnessPath, waitForIdle } from "./deploy.mjs";
 import { downloadRelease, isNewerRelease, releaseInfo, run } from "./distribution.mjs";
-import { activate, doctor, installation, withMaintenance } from "./maintenance.mjs";
-import { instanceState, requireIdle } from "./paseo.mjs";
+import { activate, doctor, installation, onInterrupt, withMaintenance } from "./maintenance.mjs";
 import { projectRoot } from "./profiles.mjs";
 import { enableMobbin, userMcpSettings } from "./user-mcp.mjs";
 
 const args = process.argv.slice(2);
+/** The deciding agent is the caller's Paseo identity. Outside any agent session it is the Human. */
+function caller() {
+  const id = process.env.PASEO_AGENT_ID || null;
+  if (!id && (process.env.ALLIANCE_ROLE || process.env.ALLIANCE_BOUND_ROOM))
+    throw new Error(
+      "Inside an Alliance agent without PASEO_AGENT_ID; the deciding agent is unknown. Nothing recorded.",
+    );
+  return id;
+}
 const flags = {};
 const positional = [];
 let checkCommand = [];
-const repeated = { "--input": [], "--artifact": [], "--unverified": [], "--feature": [] };
+const repeated = { "--input": [], "--artifact": [], "--unverified": [], "--feature": [], "--host": [] };
 const values = new Set([
   "--phase",
   "--max-retries",
@@ -65,6 +76,9 @@ const values = new Set([
   "--timeout-ms",
   "--map",
   "--suite",
+  "--bundle",
+  "--wait-idle",
+  "--remote-home",
 ]);
 const switches = new Set([
   "--help",
@@ -73,6 +87,9 @@ const switches = new Set([
   "-v",
   "--check",
   "--refresh",
+  "--detach",
+  "--remember",
+  "--off",
   "--separate",
   "--separate-auth",
   "--json",
@@ -96,6 +113,7 @@ const help = `Alliance Work — isolated agent rooms on native Paseo
   alliance-work doctor                Verify homes, capabilities, pinned source and live plugin
   alliance-work status                Read agents, owners, decisions and tracked processes
   alliance-work members owner --agent ID --owner ID|Human --revision N --evidence HANDOFF_FILE
+  alliance-work members keep --agent ID [--off]   Keep an agent open; acceptance will not archive it
   alliance-work policy read --agent ID
   alliance-work policy ack --agent ID --digest SHA256
   alliance-work obligations list [--owner ID|Human]
@@ -116,6 +134,10 @@ const help = `Alliance Work — isolated agent rooms on native Paseo
   alliance-work wakeups owner --key KEY --owner OLD --next-owner NEW --revision N
   alliance-work update --check        Read latest private GitHub release; change nothing
   alliance-work update                Verify, stage, check and activate the latest release
+  alliance-work update --wait-idle 120  Stage now; activate once no agent runs (max 120 minutes)
+  alliance-work update --bundle DIR   Activate a release copied here by deploy; no GitHub access
+  alliance-work deploy --host H [--host H2] [--wait-idle MIN] [--detach] [--remember]
+                                      Push the latest release over SSH and update each host
   alliance-work rollback              Activate the previous installation when idle
   alliance-work skills list [--project PATH]
   alliance-work skills add .agents/skills/NAME [--project PATH]
@@ -124,6 +146,8 @@ const help = `Alliance Work — isolated agent rooms on native Paseo
   alliance-work eval --suite .alliance/evals/failure.json [--project PATH]
   alliance-work eval inspect --report /absolute/eval.json [--project PATH]
   alliance-work accept --agent ID --report /absolute/report.json [--product /absolute/journey.json]
+      Only the responsible owner chain or the Human may accept. An accepted idle Peer/Lens with no
+      open work is archived; HQ/Supervisor/Lead need --product from an owner, or the Human.
 
 Verification options: --kind test|runtime|analysis (default test), --target LABEL,
   --input FILE (repeat for ignored runtime inputs), --artifact FILE (repeat),
@@ -134,7 +158,8 @@ or artifacts cannot reuse an old report. Project skills apply to new sessions.
 
 Options: --home PATH, --paseo-home PATH, --bin-dir PATH, --port 6771,
          --codex-auth-from PATH, --separate-auth, --json
-Requires Node 24+ and native Codex/Claude. Pi is bundled; updates use authenticated gh.
+Requires Node 24+ and native Codex/Claude. Pi is bundled; update and deploy read releases with
+authenticated gh; deploy targets need only SSH and an existing installation.
 Paseo is pinned per release. Maintenance never restarts a running daemon.
 `;
 try {
@@ -282,17 +307,21 @@ try {
         input = {
           agentId,
           obligationKey: flags["--obligation"],
-          maxRetries: Number(flags["--max-retries"] ?? 2),
-          maxContinuations: Number(flags["--max-continuations"] ?? 20),
-          autoArchive: flags["--auto-archive"] !== "false",
+          ...(flags["--max-retries"] ? { maxRetries: Number(flags["--max-retries"]) } : {}),
+          ...(flags["--max-continuations"] ? { maxContinuations: Number(flags["--max-continuations"]) } : {}),
+          ...(flags["--auto-archive"] ? { autoArchive: flags["--auto-archive"] === "true" } : {}),
         };
       } else if (action === "checkpoint" && agentId && flags["--phase"] && flags["--reason"]) {
         method = "autonomy.checkpoint";
         input = { agentId, phase: flags["--phase"], reason: flags["--reason"], turnId: flags["--turn"] };
       } else throw new Error("Usage: autonomy start|checkpoint|list (see --help)");
     }
-    if (command === "members") {
-      if (positional[1] !== "owner") throw new Error("Usage: members owner");
+    if (command === "members" && positional[1] === "keep") {
+      if (!flags["--agent"]) throw new Error("Usage: members keep --agent ID [--off]");
+      method = "members.keep";
+      input = { agentId: flags["--agent"], keep: !flags["--off"], actorId: caller() };
+    } else if (command === "members") {
+      if (positional[1] !== "owner") throw new Error("Usage: members owner|keep");
       for (const flag of ["--agent", "--owner", "--revision", "--evidence"])
         if (flags[flag] === undefined) throw new Error(`Missing ${flag}`);
       method = "members.owner";
@@ -392,6 +421,7 @@ try {
   } else if (command === "accept") {
     if (!flags["--agent"] || !flags["--report"])
       throw new Error("Usage: alliance-work accept --agent ID --report /absolute/report.json");
+    const actorId = caller();
     const reportPath = resolve(flags["--report"]);
     const report = Evidence.parse(JSON.parse(await readFile(reportPath, "utf8")));
     const current = await installation(home);
@@ -411,6 +441,7 @@ try {
           decision: "accepted",
           candidate: report.candidate.digest,
           evidence: reportPath,
+          actorId,
           ...(flags["--product"]
             ? { product: JSON.parse(await readFile(resolve(flags["--product"]), "utf8")) }
             : {}),
@@ -465,7 +496,11 @@ try {
       { stdio: "inherit" },
     );
   } else if (command === "update") {
-    const release = releaseInfo(flags["--version-tag"]);
+    const waitMs = flags["--wait-idle"] === undefined ? 0 : Number(flags["--wait-idle"]) * 60000;
+    if (!Number.isFinite(waitMs) || waitMs < 0) throw new Error("--wait-idle takes minutes (0 or more).");
+    const release = flags["--bundle"]
+      ? await bundleRelease(resolve(flags["--bundle"]))
+      : releaseInfo(flags["--version-tag"]);
     const current = await installation(home);
     if (!release) {
       output("No stable GitHub release is published in haohao3k/alliance-work. Installation unchanged.");
@@ -482,21 +517,89 @@ try {
       output(
         `Installed v${current.version}; no newer release. Use setup --refresh to refresh managed profiles.`,
       );
-    else
+    else {
+      if (waitMs && (process.env.PASEO_AGENT_ID || process.env.ALLIANCE_ROLE))
+        throw new Error(
+          "An agent waiting for idleness would wait for itself. Run this from a terminal, or use deploy --detach.",
+        );
       output(
         await withMaintenance(home, async () => {
-          const state = await instanceState(current.paseoHome);
-          if (state?.localDaemon === "running") requireIdle(current.paseoHome);
+          // SSH and service shells may lack nvm; the installed profiles name the harnesses in use.
+          process.env.PATH = await harnessPath(home);
+          const deadline = Date.now() + waitMs;
+          const idle = () =>
+            waitForIdle(current.paseoHome, Math.max(0, deadline - Date.now()), {
+              report: (line) => console.error(`[alliance-work] ${line}`),
+              // A remote shell must not become the environment of a freshly started daemon.
+              refuseStopped: !!flags["--bundle"],
+            });
+          // Without a wait, refuse busy runtimes before any download. With one, stage first.
+          if (!waitMs) await idle();
           const root = await downloadRelease(home, release);
-          // Execute the candidate's installer so migrations match the candidate version.
-          run(
-            process.execPath,
-            [join(root, "scripts/cli.mjs"), "install", "--home", home, "--paseo-home", current.paseoHome],
-            { stdio: "inherit", env: { ...process.env, ALLIANCE_PARENT_MAINTENANCE: String(process.pid) } },
-          );
+          const removeStaged = () => rmSync(root, { recursive: true, force: true });
+          onInterrupt.add(removeStaged);
+          let activated = false,
+            keep = false;
+          try {
+            for (;;) {
+              await idle();
+              // From here the candidate may point the daemon at this root; never delete it then.
+              onInterrupt.delete(removeStaged);
+              // Execute the candidate's installer so migrations match the candidate version.
+              const child = spawnSync(
+                process.execPath,
+                [join(root, "scripts/cli.mjs"), "install", "--home", home, "--paseo-home", current.paseoHome],
+                {
+                  stdio: "inherit",
+                  env: { ...process.env, ALLIANCE_PARENT_MAINTENANCE: String(process.pid) },
+                },
+              );
+              if (child.status === 0) {
+                activated = true;
+                break;
+              }
+              if (child.status === BUSY_EXIT) {
+                // Busy at activation, managed files restored: wait again while time remains.
+                onInterrupt.add(removeStaged);
+                if (Date.now() < deadline) continue;
+                throw new Error(
+                  "Update blocked at activation; wait deadline reached. Installation unchanged.",
+                );
+              }
+              keep = true;
+              throw new Error(
+                `Candidate activation failed (${child.signal ? `interrupted by ${child.signal}` : `exit ${child.status}`}). Staged release kept at ${root}. Run alliance-work doctor; use rollback if it reports a mismatch.`,
+              );
+            }
+          } finally {
+            onInterrupt.delete(removeStaged);
+            // A staged copy that never became active and was never switched to is removed.
+            if (!activated && !keep) await rm(root, { recursive: true, force: true });
+          }
           return { updated: release.tagName, root };
         }),
       );
+    }
+  } else if (command === "deploy") {
+    const fleetPath = join(home, "fleet.json");
+    let hosts = repeated["--host"];
+    if (!hosts.length)
+      hosts = await readFile(fleetPath, "utf8")
+        .then((text) => JSON.parse(text).hosts ?? [])
+        .catch(() => []);
+    const result = await deploy({
+      hosts,
+      tag: flags["--version-tag"],
+      waitIdle: flags["--wait-idle"] === undefined ? 0 : Number(flags["--wait-idle"]),
+      detach: !!flags["--detach"],
+      remoteHome: flags["--remote-home"],
+    });
+    if (flags["--remember"] && repeated["--host"].length)
+      await writeFile(fleetPath, JSON.stringify({ hosts: repeated["--host"] }, null, 2) + "\n", {
+        mode: 0o600,
+      });
+    output(result);
+    if (result.results.some((r) => !r.ok && !r.detached)) process.exitCode = 1;
   } else if (command === "rollback") {
     const current = await installation(home);
     if (!current?.previous) throw new Error("No previous installation is recorded.");
@@ -508,5 +611,8 @@ try {
   } else throw new Error(`Unknown command ${command}. Run alliance-work --help.`);
 } catch (error) {
   console.error(error.message);
-  process.exitCode = 1;
+  // A refusal because agents were busy, after a verified restore, can be retried by a waiting
+  // parent update; any other failure, or an unverified recovery, is final.
+  const busy = /^Update blocked/.test(error.message) && !/could not|unverified/i.test(error.message);
+  process.exitCode = busy ? BUSY_EXIT : 1;
 }

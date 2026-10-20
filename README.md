@@ -64,6 +64,7 @@ alliance-work setup                 # installed profile/runtime status
 alliance-work setup --refresh       # regenerate managed assets and hot reload when idle
 alliance-work update --check        # inspect latest GitHub release without changing files
 alliance-work update                # stage, verify and activate a release
+alliance-work deploy --host ryzen --host i5 --remember   # push the release over SSH to other machines
 alliance-work rollback              # reactivate the previous recorded installation
 alliance-work doctor
 ```
@@ -201,6 +202,9 @@ failed turns with bounded backoff, wake their owner for review and archive after
 acceptance. Existing chats opt in with `alliance-work autonomy start --agent ID`; inspect with
 `alliance-work autonomy list`, pause with `autonomy checkpoint --agent ID --phase paused --reason TEXT`.
 See [autonomous assignment operation and real-model acceptance](docs/operations.md#autonomous-assignments-0111).
+From 0.1.16 acceptance is the closing decision for every Alliance agent: only the owner chain or
+the Human may accept, Leads/Supervisors/HQ need product acceptance, and `status` explains what
+holds each agent open. See [closing work by decision](docs/operations.md#closing-work-by-decision-0116).
 
 With `agy` installed, setup adds isolated AGY HQ, Supervisor, Lead, Peer and Lens
 profiles. Use a dedicated Alliance login shared only within that role set. See

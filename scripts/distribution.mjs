@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 
 export const repository = "haohao3k/alliance-work";
@@ -65,19 +65,24 @@ export async function downloadRelease(home, release) {
   await mkdir(stage, { recursive: true, mode: 0o700 });
   const name = `alliance-work-${release.tagName}.tar.gz`;
   try {
-    run("gh", [
-      "release",
-      "download",
-      release.tagName,
-      "--repo",
-      repository,
-      "--dir",
-      stage,
-      "--pattern",
-      name,
-      "--pattern",
-      "checksums.txt",
-    ]);
+    // A bundle was copied from the same GitHub release by `deploy`; it is verified identically.
+    if (release.bundle)
+      for (const file of [name, "checksums.txt"])
+        await copyFile(join(release.bundle, file), join(stage, file));
+    else
+      run("gh", [
+        "release",
+        "download",
+        release.tagName,
+        "--repo",
+        repository,
+        "--dir",
+        stage,
+        "--pattern",
+        name,
+        "--pattern",
+        "checksums.txt",
+      ]);
     const hash = verifyChecksum(
       await readFile(join(stage, name)),
       await readFile(join(stage, "checksums.txt"), "utf8"),

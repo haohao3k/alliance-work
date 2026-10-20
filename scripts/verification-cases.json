@@ -162,5 +162,33 @@
   "models.economical-defaults": {
     "file": "tests/model-policy.test.ts",
     "pattern": "omitted models keep coordination and implementation economical"
+  },
+  "lifecycle.authority": {
+    "file": "tests/lifecycle.test.ts",
+    "pattern": "only the responsible owner chain"
+  },
+  "lifecycle.scope": {
+    "file": "tests/lifecycle.test.ts",
+    "pattern": "an accepted peer is archived"
+  },
+  "lifecycle.legacy": {
+    "file": "tests/lifecycle.test.ts",
+    "pattern": "legacy acceptances without autonomy records"
+  },
+  "lifecycle.pause": {
+    "file": "tests/lifecycle.test.ts",
+    "pattern": "a resumed turn lifts a cancellation pause"
+  },
+  "lifecycle.stale": {
+    "file": "tests/lifecycle.test.ts",
+    "pattern": "a completed handback left undecided"
+  },
+  "lifecycle.retention": {
+    "file": "tests/wakeups.test.ts",
+    "pattern": "finished wakeups leave after retention"
+  },
+  "lifecycle.deploy": {
+    "file": "tests/deploy.test.ts",
+    "pattern": "the remote half hands the bundle"
   }
 }

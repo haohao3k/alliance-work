@@ -4,8 +4,9 @@ import { once } from "node:events";
 import { test } from "node:test";
 import type { PaseoApi } from "@getpaseo/client";
 import { processIdentity } from "../server/jobs.mjs";
+import { Obligations } from "../server/obligations";
 import { RoomStore } from "../server/store";
-import { Wakeups } from "../server/wakeups";
+import { WAKE_RETENTION_MS, Wakeups } from "../server/wakeups";
 import { temporary } from "./temp";
 
 async function fixture() {
@@ -339,6 +340,73 @@ test("cross-room handback targets the explicit owner and is held after ownership
     assert.equal((await f.wake.take("hq")).length, 0);
     assert.equal(f.wake.list()[0].key, w.key);
     assert.throws(() => f.add("unrelated", { ownerId: "hq" }), /owner/i);
+  } finally {
+    f.store.close();
+  }
+});
+
+test("finished wakeups leave after retention, keeping a current undecided turn reminder and freeing the cap", async () => {
+  const f = await fixture();
+  try {
+    f.store.updateMember("peer", { lastOutcome: "completed", resultPath: "result.json" });
+    f.add("done-time");
+    f.add("review-turn", { trigger: { kind: "turn", agentId: "peer", turnId: "turn-1" } });
+    for (const key of ["done-time", "review-turn"]) {
+      await f.wake.take("owner");
+      const w = f.wake.list().find((v) => v.key === key);
+      assert.ok(w);
+      await f.wake.action(key, "owner", w.revision, "ack");
+    }
+    await f.wake.tick();
+    assert.equal(f.wake.list().length, 2, "recent finished records stay for audit");
+    f.advance(WAKE_RETENTION_MS + 1);
+    await f.wake.tick();
+    assert.deepEqual(
+      f.wake.list().map((w) => w.key),
+      ["review-turn"],
+      "the reminder for the still-undecided turn keeps its key so it is not sent again",
+    );
+    f.store.updateMember("peer", { decision: "accepted" });
+    await f.wake.tick();
+    assert.equal(f.wake.list().length, 1, "an accepted turn keeps its reminder key while it is current");
+    f.store.updateMember("peer", { lastTurnId: "turn-2" });
+    await f.wake.tick();
+    assert.equal(f.wake.list().length, 0);
+    for (let n = 0; n < 1000; n++) {
+      f.add(`bulk-${n}`, { trigger: { kind: "time", at: 2_000_000_000 } });
+    }
+    assert.throws(
+      () => f.add("one-too-many", { trigger: { kind: "time", at: 2_000_000_000 } }),
+      /Active wakeup limit/,
+    );
+  } finally {
+    f.store.close();
+  }
+});
+
+test("finished reminders linked to an open obligation are kept for its handoff", async () => {
+  const f = await fixture();
+  try {
+    const ledger = new Obligations(f.store, () => 1000000);
+    await ledger.add(
+      {
+        key: "duty",
+        roomId: "r",
+        ownerId: "owner",
+        assignment: "brief",
+        authority: "test",
+        nextAction: "finish",
+        closeWhen: "verified",
+      },
+      f.api,
+    );
+    f.add("duty-reminder", { obligationKey: "duty" });
+    await f.wake.take("owner");
+    const w = f.wake.list()[0];
+    await f.wake.action(w.key, "owner", w.revision, "ack");
+    f.advance(WAKE_RETENTION_MS + 1);
+    await f.wake.tick();
+    assert.equal(f.wake.list().length, 1);
   } finally {
     f.store.close();
   }

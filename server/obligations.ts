@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { lstat, readFile } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
 import type { PaseoApi } from "@getpaseo/client";
+import { pauseKind } from "../shared/autonomy";
 import { blockedOn, type Obligation, ObligationAction, ObligationInput } from "../shared/obligations";
 import type { RoomStore } from "./store";
 
@@ -145,6 +146,10 @@ export class Obligations {
             ...managed,
             revision: managed.revision + 1,
             phase: "paused",
+            // A Human's cancellation hold on the old owner survives the handoff.
+            ...(pauseKind(managed) === "cancel"
+              ? { pausedBy: "cancel" as const, pausedAt: managed.pausedAt ?? managed.updatedAt }
+              : { pausedBy: "handoff" as const, pausedAt: now }),
             reason: `Obligation handed to ${next.ownerId ?? "Human"}`,
             updatedAt: now,
           },
@@ -158,6 +163,8 @@ export class Obligations {
             agentId: next.ownerId,
             revision: 1,
             phase: managed.phase === "paused" ? "paused" : "active",
+            pausedBy: managed.phase === "paused" ? "handoff" : undefined,
+            pausedAt: managed.phase === "paused" ? now : undefined,
             reason: `Continue obligation ${old.key} under recorded handoff; ${next.nextAction}`,
             turnId: successor.lastTurnId ?? null,
             outcome: successor.lastOutcome ?? "completed",

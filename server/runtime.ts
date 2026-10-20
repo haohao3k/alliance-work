@@ -21,6 +21,8 @@ import { policyInstruction, type TaskDifficulty } from "../shared/model-policy";
 import { ownerState, responsibleOwner } from "../shared/operations";
 import { Autonomy } from "./autonomy";
 import { observeJob, processIdentity } from "./jobs.mjs";
+import { authorizeDecision, Lifecycle, type LiveState } from "./lifecycle";
+import { lockState } from "./maintenance-lock.mjs";
 import { chooseModel } from "./model-policy";
 import { Obligations } from "./obligations";
 import { verifyProfile } from "./profile-integrity.mjs";
@@ -84,6 +86,7 @@ export class AllianceRuntime {
   wakeups!: Wakeups;
   obligations!: Obligations;
   autonomy!: Autonomy;
+  lifecycle!: Lifecycle;
   wakeupHealth: { checkedAt: string | null; error: string | null } = { checkedAt: null, error: null };
   private wakeTimer?: ReturnType<typeof setTimeout>;
   private wakeClient?: PaseoClient;
@@ -102,6 +105,7 @@ export class AllianceRuntime {
     this.wakeups = new Wakeups(this.store);
     this.obligations = new Obligations(this.store);
     this.autonomy = new Autonomy(this.store, this.wakeups);
+    this.lifecycle = new Lifecycle(this.store, this.wakeups, this.autonomy);
     return this;
   }
   startWakeups() {
@@ -110,9 +114,19 @@ export class AllianceRuntime {
       try {
         await this.wakeups.tick();
         this.wakeupHealth = { checkedAt: new Date().toISOString(), error: null };
+        // An update waiting for idleness holds this lock; starting turns would starve it. A lock
+        // left by a dead or pre-reboot process is ignored so the scheduler cannot stall forever.
+        const lock = await lockState(this.home).catch(() => ({ held: false, stale: false }));
+        const maintenance = lock.held;
+        if (maintenance)
+          this.wakeupHealth.error = "Maintenance lock held; scheduled prompts paused until it clears";
+        else if (lock.stale)
+          this.wakeupHealth.error = "Stale maintenance lock ignored; the next maintenance command removes it";
         if (
-          this.autonomy.list().some((r) => r.phase !== "archived") ||
-          this.wakeups.list().some((w) => w.state === "pending" && w.delivery === "idle")
+          !maintenance &&
+          (this.autonomy.list().some((r) => r.phase !== "archived") ||
+            this.wakeups.list().some((w) => w.state === "pending" && w.delivery === "idle") ||
+            this.lifecycle.pending())
         ) {
           if (!this.wakeClient) {
             const installed = JSON.parse(await readFile(join(this.home, "installation.json"), "utf8"));
@@ -129,6 +143,9 @@ export class AllianceRuntime {
           if (!this.closing) {
             await this.autonomy.tick(this.wakeClient).catch(() => {
               this.wakeupHealth.error = "Autonomy sweep incomplete; inspect assignments and native status";
+            });
+            await this.lifecycle.sweep(this.wakeClient).catch(() => {
+              this.wakeupHealth.error = "Lifecycle sweep incomplete; inspect member lifecycle in status";
             });
             await this.wakeups.tick(this.wakeClient);
           }
@@ -540,9 +557,23 @@ export class AllianceRuntime {
         }
       }
     }
+    const live = new Map<string, LiveState>(
+      members.map((m) => [
+        m.id,
+        { status: m.status, archived: m.archived, permissions: m.status === "awaiting_permission" ? 1 : 0 },
+      ]),
+    );
+    const lifecycles = await Promise.all(
+      members.map((member) =>
+        this.lifecycle.describe(member, live.get(member.id) as LiveState, live).catch((error: Error) => ({
+          state: "held" as const,
+          blockers: [`lifecycle unknown: ${error.message}`],
+        })),
+      ),
+    );
     return {
       rooms: this.store.rooms(),
-      members: members.map((member) => ({
+      members: members.map((member, index) => ({
         ...member,
         ...ownerState(responsibleOwner(member), members),
         ownerRevision: member.ownership?.revision ?? 0,
@@ -551,6 +582,9 @@ export class AllianceRuntime {
         policyAcknowledged: member.policyAck?.digest === digests.get(member.provider),
         lastAcceptance: latest.get(member.id) ?? null,
         lastTurnId: member.lastTurnId ?? null,
+        decisionBy: member.decisionBy === undefined ? undefined : (member.decisionBy ?? "Human"),
+        decisionScope: member.decisionScope ?? null,
+        lifecycle: lifecycles[index],
       })),
       autonomy: this.autonomy.list(),
       wakeups: this.wakeups.list(),
@@ -635,12 +669,19 @@ export class AllianceRuntime {
   async startTurn(agent: PluginHookAgent, turnId: string | null) {
     await this.bind(agent);
     this.autonomy.started(agent.id, turnId);
+    // A new turn makes the previous decision stale and reopens an agent Paseo had archived.
     this.store.updateMember(agent.id, {
       lastTurnId: turnId,
       lastOutcome: null,
       resultPath: null,
       decision: "open",
       decisionEvidence: null,
+      decisionBy: undefined,
+      decisionAt: undefined,
+      decisionScope: undefined,
+      decisionTurnId: undefined,
+      staleSince: undefined,
+      archivedAt: undefined,
     });
   }
   async endTurn(
@@ -666,19 +707,47 @@ export class AllianceRuntime {
     );
     const current = this.store.member(agent.id);
     if (!current?.lastTurnId || current.lastTurnId === turnId) {
-      this.store.updateMember(agent.id, { lastOutcome: outcome.kind, resultPath: path });
+      this.store.updateMember(agent.id, {
+        lastOutcome: outcome.kind,
+        resultPath: path,
+        lastTurnEndedAt: Date.now(),
+      });
       this.autonomy.ended(agent.id, turnId, outcome.kind);
     }
+  }
+  /** Keep an agent open regardless of acceptance. Its owner chain, the Human or itself may set it. */
+  keep(id: string, keep: boolean, actorId: string | null) {
+    if (actorId !== id) authorizeDecision(this.store, id, actorId);
+    this.store.updateMember(id, {
+      keep: keep ? { by: actorId ?? "Human", at: new Date().toISOString() } : undefined,
+    });
+    return { saved: true as const };
   }
   async disposition(
     id: string,
     decision: "accepted" | "rejected",
     candidate: string,
     evidence: string,
-    claim?: unknown,
+    claim: unknown,
+    actorId: string | null,
+    paseo?: PaseoApi,
   ) {
     const member = this.store.member(id);
     if (!member) throw new Error("Unknown Alliance member");
+    authorizeDecision(this.store, id, actorId);
+    // A decision covers the turn the owner reviewed. Work still running is not reviewable yet.
+    const turn = member.lastTurnId ?? null;
+    const midTurn = async () => {
+      if (!paseo) return false;
+      let live: Awaited<ReturnType<ReturnType<PaseoApi["agents"]["ref"]>["refresh"]>>;
+      try {
+        live = await paseo.agents.ref(id).refresh();
+      } catch {
+        throw new Error("Agent state unknown; retry the decision");
+      }
+      return live ? ["running", "starting", "initializing"].includes(live.agent.status) : false;
+    };
+    if (await midTurn()) throw new Error("Agent is mid-turn; decide after it hands back");
     const room = this.store.room(member.roomId);
     const report =
       decision === "accepted" ? await validateEvidence(evidence, member.cwd ?? room.cwd, candidate) : null;
@@ -688,29 +757,45 @@ export class AllianceRuntime {
         "Product acceptance requires candidate-bound runtime evidence; test/analysis PASS is technical only",
       );
     const path = join(room.artifacts, "dispositions", `${randomUUID()}.json`);
+    const at = new Date().toISOString();
     await writeAtomic(
       path,
       JSON.stringify(
         {
           agentId: id,
           decision,
+          decidedBy: actorId ?? "Human",
           candidate,
           evidence,
           verification: report,
           product,
-          at: new Date().toISOString(),
+          at,
         },
         null,
         2,
       ) + "\n",
     );
-    this.store.updateMember(id, { decision, decisionEvidence: path });
+    // Authority or the turn may have changed while evidence was validated. Recheck, then write
+    // with no await in between so a turn that starts later clears this decision.
+    if (await midTurn()) throw new Error("Agent started a new turn; review it before deciding");
+    authorizeDecision(this.store, id, actorId);
+    if ((this.store.member(id)?.lastTurnId ?? null) !== turn)
+      throw new Error("Agent started a new turn; review it before deciding");
+    this.store.updateMember(id, {
+      decision,
+      decisionEvidence: path,
+      decisionBy: actorId,
+      decisionAt: at,
+      decisionTurnId: turn,
+      decisionScope: decision === "accepted" ? (product ? "product" : "technical") : undefined,
+    });
     return { saved: true as const };
   }
   async close() {
     this.closing = true;
     clearTimeout(this.wakeTimer);
     await this.autonomy?.stop();
+    await this.lifecycle?.stop();
     await this.wakeups?.stop();
     await this.wakeRound;
     await this.wakeClient?.close();

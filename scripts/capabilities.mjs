@@ -20,6 +20,8 @@ const required = {
   ],
   "responsible-ownership": ["server/runtime.ts", "shared/contracts.ts", "shared/operations.ts"],
   operations: ["server/jobs.mjs", "shared/operations.ts"],
+  "decision-lifecycle": ["server/lifecycle.ts", "shared/autonomy.ts"],
+  "fleet-deploy": ["scripts/deploy.mjs", "scripts/distribution.mjs"],
 };
 const roots = [
   "package.json",

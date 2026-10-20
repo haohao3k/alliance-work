@@ -279,7 +279,14 @@ test("canceled/failed/completed turns preserve ownership and never accept their 
       command: [process.execPath, "-e", "process.exit(0)"],
       scenario: "disposition-persistence",
     });
-    await reopened.disposition(agentId, "accepted", proof.report.candidate.digest, proof.path);
+    await reopened.disposition(
+      agentId,
+      "accepted",
+      proof.report.candidate.digest,
+      proof.path,
+      undefined,
+      null,
+    );
     assert.equal(member(reopened, agentId).decision, "accepted");
     const disposition = member(reopened, agentId).decisionEvidence;
     assert(disposition);
@@ -434,7 +441,9 @@ test("acceptance refuses invented candidate and evidence identities", async () =
       { roomId: f.room.id, key: "proof", role: "peer", harness: "codex", prompt: "Verify an outcome" },
       f.paseo,
     );
-    await assert.rejects(f.runtime.disposition(agentId, "accepted", "invented", "not-a-report"));
+    await assert.rejects(
+      f.runtime.disposition(agentId, "accepted", "invented", "not-a-report", undefined, null),
+    );
   } finally {
     f.runtime.close();
   }
@@ -612,7 +621,7 @@ test("product acceptance needs runtime proof and retains the observed journey se
       remaining: ["External integration untested"],
     };
     await assert.rejects(
-      f.runtime.disposition(agentId, "accepted", proof.report.candidate.digest, proof.path, product),
+      f.runtime.disposition(agentId, "accepted", proof.report.candidate.digest, proof.path, product, null),
       /runtime/,
     );
     const runtimeProof = await runVerification({
@@ -628,6 +637,7 @@ test("product acceptance needs runtime proof and retains the observed journey se
       runtimeProof.report.candidate.digest,
       runtimeProof.path,
       product,
+      null,
     );
     const decisionEvidence = member(f.runtime, agentId).decisionEvidence;
     assert(decisionEvidence);
@@ -673,5 +683,60 @@ test("launched work keeps an active autonomous assignment after a completed turn
     assert.equal(member(f.runtime, agentId).decision, "open");
   } finally {
     await f.runtime.close();
+  }
+});
+
+test("a decision covers the turn it reviewed: running work and turns started during validation are refused", async () => {
+  const f = await fixture();
+  try {
+    const { agentId } = await f.runtime.launch(
+      { roomId: f.room.id, key: "turn-bound", role: "peer", harness: "codex", prompt: "Deliver" },
+      f.paseo,
+    );
+    execFileSync("git", ["init", "-q", f.cwd]);
+    const proof = await runVerification({
+      cwd: f.cwd,
+      output: join(f.root, "turn-bound"),
+      command: [process.execPath, "-e", "process.exit(0)"],
+      scenario: "check",
+      kind: "test",
+    });
+    const decide = (actor: string | null, paseo = f.paseo) =>
+      f.runtime.disposition(
+        agentId,
+        "accepted",
+        proof.report.candidate.digest,
+        proof.path,
+        undefined,
+        actor,
+        paseo,
+      );
+    await assert.rejects(decide(agentId), /own work/);
+    f.status("running");
+    await assert.rejects(decide(null), /mid-turn/);
+    f.status("idle");
+    let reads = 0;
+    const racing = {
+      ...f.paseo,
+      agents: {
+        ref: () => ({
+          refresh: async () => {
+            // The second readback happens after evidence validation: a turn starts in between.
+            if (++reads === 2)
+              await f.runtime.startTurn(
+                { id: agentId, provider: "alliance-codex-peer", cwd: f.cwd, parentAgentId: null } as never,
+                "turn-2",
+              );
+            return { agent: { status: "idle", archivedAt: null, pendingPermissions: [] } };
+          },
+        }),
+      },
+    } as unknown as PaseoApi;
+    await assert.rejects(decide(null, racing), /new turn/);
+    assert.equal(f.runtime.store.member(agentId)?.decision, "open");
+    await decide(null);
+    assert.equal(f.runtime.store.member(agentId)?.decisionTurnId, "turn-2");
+  } finally {
+    f.runtime.close();
   }
 });

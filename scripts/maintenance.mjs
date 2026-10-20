@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
+import { constants, rmSync } from "node:fs";
 import { access, chmod, lstat, mkdir, readFile, rm, rmdir, unlink } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { bootTime, LOCK, takeLock } from "../server/maintenance-lock.mjs";
 import { authStatus, setAuthSource } from "./auth.mjs";
 import { inspectCapabilities } from "./capabilities.mjs";
 import { run } from "./distribution.mjs";
@@ -33,30 +34,42 @@ export async function installation(home) {
       throw error;
     });
 }
+/** Cleanups to run if the process is interrupted while it holds the maintenance lock. */
+export const onInterrupt = new Set();
 export async function withMaintenance(home, action) {
   await assertNoLinks(home);
   await mkdir(home, { recursive: true, mode: 0o700 });
-  const path = join(home, ".maintenance-lock");
+  const path = join(home, LOCK);
   if (process.env.ALLIANCE_PARENT_MAINTENANCE === String(process.ppid)) {
     const owner = await readFile(join(path, "owner.json"), "utf8").then(JSON.parse);
     if (owner.pid !== process.ppid) throw new Error("Parent maintenance lock does not match.");
     return action();
   }
-  try {
-    await mkdir(path);
-  } catch (error) {
-    if (error.code !== "EEXIST") throw error;
-    throw new Error(
-      `Another maintenance operation owns ${path}. If it crashed, verify its process has exited before removing this lock.`,
-    );
-  }
+  await takeLock(home);
+  // Interrupting a long wait must not leave the lock or a staged copy behind.
+  const signals = ["SIGINT", "SIGTERM", "SIGHUP"];
+  const onSignal = (signal) => {
+    for (const cleanup of onInterrupt)
+      try {
+        cleanup();
+      } catch {}
+    rmSync(path, { recursive: true, force: true });
+    process.exit(128 + (signal === "SIGINT" ? 2 : signal === "SIGTERM" ? 15 : 1));
+  };
+  for (const signal of signals) process.on(signal, onSignal);
   try {
     await atomicWrite(
       join(path, "owner.json"),
-      JSON.stringify({ pid: process.pid, started: new Date().toISOString() }) + "\n",
+      JSON.stringify({
+        pid: process.pid,
+        host: hostname(),
+        boot: bootTime(),
+        started: new Date().toISOString(),
+      }) + "\n",
     );
     return await action();
   } finally {
+    for (const signal of signals) process.off(signal, onSignal);
     await rm(path, { recursive: true, force: true });
   }
 }

@@ -15,6 +15,10 @@ export const AutonomyRecord = z.object({
   maxRetries: z.number().int(),
   maxContinuations: z.number().int(),
   autoArchive: z.boolean(),
+  // Why continuation stopped. A cancellation or handoff pause is lifted by a later turn or an
+  // explicit acceptance; a checkpoint pause stays until the assignment is started again.
+  pausedBy: z.enum(["cancel", "checkpoint", "handoff"]).optional(),
+  pausedAt: z.number().optional(),
   delivery: z.enum(["none", "dispatching", "sent", "uncertain"]),
   messageId: z.string().nullable(),
   updatedAt: z.number(),
@@ -30,9 +34,11 @@ export const autonomyStart = defineRpc({
   input: z.object({
     agentId: z.string(),
     obligationKey: z.string().min(1).max(160).optional(),
-    maxRetries: z.number().int().min(0).max(5).default(2),
-    maxContinuations: z.number().int().min(1).max(100).default(20),
-    autoArchive: z.boolean().default(true),
+    // Omitted budgets keep the recorded values (2 retries, 20 continuations for a new one).
+    maxRetries: z.number().int().min(0).max(5).optional(),
+    maxContinuations: z.number().int().min(1).max(100).optional(),
+    // Omitted: keep the recorded choice (true for a new assignment).
+    autoArchive: z.boolean().optional(),
   }),
   output: AutonomyRecord,
 });
@@ -46,3 +52,12 @@ export const autonomyCheckpoint = defineRpc({
   }),
   output: AutonomyRecord,
 });
+
+const legacyCancel = "Turn canceled; explicit resume required";
+/** Records written before pausedBy existed carry the cancellation only in their reason. */
+export function pauseKind(r: Pick<AutonomyState, "phase" | "pausedBy" | "reason">) {
+  if (r.phase !== "paused") return null;
+  if (r.pausedBy) return r.pausedBy;
+  if (r.reason === legacyCancel) return "cancel";
+  return r.reason.startsWith("Obligation handed to ") ? "handoff" : "checkpoint";
+}

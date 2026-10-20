@@ -34,6 +34,11 @@ owner. The accepting owner reads the report and relevant artifacts, then records
 
     alliance-work accept --agent CANDIDATE_OWNER_ID --report /absolute/report.json
 
+Only the candidate owner's responsible owner chain or the Human may accept; the CLI records the
+caller's PASEO_AGENT_ID and refuses self-acceptance. Acceptance closes the work: an idle accepted
+Peer/Lens with nothing outstanding is archived. A Lead/Supervisor/HQ needs `--product` with a
+runtime report (or the Human's decision) before it is archived.
+
 Acceptance refuses non-PASS results, wrong checkouts, changed candidates and changed artifacts.
 It does not judge whether a weak check proves a strong claim. Use engineering judgment and
 the existing proof-debt audit when that specific question warrants it. If code or inputs

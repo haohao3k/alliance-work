@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { PaseoApi } from "@getpaseo/client";
+import { pauseKind } from "../shared/autonomy";
 import { blockedOn } from "../shared/obligations";
 import { responsibleOwner } from "../shared/operations";
 import { type WakeRecordValue as Wake, WakeInput } from "../shared/wakeups";
@@ -7,6 +8,9 @@ import { observeJob } from "./jobs.mjs";
 import type { RoomStore } from "./store";
 
 const terminal = new Set(["acknowledged", "canceled", "expired"]);
+/** Finished reminders are kept this long for audit, then removed so the active cap stays usable. */
+export const WAKE_RETENTION_MS = 7 * 86400000;
+const ACTIVE_LIMIT = 1000;
 
 /** Durable notifications. Their expiry/acknowledgement never closes an obligation. */
 export class Wakeups {
@@ -70,7 +74,8 @@ export class Wakeups {
       if (prior.inputHash !== inputHash) throw new Error("Wakeup key already names different work");
       return prior;
     }
-    if (this.list().length >= 1000) throw new Error("Wakeup retention limit reached (1000 records)");
+    if (this.list().filter((w) => !terminal.has(w.state)).length >= ACTIVE_LIMIT)
+      throw new Error(`Active wakeup limit reached (${ACTIVE_LIMIT} unfinished records)`);
     const now = this.now();
     const expiresAt = input.expiresAt ?? now + 30 * 86400000;
     if (expiresAt <= now || (input.trigger.kind === "time" && input.trigger.at >= expiresAt))
@@ -160,7 +165,36 @@ export class Wakeups {
     this.stopped = true;
     await this.running;
   }
+  /**
+   * Remove finished reminders past retention. Kept: a turn reminder for the member's current
+   * turn (its key prevents the same review being sent again) and anything linked to an open
+   * obligation (handoff uses it to move the obligation's jobs and reminders together).
+   */
+  private prune() {
+    const cutoff = this.now() - WAKE_RETENTION_MS;
+    const open = new Set(
+      this.store
+        .obligations()
+        .filter((o) => o.state === "open")
+        .map((o) => o.key),
+    );
+    for (const w of this.list()) {
+      if (!terminal.has(w.state) || w.updatedAt > cutoff) continue;
+      if (w.obligationKey && open.has(w.obligationKey)) continue;
+      if (w.trigger.kind === "turn" && this.store.member(w.trigger.agentId)?.lastTurnId === w.trigger.turnId)
+        continue;
+      this.store.deleteWakeup(w.key, w.revision);
+    }
+  }
+  /** An owner whose turn the Human cancelled is not prompted by the plugin; it waits for pull. */
+  private heldByCancel(ownerId: string) {
+    // Only while the cancelled turn is still the latest; a 0.1.15 record kept the cancel reason
+    // after later turns, and those owners have been working since.
+    const r = this.store.autonomous().find((a) => a.agentId === ownerId);
+    return r ? pauseKind(r) === "cancel" && r.outcome === "canceled" : false;
+  }
   private async round(api?: PaseoApi) {
+    this.prune();
     for (const w of this.list()) {
       if (terminal.has(w.state) || w.state === "uncertain") continue;
       if (w.state === "dispatching") {
@@ -214,6 +248,7 @@ export class Wakeups {
         .map((w) => w.ownerId),
     )) {
       if (
+        this.heldByCancel(owner) ||
         this.list().some(
           (w) => w.ownerId === owner && w.lastSentAt !== null && this.now() - w.lastSentAt < 60000,
         )

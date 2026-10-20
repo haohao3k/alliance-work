@@ -244,6 +244,42 @@
           "expect": "Prerequisites gate retries and continuations; handoff preserves budget; open obligations prevent archive"
         }
       ]
+    },
+    {
+      "id": "lifecycle",
+      "title": "Decision-driven close and fleet deploy",
+      "entryPoint": "accept / status lifecycle / Lifecycle sweep / update --bundle / deploy",
+      "preconditions": "Isolated SQLite, fake native API and local shell fixtures; real-model and fleet runs are separate",
+      "behaviors": [
+        {
+          "id": "lifecycle.authority",
+          "expect": "Only the responsible owner chain or the Human decides; self-acceptance is refused"
+        },
+        {
+          "id": "lifecycle.scope",
+          "expect": "Peers close on technical acceptance; coordinating roles need product acceptance or the Human"
+        },
+        {
+          "id": "lifecycle.legacy",
+          "expect": "Accepted sessions from before autonomy archive by role and recorded scope"
+        },
+        {
+          "id": "lifecycle.pause",
+          "expect": "A resumed turn lifts a cancellation; a checkpoint pause holds after acceptance"
+        },
+        {
+          "id": "lifecycle.stale",
+          "expect": "Undecided completed handbacks wake their owner once after 48h, never the Human, without upgrade bursts"
+        },
+        {
+          "id": "lifecycle.retention",
+          "expect": "Finished wakeups expire after retention while current turn reminders keep their key"
+        },
+        {
+          "id": "lifecycle.deploy",
+          "expect": "Bundles are checksum-verified and handed to the installed launcher with the wait option"
+        }
+      ]
     }
   ],
   "scenarios": [
@@ -654,6 +690,76 @@
         {
           "id": "models.economical-defaults",
           "behavior": "models.economical-defaults"
+        }
+      ]
+    },
+    {
+      "id": "lifecycle.authority",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "lifecycle.authority"],
+      "assertions": [
+        {
+          "id": "lifecycle.authority",
+          "behavior": "lifecycle.authority"
+        }
+      ]
+    },
+    {
+      "id": "lifecycle.scope",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "lifecycle.scope"],
+      "assertions": [
+        {
+          "id": "lifecycle.scope",
+          "behavior": "lifecycle.scope"
+        }
+      ]
+    },
+    {
+      "id": "lifecycle.legacy",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "lifecycle.legacy"],
+      "assertions": [
+        {
+          "id": "lifecycle.legacy",
+          "behavior": "lifecycle.legacy"
+        }
+      ]
+    },
+    {
+      "id": "lifecycle.pause",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "lifecycle.pause"],
+      "assertions": [
+        {
+          "id": "lifecycle.pause",
+          "behavior": "lifecycle.pause"
+        }
+      ]
+    },
+    {
+      "id": "lifecycle.stale",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "lifecycle.stale"],
+      "assertions": [
+        {
+          "id": "lifecycle.stale",
+          "behavior": "lifecycle.stale"
+        }
+      ]
+    },
+    {
+      "id": "lifecycle.retention",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "lifecycle.retention"],
+      "assertions": [
+        {
+          "id": "lifecycle.retention",
+          "behavior": "lifecycle.retention"
+        }
+      ]
+    },
+    {
+      "id": "lifecycle.deploy",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "lifecycle.deploy"],
+      "assertions": [
+        {
+          "id": "lifecycle.deploy",
+          "behavior": "lifecycle.deploy"
         }
       ]
     }

@@ -77,6 +77,13 @@ export const Member = z.object({
   policyDigest: z.string(),
   policyAcknowledged: z.boolean(),
   lastAcceptance: Acceptance.nullable(),
+  // "Human" or the deciding agent ID; absent for decisions recorded before v0.1.16.
+  decisionBy: z.string().optional(),
+  decisionScope: z.enum(["technical", "product"]).nullable(),
+  lifecycle: z.object({
+    state: z.enum(["archived", "archivable", "held", "awaiting-decision", "rejected"]),
+    blockers: z.array(z.string()),
+  }),
 });
 export const roomList = defineRpc({
   name: "rooms.list",
@@ -156,6 +163,8 @@ export const memberDisposition = defineRpc({
     candidate: z.string().min(1),
     evidence: z.string().min(1),
     product: ProductAcceptance.optional(),
+    // null is the Human. Agents pass their PASEO_AGENT_ID; the plugin enforces the owner chain.
+    actorId: z.string().min(1).nullable(),
   }),
   output: z.object({ saved: z.literal(true) }),
 });
@@ -195,6 +204,11 @@ export const memberOwner = defineRpc({
     revision: z.number().int().nonnegative(),
     evidence: z.string().min(1),
   }),
+  output: z.object({ saved: z.literal(true) }),
+});
+export const memberKeep = defineRpc({
+  name: "members.keep",
+  input: z.object({ agentId: z.string(), keep: z.boolean(), actorId: z.string().min(1).nullable() }),
   output: z.object({ saved: z.literal(true) }),
 });
 export const policyRead = defineRpc({

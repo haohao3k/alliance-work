@@ -278,6 +278,7 @@ test("native Paseo switches release roots and restores the previous plugin after
       decision: "accepted",
       candidate: proof.candidate,
       evidence: proof.report,
+      actorId: null,
     };
     assert.deepEqual(
       JSON.parse(

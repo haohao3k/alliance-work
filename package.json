@@ -1,6 +1,6 @@
 {
   "name": "alliance-work",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "private": true,
   "type": "module",
   "description": "Autonomous rooms and isolated agent homes on native Paseo",
@@ -32,6 +32,7 @@
     "@tanstack/react-query": "^5.90.2",
     "@types/node": "^24.0.0",
     "@types/react": "~19.2.0",
+    "mcp-remote": "0.15.1",
     "pi-antigravity": "0.9.0",
     "react": "19.1.0",
     "react-native": "0.81.5",

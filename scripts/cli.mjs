@@ -14,6 +14,7 @@ import { downloadRelease, isNewerRelease, releaseInfo, run } from "./distributio
 import { activate, doctor, installation, withMaintenance } from "./maintenance.mjs";
 import { instanceState, requireIdle } from "./paseo.mjs";
 import { projectRoot } from "./profiles.mjs";
+import { enableMobbin, userMcpSettings } from "./user-mcp.mjs";
 
 const args = process.argv.slice(2);
 const flags = {};
@@ -89,6 +90,9 @@ const help = `Alliance Work — isolated agent rooms on native Paseo
   alliance-work login pi peer         Open Pi; use /login
   alliance-work login agy peer        Sign in using the isolated Alliance HOME
   alliance-work auth agy --from /absolute/native-token-path
+  alliance-work mcp add mobbin        Enable Mobbin for every Claude/Codex role and project
+  alliance-work mcp list              Read this user’s Alliance MCP configuration
+  alliance-work mcp login mobbin      Authenticate the shared Mobbin connection
   alliance-work doctor                Verify homes, capabilities, pinned source and live plugin
   alliance-work status                Read agents, owners, decisions and tracked processes
   alliance-work members owner --agent ID --owner ID|Human --revision N --evidence HANDOFF_FILE
@@ -173,7 +177,17 @@ try {
     authFrom: flags["--codex-auth-from"],
     separateAuth: !!flags["--separate-auth"],
   };
-  if (command === "skills") {
+  if (command === "mcp") {
+    if (positional[1] === "add" && positional[2] === "mobbin")
+      output(await withMaintenance(home, () => enableMobbin(home)));
+    else if (positional[1] === "list") output(await userMcpSettings(home));
+    else if (positional[1] === "login" && positional[2] === "mobbin")
+      run(process.execPath, [join(projectRoot, "scripts/mobbin.mjs"), home, "--login"], {
+        stdio: "inherit",
+        timeout: 660000,
+      });
+    else throw new Error("Usage: alliance-work mcp add mobbin | mcp list | mcp login mobbin");
+  } else if (command === "skills") {
     const cwd = resolve(flags["--project"] ?? process.cwd());
     if (positional[1] === "add" && positional[2]) output(await registerSkill(cwd, positional[2]));
     else if (positional[1] !== "list")

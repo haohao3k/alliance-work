@@ -232,3 +232,11 @@ cho bộ role theo [hướng dẫn vận hành](operations.md#agy-role-profiles)
 HOME, config, skills và lịch sử của từng role vẫn tách biệt.
 Room đã lưu model policy cần thêm route AGY trong Model settings trước khi tạo
 Peer/Lens. Model AGY mã hóa effort trong tên, ví dụ `claude-sonnet-5-5-medium`.
+
+### Mobbin MCP dùng chung theo user
+
+Chạy `alliance-work mcp add mobbin` rồi `alliance-work mcp login mobbin` một lần
+trên mỗi máy. Cả HQ, Supervisor, Lead, Peer và Lens của Claude/Codex sẽ có Mobbin
+ở mọi project khi mở phiên mới. Không cần tạo `.mcp.json` trong project.
+Có thể yêu cầu tìm màn hình, flow hoặc section tham khảo bằng Mobbin.
+Xem [cấu hình và auth](operations.md#user-mcp-mobbin).

@@ -637,3 +637,36 @@ concurrent Lead/Peer sessions and a model-driven owner → peer → owner handba
 Paseo 0.11.2. The peer wrote its proof file, notified its owner through native Paseo
 MCP, and the owner read the file before writing the reviewed result. The Mac also
 passed this flow on 0.12.0. Disposable daemons were stopped after qualification.
+
+## User MCP: Mobbin
+
+The user-level `~/.alliance-work/user-mcp.json` enables the official remote Mobbin
+server (`https://api.mobbin.com/mcp`) for all five Claude and Codex roles, across
+all projects. Nothing is written to a project. AGY and Pi are unchanged.
+
+```sh
+alliance-work mcp add mobbin
+alliance-work mcp login mobbin
+alliance-work mcp list
+```
+
+Authenticate once per host in the browser. The pinned `mcp-remote` transport shares
+only Mobbin OAuth state under `~/.alliance-work/mcp-auth/mobbin`, with owner-only
+permissions. Each session starts its own transport to Mobbin's hosted server;
+there is no additional coordination service. Role HOME, native logins, skills,
+plugins and history remain separate. Authorization tokens are never embedded in
+project files or command arguments. Mobbin's account/plan restrictions still apply.
+
+The launcher merges this explicit user entry with the native, agent-bound Paseo
+endpoint. Project MCP entries and saved session overrides cannot replace Mobbin.
+User configuration and OAuth state survive setup, updates and profile regeneration.
+For SSH login, forward loopback port 43159 from your browser machine to the remote
+host, then run the login command there; open its authorization URL locally.
+
+Newly opened native sessions pick up the setting. Existing sessions keep their
+current MCP inventory until reopened; do not interrupt running assignments just
+to refresh tools. To disable, set `mobbin.enabled` to `false` in the user file.
+
+Qualification: `node scripts/acceptance-mobbin.mjs ALLIANCE_HOME NEW_OUTPUT`
+checks native Claude/Codex discovery in two unrelated projects and makes one
+read-only Mobbin search. It requires a completed login and starts no model turn.

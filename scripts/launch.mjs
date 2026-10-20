@@ -8,6 +8,7 @@ import { authSource, authStatus, bridgeCodexAuth } from "./auth.mjs";
 import { discoverCodex } from "./codex-discovery.mjs";
 import { contextPolicy } from "./context-policy.mjs";
 import { assertNoLinks, codexIsolationFeatures, loadManifest, verifyProfile } from "./profiles.mjs";
+import { userMcpServers } from "./user-mcp.mjs";
 
 export function profileEnvironment(profile, home, ambient = process.env, credentials = {}) {
   /** @type {Record<string,string>} */
@@ -113,20 +114,25 @@ export async function launchPlan(
   if ((metadataCommand && profile.harness !== "pi") || accountCommand)
     return { executable: profile.executable, args, env, cwd, authSource: source };
   const bundle = await projectSkills(cwd);
+  const userServers = await userMcpServers(home, profile.harness);
   if (profile.harness === "claude") {
     args = replaceFlag(args, "--setting-sources", "user");
     args = replaceFlag(args, "--settings", join(profile.home, "settings.json"));
     if (!args.includes("--strict-mcp-config")) args.push("--strict-mcp-config");
     const plugin = await claudeSkillPlugin(home, bundle);
     if (plugin) args.push("--plugin-dir", plugin);
-    // Only the caller-bound native Paseo endpoint may survive an explicit MCP argument.
-    for (let i = 0; i < args.length; i++)
-      if (args[i] === "--mcp-config") {
-        const raw = args[i + 1];
+    // Merge the user-approved tools with the caller-bound native endpoint. Project
+    // and saved session MCP definitions cannot replace either source.
+    const servers = { ...userServers };
+    const filtered = [];
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === "--mcp-config" || args[i].startsWith("--mcp-config=")) {
+        const raw = args[i] === "--mcp-config" ? args[++i] : args[i].slice(13);
         const config = JSON.parse(raw.startsWith("{") ? raw : await readFile(raw, "utf8"));
-        const paseo = config.mcpServers?.paseo;
-        args[i + 1] = JSON.stringify({ mcpServers: paseo ? { paseo } : {} });
-      }
+        if (config.mcpServers?.paseo) servers.paseo = config.mcpServers.paseo;
+      } else filtered.push(args[i]);
+    }
+    args = [...filtered, "--mcp-config", JSON.stringify({ mcpServers: servers })];
   } else if (profile.harness === "pi") {
     args = [
       ...args,
@@ -196,6 +202,8 @@ export async function launchPlan(
         name === "paseo" ? configuration : { ...configuration, enabled: false },
       ]),
     );
+    for (const [name, server] of Object.entries(userServers))
+      servers[name] = { ...server, enabled: true, startup_timeout_sec: 60 };
     // Override complete TOML tables: Codex CLI dotted keys do not unquote path/server names.
     args.push("-c", `mcp_servers=${toml(servers)}`);
   }

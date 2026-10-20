@@ -90,7 +90,7 @@ const help = `Alliance Work — isolated agent rooms on native Paseo
   alliance-work login pi peer         Open Pi; use /login
   alliance-work login agy peer        Sign in using the isolated Alliance HOME
   alliance-work auth agy --from /absolute/native-token-path
-  alliance-work mcp add mobbin        Enable Mobbin for every Claude/Codex role and project
+  alliance-work mcp add mobbin        Enable Mobbin for every Claude/Codex/AGY role and project
   alliance-work mcp list              Read this user’s Alliance MCP configuration
   alliance-work mcp login mobbin      Authenticate the shared Mobbin connection
   alliance-work doctor                Verify homes, capabilities, pinned source and live plugin

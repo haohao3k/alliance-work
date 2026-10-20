@@ -10,6 +10,7 @@ import type {
 import { createAntigravityProvider } from "./agy-native/provider";
 import { assertNoLinks, verifyProfile } from "./profile-integrity.mjs";
 import { projectSkills } from "./project-skills.mjs";
+import { userMcpServers } from "./user-mcp.mjs";
 
 export function agyEffort(model: string) {
   return /-(low|medium|high|xhigh|max)$/.exec(model)?.[1];
@@ -70,12 +71,18 @@ export async function prepareAgySession(config: ProviderSessionConfig) {
     await writeFile(
       join(path, ".agents/mcp_config.json"),
       JSON.stringify({
-        mcpServers: Object.fromEntries(
-          servers.map(([name, server]) => {
-            if (server.type !== "http") throw new Error("Expected HTTP MCP");
-            return [name, { serverUrl: server.url, ...(server.headers ? { headers: server.headers } : {}) }];
-          }),
-        ),
+        mcpServers: {
+          ...(await userMcpServers(home, "agy", manifest.root)),
+          ...Object.fromEntries(
+            servers.map(([name, server]) => {
+              if (server.type !== "http") throw new Error("Expected HTTP MCP");
+              return [
+                name,
+                { serverUrl: server.url, ...(server.headers ? { headers: server.headers } : {}) },
+              ];
+            }),
+          ),
+        },
       }),
       { mode: 0o600 },
     );

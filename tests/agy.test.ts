@@ -7,6 +7,7 @@ import type { ProviderSessionConfig } from "@getpaseo/plugin/server/provider";
 import { linkAgyAuth, setAgyAuthSource } from "../scripts/agy-auth.mjs";
 import { launchPlan, profileEnvironment } from "../scripts/launch.mjs";
 import { prepareProfiles } from "../scripts/profiles.mjs";
+import { enableMobbin } from "../scripts/user-mcp.mjs";
 import { agyEffort, prepareAgySession } from "../server/agy-provider";
 import { chooseModel } from "../server/model-policy";
 import { allianceProvider } from "../server/runtime";
@@ -110,6 +111,56 @@ test("AGY rejects another agent's MCP endpoint and unqualified exact grants", as
     }),
     /not yet qualified/,
   );
+});
+
+test("user Mobbin reaches all AGY roles and projects without replacing native Paseo or importing project MCP", async () => {
+  const f = await fixture();
+  await enableMobbin(f.home);
+  for (const project of ["one", "two"]) {
+    const cwd = join(f.cwd, project);
+    await mkdir(join(cwd, ".agents"), { recursive: true });
+    await writeFile(
+      join(cwd, ".agents/mcp_config.json"),
+      JSON.stringify({ mcpServers: { mobbin: { command: "project-spoof" } } }),
+    );
+    for (const role of ["hq", "supervisor", "lead", "peer", "lens"]) {
+      const profile = f.manifest.profiles[`agy-${role}`];
+      const config = {
+        ...f.config,
+        cwd,
+        env: { ...f.config.env, HOME: profile.osHome, ALLIANCE_ROLE: role },
+      };
+      const session = await prepareAgySession(config);
+      try {
+        const mcp = JSON.parse(await readFile(join(session.path, ".agents/mcp_config.json"), "utf8"));
+        assert.deepEqual(Object.keys(mcp.mcpServers).sort(), ["mobbin", "paseo"]);
+        assert.equal(mcp.mcpServers.mobbin.command, process.execPath);
+        assert(mcp.mcpServers.mobbin.args.includes(f.home));
+        assert(!JSON.stringify(mcp.mcpServers.mobbin).includes(cwd));
+        assert.equal(mcp.mcpServers.paseo.headers.Authorization, "Bearer synthetic-test");
+      } finally {
+        await session.dispose();
+      }
+    }
+  }
+  await assert.rejects(
+    prepareAgySession({
+      ...f.config,
+      mcpServers: { ...f.config.mcpServers, mobbin: { type: "stdio", command: "caller-spoof", args: [] } },
+    }),
+    /one native Paseo/,
+  );
+  await writeFile(
+    join(f.home, "user-mcp.json"),
+    JSON.stringify({ version: 1, mobbin: { enabled: false, harnesses: ["codex", "claude", "agy"] } }),
+  );
+  const session = await prepareAgySession(f.config);
+  try {
+    const mcp = JSON.parse(await readFile(join(session.path, ".agents/mcp_config.json"), "utf8"));
+    assert.deepEqual(Object.keys(mcp.mcpServers), ["paseo"]);
+  } finally {
+    await session.dispose();
+  }
 });
 
 test("AGY model IDs retain their actual effort and obey the room allowlist", () => {

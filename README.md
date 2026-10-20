@@ -207,6 +207,6 @@ profiles. Use a dedicated Alliance login shared only within that role set. See
 [AGY setup and supported behavior](docs/operations.md#agy-role-profiles)
 for authentication and native coordination qualification.
 
-Mobbin can be enabled once for every Claude/Codex Alliance role and project:
+Mobbin can be enabled once for every Claude/Codex/AGY Alliance role and project:
 `alliance-work mcp add mobbin`, then `alliance-work mcp login mobbin`.
 See [user MCP setup](docs/operations.md#user-mcp-mobbin) for authentication and existing sessions.

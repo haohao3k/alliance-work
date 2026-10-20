@@ -131,7 +131,7 @@ export default function contribute(server: PluginServerContext) {
       config: {
         ...request.config,
         ...selected,
-        mcpServers: {},
+        mcpServers: await instance.sessionMcpServers(request.config.provider),
         systemPrompt: composeInstruction(instruction, request.config.systemPrompt),
       },
     };

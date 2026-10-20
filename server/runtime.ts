@@ -25,6 +25,7 @@ import { chooseModel } from "./model-policy";
 import { Obligations } from "./obligations";
 import { verifyProfile } from "./profile-integrity.mjs";
 import { RoomStore } from "./store";
+import { userMcpServers } from "./user-mcp.mjs";
 import { Wakeups } from "./wakeups";
 
 interface Profile {
@@ -158,6 +159,16 @@ export class AllianceRuntime {
     if (!profile) throw new Error(`Profile ${identity.id} is not prepared`);
     await verifyProfile(profile);
     return profile;
+  }
+  async sessionMcpServers(provider: string) {
+    const profile = await this.profile(provider);
+    // Paseo sends a per-thread MCP table to Codex, overriding its CLI table.
+    // Claude merges at launch; AGY merges in its isolated session directory.
+    if (profile.harness !== "codex") return {};
+    const servers = await userMcpServers(this.home, profile.harness, this.manifest.root);
+    return Object.fromEntries(
+      Object.entries(servers).map(([name, server]) => [name, { type: "stdio" as const, ...server }]),
+    );
   }
   profiles() {
     return {

@@ -348,7 +348,10 @@ test("native Paseo switches release roots and restores the previous plugin after
     filter: (path) => relative(candidate, path) !== "node_modules",
   });
   await symlink(join(projectRoot, "node_modules"), join(broken, "node_modules"), "dir");
-  await writeFile(join(broken, "index.server.ts"), 'throw new Error("activation fixture"); export {};\n');
+  await writeFile(
+    join(broken, "index.server.ts"),
+    'throw new Error("activation fixture");\n' + (await readFile(join(broken, "index.server.ts"), "utf8")),
+  );
   await assert.rejects(activate({ ...options, root: broken }), /Managed files restored/);
   assert.equal((await installation(home)).root, candidate);
   await verifyRuntime(paseoHome, candidate);

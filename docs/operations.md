@@ -641,8 +641,8 @@ passed this flow on 0.12.0. Disposable daemons were stopped after qualification.
 ## User MCP: Mobbin
 
 The user-level `~/.alliance-work/user-mcp.json` enables the official remote Mobbin
-server (`https://api.mobbin.com/mcp`) for all five Claude and Codex roles, across
-all projects. Nothing is written to a project. AGY and Pi are unchanged.
+server (`https://api.mobbin.com/mcp`) for all five Claude, Codex and AGY roles, across
+all projects. Nothing is written to a project. Pi is unchanged.
 
 ```sh
 alliance-work mcp add mobbin
@@ -659,6 +659,12 @@ project files or command arguments. Mobbin's account/plan restrictions still app
 
 The launcher merges this explicit user entry with the native, agent-bound Paseo
 endpoint. Project MCP entries and saved session overrides cannot replace Mobbin.
+For new Codex agents, the creation hook also puts the approved server into Paseo's
+per-thread configuration, which otherwise overrides the launcher's MCP table.
+AGY adds the approved Mobbin stdio transport to its private generated session MCP
+configuration while retaining the validated, caller-bound native Paseo endpoint.
+On an installation previously enabled only for Claude/Codex, rerun `mcp add mobbin`
+to include AGY; the existing Mobbin login is retained.
 User configuration and OAuth state survive setup, updates and profile regeneration.
 For SSH login, forward loopback port 43159 from your browser machine to the remote
 host, then run the login command there; open its authorization URL locally.

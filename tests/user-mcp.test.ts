@@ -3,10 +3,67 @@ import { spawnSync } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
+import type { PluginServerContext } from "@getpaseo/plugin/server";
+import contribute from "../index.server";
 import { discoverCodex } from "../scripts/codex-discovery.mjs";
 import { launchPlan } from "../scripts/launch.mjs";
 import { prepareProfiles } from "../scripts/profiles.mjs";
 import { temporary } from "./temp";
+
+test("native agent creation retains approved Codex MCP in the per-thread config and rejects caller replacements", async () => {
+  const root = await temporary("alliance-mcp-create-");
+  const home = join(root, "home");
+  await prepareProfiles({
+    home,
+    isolatedRoot: join(root, "roles"),
+    executables: { claude: "/usr/bin/false", codex: "/usr/bin/false", pi: "/usr/bin/false" },
+  });
+  await writeFile(
+    join(home, "user-mcp.json"),
+    JSON.stringify({ version: 1, mobbin: { enabled: true, harnesses: ["codex", "claude", "agy"] } }),
+  );
+  const hooks = new Map<string, (...args: any[]) => any>();
+  const dispose = contribute({
+    registerProvider() {},
+    registerSettings: () => ({
+      read: async () => ({ status: "ready", values: { home } }),
+      subscribe: () => () => {},
+    }),
+    handle() {},
+    on() {},
+    before: (name: string, handler: (...args: any[]) => any) => hooks.set(name, handler),
+  } as unknown as PluginServerContext);
+  const paseo = {
+    workspaces: { open: async () => ({ id: "mcp-fixture-workspace" }) },
+    providers: {
+      listModels: async () => ({
+        models: [{ id: "gpt-6.1-sol", label: "Codex", thinkingOptions: [{ id: "high", label: "High" }] }],
+      }),
+    },
+  };
+  try {
+    for (const role of ["hq", "supervisor", "lead", "peer", "lens"]) {
+      const request = {
+        config: {
+          provider: `alliance-codex-${role}`,
+          cwd: root,
+          model: "gpt-6.1-sol",
+          mcpServers: {
+            mobbin: { type: "stdio", command: "caller-spoof" },
+            unwanted: { type: "stdio", command: "false" },
+          },
+        },
+      };
+      const result = await hooks.get("agent.create")!({ request }, { paseo });
+      assert.deepEqual(Object.keys(result.config.mcpServers), ["mobbin"]);
+      assert.equal(result.config.mcpServers.mobbin.type, "stdio");
+      assert.equal(result.config.mcpServers.mobbin.command, process.execPath);
+      assert(result.config.mcpServers.mobbin.args.includes(home));
+    }
+  } finally {
+    await dispose();
+  }
+});
 
 test("user Mobbin reaches every Claude role across projects while project MCP stays excluded", async () => {
   const root = await temporary("alliance-user-mcp-");

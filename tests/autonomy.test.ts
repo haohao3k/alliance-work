@@ -45,6 +45,7 @@ async function fixture() {
   let sends = 0,
     archives = 0,
     ambiguous = false;
+  const prompts: string[] = [];
   let children: unknown[] = [];
   let onRefresh = () => {};
   const wakes = new Wakeups(store, () => now);
@@ -58,8 +59,9 @@ async function fixture() {
           onRefresh();
           return { agent: { status, archivedAt: archived ? "yes" : null, pendingPermissions: permissions } };
         },
-        send: async () => {
+        send: async (text: string) => {
           sends++;
+          prompts.push(text);
           if (ambiguous) throw new Error("disconnected");
         },
         archive: async () => {
@@ -106,8 +108,31 @@ async function fixture() {
       ambiguous = true;
     },
     counts: () => ({ sends, archives }),
+    prompts: () => prompts,
   };
 }
+
+test("continuation and review prompts name the current CLI so older sessions switch to it", async () => {
+  const f = await fixture();
+  try {
+    const cli = { command: "/opt/alliance/bin/alliance-work --home /srv/alliance", managed: true };
+    f.autonomy.cli = f.wakes.cli = () => cli;
+    f.autonomy.start("worker");
+    f.end("t1");
+    f.advance();
+    await f.autonomy.tick(f.api);
+    f.autonomy.started("worker", "t2");
+    f.autonomy.checkpoint("worker", "review", "handback ready", "t2");
+    f.end("t2");
+    f.advance();
+    await f.autonomy.tick(f.api);
+    await f.wakes.tick(f.api);
+    assert.equal(f.prompts().length, 2, "one continuation, then one review wakeup for the owner");
+    for (const prompt of f.prompts()) assert.ok(prompt.includes(cli.command), prompt);
+  } finally {
+    f.store.close();
+  }
+});
 
 test("bound continuation and retry wait for prerequisites while unrelated work remains independent", async () => {
   const f = await fixture();

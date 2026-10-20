@@ -11,11 +11,23 @@ const terminal = new Set(["acknowledged", "canceled", "expired"]);
 /** Finished reminders are kept this long for audit, then removed so the active cap stays usable. */
 export const WAKE_RETENTION_MS = 7 * 86400000;
 const ACTIVE_LIMIT = 1000;
+/** The CLI command agents should run; `managed` when it is the launcher of the active release. */
+export type CliCommand = { command: string; managed: boolean };
+/**
+ * Plugin prompts name the CLI to run. A long-lived session's instructions may name a release
+ * directory that an update has since replaced; the managed launcher always runs the active one.
+ */
+export const cliLine = ({ command, managed }: CliCommand) =>
+  managed
+    ? `Alliance CLI: ${command} (it always runs the active release; use it instead of any older path in your instructions).`
+    : `Alliance CLI: ${command}.`;
 
 /** Durable notifications. Their expiry/acknowledgement never closes an obligation. */
 export class Wakeups {
   private running: Promise<void> | undefined;
   private stopped = false;
+  /** The command named in delivered prompts; the runtime points it at the managed launcher. */
+  cli: () => CliCommand = () => ({ command: "alliance-work", managed: false });
   constructor(
     private store: RoomStore,
     private now: () => number = Date.now,
@@ -286,7 +298,7 @@ export class Wakeups {
         .join("\n\n");
       try {
         await ref.send(
-          `Alliance wakeups for owner ${owner}:\n${body}\n\nInspect the room's durable assignment/results before acting. Process exit or turn completion is not acceptance. Use alliance-work wakeups ack --key KEY --owner ${owner} --revision N after reconciliation.`,
+          `Alliance wakeups for owner ${owner}:\n${body}\n\nInspect the room's durable assignment/results before acting. Process exit or turn completion is not acceptance. Use alliance-work wakeups ack --key KEY --owner ${owner} --revision N after reconciliation.\n\n${cliLine(this.cli())}`,
           { messageId, activeTurnBehavior: "steer" },
         );
         for (const w of claimed)

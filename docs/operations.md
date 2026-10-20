@@ -199,6 +199,39 @@ deploy to hosts that still run 0.1.15, their plugin keeps continuing active assi
 busy host may never be idle within the wait. Choose a quiet window, or pause busy assignments
 there first (`alliance-work autonomy checkpoint --agent ID --phase paused --reason …`).
 
+To activate on a busy host now instead of waiting, stop its running agents with the Paseo CLI
+of the active release, addressed to the Alliance instance. Use Node 24 (the one named in the
+launcher), and pass `--home`: without it the CLI addresses `~/.paseo`.
+
+```sh
+I="$HOME/.alliance-work/installation.json"
+ROOT=$(node -p "require('$I').root"); PASEO_HOME=$(node -p "require('$I').paseoHome")
+ap() { node "$ROOT/node_modules/@getpaseo/cli/bin/paseo" "$@" --home "$PASEO_HOME"; }
+ap agent ls --json            # note which agents are running
+ap agent stop AGENT_ID        # repeat until agent ls shows none running
+```
+
+A parent woken by a child's stop notice starts a turn; stop it the same way. A waiting update
+activates within about 20 seconds of idleness. Only after `alliance-work doctor` reports the new
+version, send each stopped agent a short message saying why it was stopped and what to check; a
+turn sent after a cancellation resumes its assignment:
+
+```sh
+ap agent send AGENT_ID --prompt-file resume.md --no-wait
+```
+
+### Long-lived sessions after an update (0.1.17)
+
+A session's instructions are fixed when it is created, so an agent created before an update still
+names the old release directory. Agents are pointed at the managed launcher with this instance's
+home (`~/.local/bin/alliance-work --home ~/.alliance-work` by default), which always runs the
+active release. New sessions get it in their instructions, and every continuation, wakeup and
+reminder the plugin sends ends with the current command, so an older session switches at its next
+prompt. The launcher is used only when it is this home's own managed launcher and its Node and
+release exist; otherwise the running release's path is named, without promising it stays current.
+A CLI older than 0.1.16 does not say who is deciding; its accept or reject is refused with the
+current command instead of being treated as the Human.
+
 Updates do not rewrite the development checkout. Release code lives under
 `~/.alliance-work/releases/`; the CLI launcher and native provider commands switch to the
 activated root. No release in the private repository means no downloadable update; there is

@@ -164,7 +164,8 @@ export const memberDisposition = defineRpc({
     evidence: z.string().min(1),
     product: ProductAcceptance.optional(),
     // null is the Human. Agents pass their PASEO_AGENT_ID; the plugin enforces the owner chain.
-    actorId: z.string().min(1).nullable(),
+    // Absent only from CLIs older than 0.1.16, which the plugin refuses with the current command.
+    actorId: z.string().min(1).nullable().optional(),
   }),
   output: z.object({ saved: z.literal(true) }),
 });

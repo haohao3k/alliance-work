@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { PaseoApi } from "@getpaseo/client";
 import { launchPlan, profileEnvironment } from "../scripts/launch.mjs";
-import { prepareProfiles, verifyProfile } from "../scripts/profiles.mjs";
+import { writeLauncher } from "../scripts/maintenance.mjs";
+import { prepareProfiles, projectRoot, verifyProfile } from "../scripts/profiles.mjs";
 import { runVerification } from "../server/evidence.mjs";
 import { composeInstruction } from "../server/instructions";
 import { AllianceRuntime } from "../server/runtime";
@@ -444,6 +445,65 @@ test("acceptance refuses invented candidate and evidence identities", async () =
     await assert.rejects(
       f.runtime.disposition(agentId, "accepted", "invented", "not-a-report", undefined, null),
     );
+  } finally {
+    f.runtime.close();
+  }
+});
+
+test("agents are told this home's launcher; old CLIs are refused and pointed to it", async () => {
+  const f = await fixture();
+  try {
+    const { agentId } = await f.runtime.launch(
+      { roomId: f.room.id, key: "old-cli", role: "peer", harness: "codex", prompt: "Verify an outcome" },
+      f.paseo,
+    );
+    // A pre-0.1.16 CLI sends no actor: refused, nothing recorded, and told a command that works.
+    const legacy = () => f.runtime.disposition(agentId, "accepted", "c", "e", undefined, undefined);
+    await assert.rejects(
+      legacy(),
+      (error: Error) =>
+        /older than 0\.1\.16/.test(error.message) && error.message.includes("scripts/cli.mjs"),
+    );
+    const launcher = join(f.root, "bin dir", "alliance-work");
+    await mkdir(join(f.root, "bin dir"));
+    await writeLauncher(launcher, f.home, projectRoot);
+    await writeFile(join(f.home, "installation.json"), JSON.stringify({ home: f.home, binPath: launcher }));
+    const current = `'${launcher}' --home ${f.home}`;
+    await assert.rejects(legacy(), (error: Error) => error.message.includes(current));
+    assert.ok((await f.runtime.instruction("alliance-codex-peer", f.cwd, f.paseo)).includes(current));
+    assert.equal(member(f.runtime, agentId).decision, "open");
+    // A plugin started on this home names the launcher in prompts to sessions created earlier.
+    const sent: string[] = [];
+    const api = {
+      agents: {
+        ref: () => ({
+          refresh: async () => ({ agent: { status: "idle", archivedAt: null, pendingPermissions: [] } }),
+          send: async (text: string) => {
+            sent.push(text);
+          },
+        }),
+      },
+    } as unknown as PaseoApi;
+    const plugin = await new AllianceRuntime(f.home).ready();
+    try {
+      plugin.wakeups.add({
+        key: "reminder",
+        roomId: f.room.id,
+        ownerId: agentId,
+        reason: "Review the handback",
+        trigger: { kind: "time", at: Date.now() - 1000 },
+        delivery: "idle",
+      });
+      await plugin.wakeups.tick(api);
+      assert.equal(sent.length, 1);
+      assert.ok(sent[0]?.includes(current));
+    } finally {
+      plugin.close();
+    }
+    // A launcher retargeted to another home is not this instance's CLI: use the release path.
+    await writeLauncher(launcher, join(f.root, "other-home"), projectRoot);
+    const instruction = await f.runtime.instruction("alliance-codex-peer", f.cwd, f.paseo);
+    assert.ok(!instruction.includes(launcher) && instruction.includes("scripts/cli.mjs"));
   } finally {
     f.runtime.close();
   }

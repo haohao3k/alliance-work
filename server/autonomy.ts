@@ -4,12 +4,14 @@ import { type AutonomyState, pauseKind } from "../shared/autonomy";
 import { blockedOn } from "../shared/obligations";
 import { responsibleOwner } from "../shared/operations";
 import type { RoomStore } from "./store";
-import type { Wakeups } from "./wakeups";
+import { type CliCommand, cliLine, type Wakeups } from "./wakeups";
 
 /** Assignment policy only. Paseo remains the sole agent runtime and prompt transport. */
 export class Autonomy {
   private running?: Promise<void>;
   private stopped = false;
+  /** The command named in continuation prompts; the runtime points it at the managed launcher. */
+  cli: () => CliCommand = () => ({ command: "alliance-work", managed: false });
   constructor(
     private store: RoomStore,
     private wakes: Wakeups,
@@ -254,7 +256,7 @@ export class Autonomy {
         });
         try {
           await ref.send(
-            `Alliance ${retry ? "retry after failed turn" : "continue assignment"} [${messageId}]. Read ${obligation?.assignment ?? member.assignment} and prior results before acting. ${r.reason}\n${obligation ? `Obligation ${obligation.key}, revision ${obligation.revision}: ${obligation.nextAction}. Recover current policy and obligation evidence before dependent effects.\n` : ""}Own the next concrete step. Preserve completed effects. Before ending, use alliance-work autonomy checkpoint --phase active|waiting|review|blocked|paused --reason TEXT. Use review only when a checked handback is ready; waiting when a dependency must finish. This is not acceptance.`,
+            `Alliance ${retry ? "retry after failed turn" : "continue assignment"} [${messageId}]. Read ${obligation?.assignment ?? member.assignment} and prior results before acting. ${r.reason}\n${obligation ? `Obligation ${obligation.key}, revision ${obligation.revision}: ${obligation.nextAction}. Recover current policy and obligation evidence before dependent effects.\n` : ""}Own the next concrete step. Preserve completed effects. Before ending, use alliance-work autonomy checkpoint --phase active|waiting|review|blocked|paused --reason TEXT. Use review only when a checked handback is ready; waiting when a dependency must finish. This is not acceptance.\n\n${cliLine(this.cli())}`,
             { messageId, activeTurnBehavior: "steer" },
           );
           const latest = this.get(r.agentId);

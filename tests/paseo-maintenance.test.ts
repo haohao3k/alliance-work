@@ -280,6 +280,12 @@ test("native Paseo switches release roots and restores the previous plugin after
       evidence: proof.report,
       actorId: null,
     };
+    // A pre-0.1.16 CLI sends no actor. The plugin answers with the current command, not a schema error.
+    const { actorId: _human, ...legacy } = disposition;
+    await assert.rejects(
+      client.invokePluginRpc("alliance-work", "members.disposition", legacy),
+      /older than 0\.1\.16.*Run the same command with/s,
+    );
     assert.deepEqual(
       JSON.parse(
         execFileSync(

@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, readdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, lstat, mkdir, readdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -28,7 +29,7 @@ import { Obligations } from "./obligations";
 import { verifyProfile } from "./profile-integrity.mjs";
 import { RoomStore } from "./store";
 import { userMcpServers } from "./user-mcp.mjs";
-import { Wakeups } from "./wakeups";
+import { type CliCommand, cliLine, Wakeups } from "./wakeups";
 
 interface Profile {
   home: string;
@@ -80,6 +81,17 @@ async function gitRoot(cwd: string) {
     return null;
   }
 }
+/** Quote a path for a shell command line only when it needs it. */
+const shellWord = (word: string) =>
+  /^[\w@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`;
+/** The exec line scripts/maintenance.mjs writeLauncher emits: node, release CLI, home. */
+const LAUNCHER = /^exec '((?:[^']|'\\'')*)' '((?:[^']|'\\'')*)' --home '((?:[^']|'\\'')*)' "\$@"$/m;
+const unquote = (value: string) => value.replaceAll("'\\''", "'");
+const usable = (path: string, mode: number) =>
+  access(path, mode).then(
+    () => true,
+    () => false,
+  );
 export class AllianceRuntime {
   readonly home: string;
   store!: RoomStore;
@@ -93,6 +105,7 @@ export class AllianceRuntime {
   private wakeRound?: Promise<void>;
   private closing = false;
   private manifest!: Manifest;
+  private cli: CliCommand = { command: "alliance-work", managed: false };
   private roomWrite: Promise<unknown> = Promise.resolve();
   constructor(home: string) {
     this.home = resolve(home || process.env.ALLIANCE_WORK_HOME || join(homedir(), ".alliance-work"));
@@ -106,12 +119,43 @@ export class AllianceRuntime {
     this.obligations = new Obligations(this.store);
     this.autonomy = new Autonomy(this.store, this.wakeups);
     this.lifecycle = new Lifecycle(this.store, this.wakeups, this.autonomy);
+    this.cli = await this.cliCommand();
+    this.wakeups.cli = this.autonomy.cli = () => this.cli;
     return this;
+  }
+  /**
+   * The command agents should run. The managed launcher always starts the active release, so it
+   * stays right across updates. It is used only when it is this home's own launcher and its Node
+   * and CLI exist; `--home` is repeated so the command names this instance (the last value wins).
+   * Otherwise the running release's path is the fallback, which is not described as stable.
+   */
+  async cliCommand(): Promise<CliCommand> {
+    const fallback = {
+      command: `${shellWord(process.execPath)} ${shellWord(join(this.manifest.root, "scripts/cli.mjs"))} --home ${shellWord(this.home)}`,
+      managed: false,
+    };
+    const installed = await readFile(join(this.home, "installation.json"), "utf8")
+      .then(JSON.parse)
+      .catch(() => null);
+    if (installed?.home !== this.home || typeof installed.binPath !== "string") return fallback;
+    const launcher = installed.binPath;
+    const text = await readFile(launcher, "utf8").catch(() => "");
+    const exec = text.includes("# Alliance Work managed launcher") ? LAUNCHER.exec(text) : null;
+    if (
+      !exec ||
+      resolve(unquote(exec[3])) !== this.home ||
+      !(await usable(launcher, constants.X_OK)) ||
+      !(await usable(unquote(exec[1]), constants.X_OK)) ||
+      !(await usable(unquote(exec[2]), constants.R_OK))
+    )
+      return fallback;
+    return { command: `${shellWord(launcher)} --home ${shellWord(this.home)}`, managed: true };
   }
   startWakeups() {
     if (this.wakeTimer || this.wakeRound || this.closing) return;
     const round = async () => {
       try {
+        this.cli = await this.cliCommand().catch(() => this.cli);
         await this.wakeups.tick();
         this.wakeupHealth = { checkedAt: new Date().toISOString(), error: null };
         // An update waiting for idleness holds this lock; starting turns would starve it. A lock
@@ -292,7 +336,7 @@ export class AllianceRuntime {
     const room = paseo ? await this.ensureRoom(cwd, paseo) : await this.roomFor(cwd);
     const { policy, revision } = this.store.modelPolicy(room.id);
     const skills = skillCatalog(await projectSkills(cwd));
-    return `${await readFile(join(profile.home, "root-instructions.md"), "utf8")}\n\n# Current Alliance room\nRoom: ${room.id}\nTitle: ${room.title}\nMission: ${room.mission || "Follow the Human's assignment in this conversation."}\nProject: ${room.cwd}\nDurable assignments and candidates: ${room.artifacts}\nYour exact Seatwork skill files: ${join(profile.home, "skills")}\nDelegate on this host using native Paseo create_agent. Its provider value is alias/model, for example alliance-codex-peer/gpt-6.1-sol. For another host, use Paseo CLI with an explicit --host and remote workspace. Cross-role aliases are distinct providers: pass settings.modeId explicitly from the target provider catalog, within the assignment permission limits. Consult list_providers for valid modes, model IDs and effort IDs; pass the selected effort explicitly.\n\n${policyInstruction(policy, revision)}\n\n${skills}\n\nAlliance CLI: ${process.execPath} ${join(this.manifest.root, "scripts/cli.mjs")} --home ${this.home}. Use its verify/accept commands to bind evidence to the candidate. Run --help for exact arguments.`;
+    return `${await readFile(join(profile.home, "root-instructions.md"), "utf8")}\n\n# Current Alliance room\nRoom: ${room.id}\nTitle: ${room.title}\nMission: ${room.mission || "Follow the Human's assignment in this conversation."}\nProject: ${room.cwd}\nDurable assignments and candidates: ${room.artifacts}\nYour exact Seatwork skill files: ${join(profile.home, "skills")}\nDelegate on this host using native Paseo create_agent. Its provider value is alias/model, for example alliance-codex-peer/gpt-6.1-sol. For another host, use Paseo CLI with an explicit --host and remote workspace. Cross-role aliases are distinct providers: pass settings.modeId explicitly from the target provider catalog, within the assignment permission limits. Consult list_providers for valid modes, model IDs and effort IDs; pass the selected effort explicitly.\n\n${policyInstruction(policy, revision)}\n\n${skills}\n\n${cliLine(await this.cliCommand())} Use its verify/accept commands to bind evidence to the candidate. Run --help for exact arguments.`;
   }
   async bind(agent: PluginHookAgent) {
     const identity = allianceProvider(agent.provider);
@@ -729,9 +773,15 @@ export class AllianceRuntime {
     candidate: string,
     evidence: string,
     claim: unknown,
-    actorId: string | null,
+    actorId: string | null | undefined,
     paseo?: PaseoApi,
   ) {
+    // CLIs before 0.1.16 never say who decides. Treating that as the Human would let any agent
+    // holding an old release path accept itself, so refuse and name the current command.
+    if (actorId === undefined)
+      throw new Error(
+        `This Alliance CLI is older than 0.1.16 and does not identify who is deciding, so nothing was recorded. Run the same command with: ${(await this.cliCommand()).command}`,
+      );
     const member = this.store.member(id);
     if (!member) throw new Error("Unknown Alliance member");
     authorizeDecision(this.store, id, actorId);

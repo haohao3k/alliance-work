@@ -80,7 +80,7 @@ function Editor({
     retry: false,
   });
   const save = useMutation({ mutationFn: () => saveRpc({ roomId, revision, policy }), onSuccess: onSaved });
-  const reset = useMutation({ mutationFn: () => resetRpc({ roomId }), onSuccess: onSaved });
+  const reset = useMutation({ mutationFn: () => resetRpc({ roomId, revision }), onSuccess: onSaved });
   const busy = save.isPending || reset.isPending;
   const hint = { color: c.foregroundMuted, fontSize: 12 };
   const row = { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 6 };

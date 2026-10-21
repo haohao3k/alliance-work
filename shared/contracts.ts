@@ -146,7 +146,8 @@ export const roomModelPolicySave = defineRpc({
 });
 export const roomModelPolicyReset = defineRpc({
   name: "models.reset",
-  input: z.object({ roomId: z.string() }),
+  // The Models page passes the revision it shows; the Human's CLI resets unconditionally.
+  input: z.object({ roomId: z.string(), revision: z.number().int().nonnegative().optional() }),
   output: roomModelPolicy.output,
 });
 export const roomModelCatalog = defineRpc({

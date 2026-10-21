@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import type { AgentModelDefinition } from "@getpaseo/protocol/agent-types";
-import { sharesRouteAcrossRoles } from "../scripts/model-compat.mjs";
+import { roomsUnreadableBefore0118, sharesRouteAcrossRoles } from "../scripts/model-compat.mjs";
 import { chooseModel } from "../server/model-policy";
 import { RoomStore } from "../server/store";
 import {
@@ -379,4 +379,58 @@ test("omitted owner models stay economical; premium owners need an explicit choi
     ],
   };
   assert.equal(chooseModel(custom, "peer", "claude", catalog).model, "claude-opus-5-5");
+});
+
+test("reset clears unreadable lists, never lowers the revision and can require the editor's revision", async () => {
+  const home = await temporary("alliance-policy-reset-");
+  let store = new RoomStore(home);
+  try {
+    for (const id of ["broken", "shared", "plain"])
+      store.addRoom({
+        id,
+        title: `${id} room`,
+        cwd: `/fixture/${id}`,
+        workspaceId: id,
+        mission: "",
+        artifacts: `${home}/${id}`,
+        createdAt: "2026-10-21",
+      });
+    const policy = defaultModelPolicy();
+    store.saveModelPolicy(
+      "shared",
+      { ...policy, routes: [...policy.routes, { ...policy.routes[0], role: "lens" }] },
+      0,
+    );
+    store.saveModelPolicy("plain", policy, 0);
+    // Three resets push the counter to 3; then an older release saves a row at revision 1.
+    for (let i = 0; i < 3; i++) store.resetModelPolicy("broken");
+    store.close();
+    const db = new DatabaseSync(join(home, "rooms.sqlite"));
+    db.prepare("INSERT INTO room_model_policies(roomId,revision,data) VALUES(?,?,?)").run(
+      "broken",
+      1,
+      JSON.stringify({ leadEffort: "medium", routes: [{ harness: "future", model: "x", effort: "high" }] }),
+    );
+    db.close();
+    // The rollback check reads the database directly: no daemon or plugin needed. It names lists
+    // that share a route across roles, and rows that are not even JSON.
+    assert.deepEqual(roomsUnreadableBefore0118(home), ["shared room (shared)"]);
+    const corrupt = new DatabaseSync(join(home, "rooms.sqlite"));
+    corrupt.prepare("UPDATE room_model_policies SET data='{' WHERE roomId='plain'").run();
+    corrupt.close();
+    assert.deepEqual(roomsUnreadableBefore0118(home).sort(), ["plain room (plain)", "shared room (shared)"]);
+    assert.deepEqual(roomsUnreadableBefore0118(join(home, "missing")), []);
+    store = new RoomStore(home);
+    assert.throws(() => store.modelPolicy("broken"), /Invalid/);
+    // A page opened at revision 3 (before the older release saved) cannot reset the newer row.
+    assert.throws(() => store.resetModelPolicy("broken", 3), /changed elsewhere/);
+    const cleared = store.resetModelPolicy("broken");
+    assert.deepEqual([cleared.revision, cleared.saved], [4, false], "max(row 1, counter 3) + 1");
+    // The Models page passes the revision it shows (plain was saved once: revision 1).
+    assert.throws(() => store.resetModelPolicy("plain", 0), /changed elsewhere/);
+    assert.equal(store.resetModelPolicy("plain", 1).saved, false);
+    assert.deepEqual(roomsUnreadableBefore0118(home), ["shared room (shared)"]);
+  } finally {
+    store.close();
+  }
 });

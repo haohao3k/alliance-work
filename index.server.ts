@@ -93,7 +93,9 @@ export default function contribute(server: PluginServerContext) {
   server.handle(roomModelPolicySave, async ({ roomId, policy, revision }) =>
     (await get()).store.saveModelPolicy(roomId, policy, revision),
   );
-  server.handle(roomModelPolicyReset, async ({ roomId }) => (await get()).store.resetModelPolicy(roomId));
+  server.handle(roomModelPolicyReset, async ({ roomId, revision }) =>
+    (await get()).store.resetModelPolicy(roomId, revision),
+  );
   server.handle(roomModelCatalog, async ({ roomId, harness, role }, { paseo }) => ({
     models: (await (await get()).modelCatalog(roomId, harness, role, paseo))
       .filter((model) => model.isSelectable !== false)

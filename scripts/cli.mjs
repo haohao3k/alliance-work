@@ -15,7 +15,7 @@ import { authStatus, setAuthSource } from "./auth.mjs";
 import { BUSY_EXIT, bundleRelease, deploy, harnessPath, waitForIdle } from "./deploy.mjs";
 import { downloadRelease, isNewerRelease, releaseInfo, run } from "./distribution.mjs";
 import { activate, doctor, installation, onInterrupt, withMaintenance } from "./maintenance.mjs";
-import { sharesRouteAcrossRoles } from "./model-compat.mjs";
+import { roomsUnreadableBefore0118 } from "./model-compat.mjs";
 import { projectRoot } from "./profiles.mjs";
 import { enableMobbin, userMcpSettings } from "./user-mcp.mjs";
 
@@ -42,22 +42,6 @@ async function daemonClient(home, clientId) {
   });
   await client.connect();
   return client;
-}
-/** Rooms whose saved lists name one harness/model/effort for both Peer and Lens. Releases before
- * 0.1.18 reject such a list, which would block every launch in that room after a rollback. */
-async function roomsUnreadableBefore0118(home) {
-  const client = await daemonClient(home, "alliance-rollback-check");
-  try {
-    const rpc = (method, input) => client.invokePluginRpc("alliance-work", method, input);
-    const blocked = [];
-    for (const room of (await rpc("rooms.list", {})).rooms) {
-      const { policy, saved } = await rpc("models.read", { roomId: room.id });
-      if (saved && sharesRouteAcrossRoles(policy)) blocked.push(`${room.title} (${room.id})`);
-    }
-    return blocked;
-  } finally {
-    await client.close();
-  }
 }
 const flags = {};
 const positional = [];
@@ -677,7 +661,14 @@ try {
     const current = await installation(home);
     if (!current?.previous) throw new Error("No previous installation is recorded.");
     if (current.previous.version && isNewerRelease("0.1.18", current.previous.version)) {
-      const blocked = await roomsUnreadableBefore0118(home);
+      let blocked = [];
+      try {
+        blocked = roomsUnreadableBefore0118(home);
+      } catch (error) {
+        console.error(
+          `Warning: could not check saved room model lists (${error.message}). Rooms whose list names the same model and effort for Peer and Lens will refuse launches after this rollback; reset them with alliance-work models reset.`,
+        );
+      }
       if (blocked.length)
         throw new Error(
           `Rollback to ${current.previous.version} refused: it cannot read the saved model lists of ${blocked.join(", ")}, which name the same model and effort for Peer and Lens, so every launch there would fail. Run alliance-work models reset --room ID for those rooms (or remove the duplicate in Models), then roll back.`,

@@ -212,16 +212,24 @@ export class RoomStore {
       | undefined;
     return row?.revision ?? 0;
   }
-  /** Drop the room's saved policy so it follows the release defaults again. */
-  resetModelPolicy(roomId: string) {
-    const current = this.modelPolicy(roomId);
+  /** Drop the room's saved policy so it follows the release defaults again. The saved row is not
+   * parsed, so an unreadable list can still be cleared. With `expected`, refuse if it changed. */
+  resetModelPolicy(roomId: string, expected?: number) {
+    this.room(roomId);
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const row = this.db.prepare("SELECT revision FROM room_model_policies WHERE roomId=?").get(roomId) as
+        | { revision: number }
+        | undefined;
+      const counter = this.resetRevision(roomId);
+      if (expected !== undefined && expected !== (row?.revision ?? counter))
+        throw new Error("Model policy changed elsewhere. Reload settings before resetting.");
+      // An older release may have saved below the counter; never let the revision go back.
       this.db
         .prepare(
           "INSERT INTO room_model_policy_resets(roomId,revision) VALUES(?,?) ON CONFLICT(roomId) DO UPDATE SET revision=excluded.revision",
         )
-        .run(roomId, current.revision + 1);
+        .run(roomId, Math.max(row?.revision ?? 0, counter) + 1);
       this.db.prepare("DELETE FROM room_model_policies WHERE roomId=?").run(roomId);
       this.db.exec("COMMIT");
     } catch (error) {

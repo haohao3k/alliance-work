@@ -109,9 +109,10 @@ One checkout has one room. Git worktrees can join an unambiguous matching room. 
 brief before native delegation; keep results and candidate identity before signaling completion.
 The operating contract maps Seatwork vocabulary to native Paseo tools without adding aliases.
 
-Each room's **Models** settings control the Peer/Lens allowlist, effort and preferences by task
-difficulty. Lead chooses worker models within that policy; Supervisor/HQ can intervene. Lead
-prefers GPT-6 Astra or Claude Opus 5.5 at medium/high but may choose any supported model/effort.
+Each room's **Models** settings hold separate, ordered Peer and Lens lists (harness, model, effort)
+and the owner effort. Lead chooses worker models within the target role's list; Supervisor/HQ can
+intervene. HQ/Supervisor/Lead may choose any supported model/effort.
+`alliance-work models show|reset` reads the lists or returns rooms to the release defaults.
 Settings govern new Alliance launches; native
 in-session model changes are outside the current SDK gate. See the [room workflow](docs/quickstart.vi.md#model-theo-room).
 

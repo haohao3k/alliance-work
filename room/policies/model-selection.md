@@ -14,16 +14,18 @@ restriction by choosing an ungoverned provider or a harness-local subagent.
 Use routine for bounded edits with straightforward checks; standard for implementation with
 known constraints; complex for uncertain diagnosis, cross-component changes and demanding
 review; frontier for unusually ambiguous, high-risk or previously unsuccessful work. These
-are judgments, not a mandatory escalation ladder. Start with the least costly setting likely
-to meet the acceptance conditions; go directly to a stronger choice when the evidence warrants
-it. Reassess after failed checks or a change in scope. Avoid repeating unsuccessful cheap runs.
+are judgments, not a mandatory escalation ladder. Within the target role's list, the Human's order
+decides: start with the first route that is available and suits the work, and record why when you
+skip one. Reassess after failed checks or a change in scope. Avoid repeating unsuccessful runs.
 
-Room priorities express the Human's preferences. The default worker policy uses Sol medium for
-routine work, Sol high or Sonnet medium for standard implementation, and Sol high or Sonnet xhigh
-for complex work. Opus/Astra are frontier routes, available through an explicit model selection or
-frontier assessment. If no model or difficulty is supplied, selection uses the standard band; an
-unavailable economical route is reported rather than silently falling through to a premium model.
-A saved custom room allowlist remains authoritative and is never rewritten by an update.
+Room priorities express the Human's preferences. Peer and Lens have separate ordered lists; number 1
+is the Human's first choice. The release default for Peer is Sonnet 5.5 high, Sonnet 5.5 medium,
+Sol high, AGY Gemini 4 Argon medium, Pi zai/glm-5.3 high, then Pi izno-vps/ds/deepseek-v4.1-flash
+high. For Lens it is Opus 5.5 medium, Astra medium, then AGY Gemini 4 Argon high. Start at the
+top of the target role's list and move down when a route is unavailable, out of quota or unsuited;
+record why. An omitted model takes the harness's first standard route; an unavailable route is
+reported, never silently replaced. A saved room list remains authoritative and is never rewritten
+by an update; only the Human resets it.
 
 HQ, Supervisor and Lead default to Sol/Sonnet, with the room's owner effort preference. They may
 explicitly select any available model/effort. Use Astra/Opus for a named hard decision, uncertain

@@ -164,15 +164,24 @@ test("user Mobbin reaches all AGY roles and projects without replacing native Pa
 });
 
 test("AGY model IDs retain their actual effort and obey the room allowlist", () => {
-  const id = "claude-sonnet-5-5-medium";
-  const effort = agyEffort(id);
-  assert.equal(effort, "medium");
-  assert(effort);
-  const catalog = [
-    { id, provider: "alliance-agy-peer", label: id, thinkingOptions: [{ id: effort, label: effort }] },
-  ];
-  assert.equal(chooseModel(defaultModelPolicy(), "peer", "agy", catalog).model, id);
-  assert.throws(() => chooseModel(defaultModelPolicy(), "peer", "agy", catalog, id, "high"), /No allowed/);
+  const catalog = ["gemini-4-argon-medium", "gemini-4-argon-high", "claude-sonnet-5-5-high"].map((id) => {
+    const effort = agyEffort(id);
+    assert(effort);
+    return { id, provider: "alliance-agy-peer", label: id, thinkingOptions: [{ id: effort, label: effort }] };
+  });
+  assert.equal(agyEffort("gemini-4-argon-medium"), "medium");
+  const policy = defaultModelPolicy();
+  assert.equal(chooseModel(policy, "peer", "agy", catalog).model, "gemini-4-argon-medium");
+  assert.equal(chooseModel(policy, "lens", "agy", catalog).model, "gemini-4-argon-high");
+  assert.throws(
+    () => chooseModel(policy, "peer", "agy", catalog, "gemini-4-argon-high", "high"),
+    /No allowed/,
+  );
+  // The AGY Sonnet detour of 0.1.17 is no longer a listed Peer route.
+  assert.throws(
+    () => chooseModel(policy, "peer", "agy", catalog, "claude-sonnet-5-5-high", "high"),
+    /No allowed/,
+  );
 });
 
 test("dedicated AGY auth links follow native refresh without copying tokens or replacing another login", async () => {

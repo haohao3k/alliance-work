@@ -3,7 +3,12 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { AutonomyState } from "../shared/autonomy";
 import type { RoleName, RoomRecord } from "../shared/contracts";
-import { defaultModelPolicy, ModelPolicy, type ModelPolicyValue } from "../shared/model-policy";
+import {
+  defaultModelPolicy,
+  ModelPolicy,
+  type ModelPolicyValue,
+  upgradeModelPolicy,
+} from "../shared/model-policy";
 import type { Obligation } from "../shared/obligations";
 import type { WakeRecordValue } from "../shared/wakeups";
 
@@ -73,7 +78,8 @@ export class RoomStore {
       CREATE TABLE IF NOT EXISTS wakeups(key TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS obligations(key TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS obligation_history(key TEXT NOT NULL, revision INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(key,revision));
-      CREATE TABLE IF NOT EXISTS room_model_policies(roomId TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS room_model_policies(roomId TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS room_model_policy_resets(roomId TEXT PRIMARY KEY, revision INTEGER NOT NULL);`);
   }
   obligations(): Obligation[] {
     return (this.db.prepare("SELECT data FROM obligations ORDER BY rowid").all() as { data: string }[]).map(
@@ -193,25 +199,51 @@ export class RoomStore {
       | { revision: number; data: string }
       | undefined;
     return {
-      revision: row?.revision ?? 0,
-      policy: row ? ModelPolicy.parse(JSON.parse(row.data)) : defaultModelPolicy(),
+      revision: row?.revision ?? this.resetRevision(roomId),
+      saved: Boolean(row),
+      policy: row ? ModelPolicy.parse(upgradeModelPolicy(JSON.parse(row.data))) : defaultModelPolicy(),
     };
   }
+  // A reset deletes the saved row (older releases then read their own defaults) but keeps the
+  // revision counting up here, so an editor opened before the reset cannot overwrite a later save.
+  private resetRevision(roomId: string) {
+    const row = this.db.prepare("SELECT revision FROM room_model_policy_resets WHERE roomId=?").get(roomId) as
+      | { revision: number }
+      | undefined;
+    return row?.revision ?? 0;
+  }
+  /** Drop the room's saved policy so it follows the release defaults again. */
+  resetModelPolicy(roomId: string) {
+    const current = this.modelPolicy(roomId);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare(
+          "INSERT INTO room_model_policy_resets(roomId,revision) VALUES(?,?) ON CONFLICT(roomId) DO UPDATE SET revision=excluded.revision",
+        )
+        .run(roomId, current.revision + 1);
+      this.db.prepare("DELETE FROM room_model_policies WHERE roomId=?").run(roomId);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return this.modelPolicy(roomId);
+  }
   saveModelPolicy(roomId: string, policy: ModelPolicyValue, revision: number) {
-    this.room(roomId);
+    const current = this.modelPolicy(roomId);
     const data = JSON.stringify(ModelPolicy.parse(policy));
-    const result =
-      revision === 0
+    const result = current.saved
+      ? this.db
+          .prepare("UPDATE room_model_policies SET revision=revision+1,data=? WHERE roomId=? AND revision=?")
+          .run(data, roomId, revision)
+      : revision === current.revision
         ? this.db
             .prepare(
-              "INSERT INTO room_model_policies(roomId,revision,data) VALUES(?,1,?) ON CONFLICT DO NOTHING",
+              "INSERT INTO room_model_policies(roomId,revision,data) VALUES(?,?,?) ON CONFLICT DO NOTHING",
             )
-            .run(roomId, data)
-        : this.db
-            .prepare(
-              "UPDATE room_model_policies SET revision=revision+1,data=? WHERE roomId=? AND revision=?",
-            )
-            .run(data, roomId, revision);
+            .run(roomId, revision + 1, data)
+        : { changes: 0 };
     if (!result.changes) throw new Error("Model policy changed elsewhere. Reload settings before saving.");
     return this.modelPolicy(roomId);
   }

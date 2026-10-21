@@ -321,6 +321,31 @@ test("native Paseo switches release roots and restores the previous plugin after
     assert.equal((await allowedLead.refresh())?.agent.thinkingOptionId, "high");
     await allowedLead.detach();
     await allowedLead.archive();
+    // The Human's CLI shows where a room's lists come from and returns a saved room to the release defaults.
+    const models = (env: Record<string, string>, ...args: string[]) =>
+      execFileSync(
+        process.execPath,
+        [join(projectRoot, "scripts/cli.mjs"), "models", ...args, "--home", home],
+        {
+          encoding: "utf8",
+          timeout: 30000,
+          env: { ...process.env, PASEO_AGENT_ID: "", ALLIANCE_ROLE: "", ALLIANCE_BOUND_ROOM: "", ...env },
+        },
+      );
+    const [shown] = JSON.parse(models({}, "show", "--room", policyRoomId));
+    assert.equal(shown.settings, "saved revision 1");
+    assert.equal(shown.ownerEffort, "high");
+    assert.equal(shown.peer[0], "1 claude/claude-sonnet-5-5 high");
+    assert.equal(shown.lens[0], "1 claude/claude-opus-5-5 medium");
+    assert.throws(() => models({ PASEO_AGENT_ID: "agent-fixture" }, "reset", "--all"), /belong to the Human/);
+    const [reset] = JSON.parse(models({}, "reset", "--room", policyRoomId));
+    assert.equal(reset.settings, "release default");
+    assert.equal(reset.ownerEffort, "medium");
+    const readback = (await client.invokePluginRpc("alliance-work", "models.read", {
+      roomId: policyRoomId,
+    })) as { revision: number; saved: boolean };
+    // The saved row is gone; the revision keeps counting so older editors cannot overwrite later saves.
+    assert.deepEqual([readback.saved, readback.revision], [false, 2]);
   } finally {
     await api.dispose();
     await client.close();

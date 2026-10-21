@@ -21,11 +21,11 @@
   },
   "models.worker-policy": {
     "file": "tests/model-policy.test.ts",
-    "pattern": "worker selection respects allowlist"
+    "pattern": "release defaults give Peer and Lens|omitted worker models take|explicit worker choices must match|every role must cover"
   },
   "models.policy-persistence": {
     "file": "tests/model-policy.test.ts",
-    "pattern": "room policy persists independently"
+    "pattern": "room policy persists independently|pre-0.1.18 saved routes apply"
   },
   "skills.skill-selection": {
     "file": "tests/project-skills.test.ts",
@@ -161,7 +161,7 @@
   },
   "models.economical-defaults": {
     "file": "tests/model-policy.test.ts",
-    "pattern": "omitted models keep coordination and implementation economical"
+    "pattern": "omitted owner models stay economical|omitted worker models take"
   },
   "lifecycle.authority": {
     "file": "tests/lifecycle.test.ts",

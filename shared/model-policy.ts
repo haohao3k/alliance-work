@@ -2,7 +2,9 @@ import { z } from "zod";
 
 export const Difficulty = z.enum(["routine", "standard", "complex", "frontier"]);
 export const Effort = z.enum(["low", "medium", "high", "xhigh", "max"]);
+export const WorkerRole = z.enum(["peer", "lens"]);
 export const ModelRoute = z.object({
+  role: WorkerRole,
   harness: z.enum(["codex", "claude", "pi", "agy"]),
   model: z.string().trim().min(1).max(200),
   effort: Effort,
@@ -15,74 +17,56 @@ export const ModelPolicy = z
     routes: z.array(ModelRoute).min(1).max(100),
   })
   .superRefine((policy, context) => {
-    const keys = policy.routes.map((route) => `${route.harness}/${route.model}/${route.effort}`);
+    const keys = policy.routes.map(
+      (route) => `${route.role}/${route.harness}/${route.model}/${route.effort}`,
+    );
     if (new Set(keys).size !== keys.length)
-      context.addIssue({ code: "custom", message: "Each harness/model/effort may appear only once" });
-    for (const difficulty of Difficulty.options)
-      if (!policy.routes.some((route) => route.difficulties.includes(difficulty)))
-        context.addIssue({ code: "custom", message: `Allow at least one route for ${difficulty}` });
+      context.addIssue({ code: "custom", message: "Each role/harness/model/effort may appear only once" });
+    for (const role of WorkerRole.options)
+      for (const difficulty of Difficulty.options)
+        if (!policy.routes.some((route) => route.role === role && route.difficulties.includes(difficulty)))
+          context.addIssue({ code: "custom", message: `Allow at least one ${role} route for ${difficulty}` });
   });
 export type ModelPolicyValue = z.infer<typeof ModelPolicy>;
 export type ModelRouteValue = z.infer<typeof ModelRoute>;
 export type TaskDifficulty = z.infer<typeof Difficulty>;
+export type WorkerRoleName = z.infer<typeof WorkerRole>;
+
+/** Policies saved before 0.1.18 had one list for both workers; each such route applies to both. */
+export function upgradeModelPolicy(value: unknown): unknown {
+  if (!value || typeof value !== "object" || !Array.isArray((value as { routes?: unknown }).routes))
+    return value;
+  const policy = value as { routes: Record<string, unknown>[] };
+  return {
+    ...policy,
+    routes: policy.routes.flatMap((route) =>
+      route && typeof route === "object" && !("role" in route)
+        ? WorkerRole.options.map((role) => ({ ...route, role }))
+        : [route],
+    ),
+  };
+}
+
+const ALL: TaskDifficulty[] = [...Difficulty.options];
+// The Human's order, first choice first. Every route serves every difficulty: the order decides.
+const PEER: Omit<ModelRouteValue, "role" | "priority" | "difficulties">[] = [
+  { harness: "claude", model: "claude-sonnet-5-5", effort: "high" },
+  { harness: "claude", model: "claude-sonnet-5-5", effort: "medium" },
+  { harness: "codex", model: "gpt-6.1-sol", effort: "high" },
+  { harness: "agy", model: "gemini-4-argon-medium", effort: "medium" },
+  { harness: "pi", model: "zai/glm-5.3", effort: "high" },
+  { harness: "pi", model: "izno-vps/ds/deepseek-v4.1-flash", effort: "high" },
+];
+const LENS: Omit<ModelRouteValue, "role" | "priority" | "difficulties">[] = [
+  { harness: "claude", model: "claude-opus-5-5", effort: "medium" },
+  { harness: "codex", model: "gpt-6-astra", effort: "medium" },
+  { harness: "agy", model: "gemini-4-argon-high", effort: "high" },
+];
 
 export function defaultModelPolicy(): ModelPolicyValue {
-  return {
-    leadEffort: "medium",
-    routes: [
-      {
-        harness: "agy",
-        model: "claude-sonnet-5-5-medium",
-        effort: "medium",
-        priority: 3,
-        difficulties: ["routine", "standard"],
-      },
-      {
-        harness: "agy",
-        model: "claude-sonnet-5-5-high",
-        effort: "high",
-        priority: 3,
-        difficulties: ["complex"],
-      },
-      {
-        harness: "agy",
-        model: "claude-opus-5-5-high",
-        effort: "high",
-        priority: 3,
-        difficulties: ["frontier"],
-      },
-      { harness: "codex", model: "gpt-6.1-sol", effort: "medium", priority: 1, difficulties: ["routine"] },
-      {
-        harness: "codex",
-        model: "gpt-6.1-sol",
-        effort: "high",
-        priority: 1,
-        difficulties: ["standard", "complex"],
-      },
-      {
-        harness: "claude",
-        model: "claude-sonnet-5-5",
-        effort: "medium",
-        priority: 2,
-        difficulties: ["routine", "standard"],
-      },
-      {
-        harness: "claude",
-        model: "claude-sonnet-5-5",
-        effort: "xhigh",
-        priority: 3,
-        difficulties: ["complex"],
-      },
-      {
-        harness: "claude",
-        model: "claude-opus-5-5",
-        effort: "high",
-        priority: 1,
-        difficulties: ["frontier"],
-      },
-      { harness: "codex", model: "gpt-6-astra", effort: "high", priority: 2, difficulties: ["frontier"] },
-    ],
-  };
+  const ranked = (role: WorkerRoleName, routes: typeof PEER) =>
+    routes.map((route, index) => ({ ...route, role, priority: index + 1, difficulties: [...ALL] }));
+  return { leadEffort: "medium", routes: [...ranked("peer", PEER), ...ranked("lens", LENS)] };
 }
 
 // Pi model IDs include the backend. Do not accept arbitrary aliases or suffix matches.
@@ -97,17 +81,29 @@ export function isEconomicalOwnerModel(harness: string, model: string): boolean 
 }
 
 export function policyInstruction(policy: ModelPolicyValue, revision: number): string {
+  const list = (role: WorkerRoleName) =>
+    policy.routes
+      .filter((route) => route.role === role)
+      .sort((a, b) => a.priority - b.priority)
+      .map(
+        (route) =>
+          `- ${route.priority}. ${route.harness}/${route.model}, ${route.effort}${route.difficulties.length < Difficulty.options.length ? `; only ${route.difficulties.join(", ")}` : ""}`,
+      )
+      .join("\n");
   return `# Room model policy (revision ${revision})
 HQ/Supervisor/Lead default to gpt-6.1-sol or claude-sonnet-5-5. Select Astra/Opus explicitly for a named hard decision, diagnosis or integration risk; record why the cheaper route is insufficient.
 Preferred owner effort when omitted: ${policy.leadEffort}; otherwise use the selected model's supported default.
 Peer is the default implementation role. Add a Lead for integration, a Supervisor for multiple workstreams, or HQ for cross-project decisions only when that responsibility is needed. Do not create a hierarchy just to forward work.
-Peer and Lens allowlist below. Lower priority numbers are preferred within each difficulty.
+Peer and Lens each have their own allowlist below, in the Human's order of preference (1 is the first choice).
+Use the first route that is available and suits the work; move down the list when a route is unavailable, out of quota or unsuited, and record why. A route marked "only" applies to those difficulties.
 Lead chooses the difficulty and final route; Supervisor/HQ may intervene with reasons and evidence.
-Difficulty is a judgment, not an automatic classifier. Native delegation enforces the union of allowed routes;
-the difficulty bands guide your choice. Omitted worker model/difficulty uses the standard band, never the frontier fallback. Never inherit a parent's expensive model without assessing the task.
+Native delegation enforces the role's allowlist exactly (harness, model and effort). An omitted worker model takes that harness's highest-priority standard route, never a frontier-only fallback. Never inherit a parent's expensive model without assessing the task.
 Record difficulty, chosen provider/model/effort and a short justification in the durable assignment.
 Reassess when evidence, verification failures or task scope change. Peer/Lens selections stay inside their allowlist.
-${policy.routes.map((route) => `- ${route.harness}/${route.model}, ${route.effort}; priority ${route.priority}; ${route.difficulties.join(", ")}`).join("\n")}
+Peer:
+${list("peer")}
+Lens:
+${list("lens")}
 Use the target role's live provider catalog. Unavailable routes are not substitutes for other models.
 Room settings apply to new launches. Existing native sessions keep their loaded policy; coordinate a fresh
 session when changing model policy, preserving the assignment and prior results.\n`;

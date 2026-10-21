@@ -109,7 +109,7 @@ const client=new DaemonClient({url:${JSON.stringify(url)},clientId:'skill-eval-'
 const api=createPaseoApi(client);let agent;
 try {
  await client.connect();
- agent=await api.agents.create({cwd:process.cwd(),title:c.id+' '+c.variant,config:{provider:'alliance-codex-peer/gpt-6.1-sol',thinkingOptionId:'medium'},outputSchema:{type:'object',properties:{verified:{type:'boolean'},answer:{type:'string'}},required:['verified','answer'],additionalProperties:false}});
+ agent=await api.agents.create({cwd:process.cwd(),title:c.id+' '+c.variant,config:{provider:'alliance-codex-peer/gpt-6.1-sol',thinkingOptionId:'high'},outputSchema:{type:'object',properties:{verified:{type:'boolean'},answer:{type:'string'}},required:['verified','answer'],additionalProperties:false}});
  const lesson=c.variant==='candidate'?'Apply this project skill: '+await readFile('lesson.md','utf8')+'\\n':'';
  const r=await agent.run(lesson+'Use only the supplied observations, do not call tools or delegate. Return JSON with verified:boolean (whether the requested product behavior is proven) and answer:string. '+c.prompt,{timeoutMs:90000});
  console.log(JSON.stringify({agent:agent.id,model:r.final?.model,effort:r.final?.thinkingOptionId,status:r.status,response:r.lastMessage}));

@@ -37,7 +37,11 @@ test("native agent creation retains approved Codex MCP in the per-thread config 
     workspaces: { open: async () => ({ id: "mcp-fixture-workspace" }) },
     providers: {
       listModels: async () => ({
-        models: [{ id: "gpt-6.1-sol", label: "Codex", thinkingOptions: [{ id: "high", label: "High" }] }],
+        models: ["gpt-6.1-sol", "gpt-6-astra"].map((id) => ({
+          id,
+          label: id,
+          thinkingOptions: ["medium", "high"].map((effort) => ({ id: effort, label: effort })),
+        })),
       }),
     },
   };
@@ -47,7 +51,8 @@ test("native agent creation retains approved Codex MCP in the per-thread config 
         config: {
           provider: `alliance-codex-${role}`,
           cwd: root,
-          model: "gpt-6.1-sol",
+          // Lens's codex route is Astra; every other role may use Sol.
+          model: role === "lens" ? "gpt-6-astra" : "gpt-6.1-sol",
           mcpServers: {
             mobbin: { type: "stdio", command: "caller-spoof" },
             unwanted: { type: "stdio", command: "false" },

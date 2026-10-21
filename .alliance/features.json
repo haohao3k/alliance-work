@@ -37,11 +37,11 @@
         },
         {
           "id": "models.worker-policy",
-          "expect": "Worker choices respect allowlist and owner choice"
+          "expect": "Peer and Lens choices respect their own ordered lists exactly"
         },
         {
           "id": "models.policy-persistence",
-          "expect": "Policies persist and reject stale edits"
+          "expect": "Policies persist, reject stale edits, upgrade pre-0.1.18 lists and reset to release defaults"
         },
         {
           "id": "models.economical-defaults",

@@ -15,6 +15,7 @@ import { authStatus, setAuthSource } from "./auth.mjs";
 import { BUSY_EXIT, bundleRelease, deploy, harnessPath, waitForIdle } from "./deploy.mjs";
 import { downloadRelease, isNewerRelease, releaseInfo, run } from "./distribution.mjs";
 import { activate, doctor, installation, onInterrupt, withMaintenance } from "./maintenance.mjs";
+import { sharesRouteAcrossRoles } from "./model-compat.mjs";
 import { projectRoot } from "./profiles.mjs";
 import { enableMobbin, userMcpSettings } from "./user-mcp.mjs";
 
@@ -27,6 +28,36 @@ function caller() {
       "Inside an Alliance agent without PASEO_AGENT_ID; the deciding agent is unknown. Nothing recorded.",
     );
   return id;
+}
+/** Opens the installation's daemon for plugin RPCs; the caller closes it. */
+async function daemonClient(home, clientId) {
+  const current = await installation(home);
+  if (!current) throw new Error("No Alliance installation exists for this home");
+  const config = JSON.parse(await readFile(join(current.paseoHome, "config.json"), "utf8"));
+  const client = new DaemonClient({
+    url: `ws://${config.daemon.listen}/ws`,
+    clientId,
+    password: process.env.ALLIANCE_PASEO_PASSWORD,
+    connectTimeoutMs: 10000,
+  });
+  await client.connect();
+  return client;
+}
+/** Rooms whose saved lists name one harness/model/effort for both Peer and Lens. Releases before
+ * 0.1.18 reject such a list, which would block every launch in that room after a rollback. */
+async function roomsUnreadableBefore0118(home) {
+  const client = await daemonClient(home, "alliance-rollback-check");
+  try {
+    const rpc = (method, input) => client.invokePluginRpc("alliance-work", method, input);
+    const blocked = [];
+    for (const room of (await rpc("rooms.list", {})).rooms) {
+      const { policy, saved } = await rpc("models.read", { roomId: room.id });
+      if (saved && sharesRouteAcrossRoles(policy)) blocked.push(`${room.title} (${room.id})`);
+    }
+    return blocked;
+  } finally {
+    await client.close();
+  }
 }
 const flags = {};
 const positional = [];
@@ -93,6 +124,7 @@ const switches = new Set([
   "--separate",
   "--separate-auth",
   "--json",
+  "--all",
 ]);
 const help = `Alliance Work — isolated agent rooms on native Paseo
 
@@ -114,6 +146,9 @@ const help = `Alliance Work — isolated agent rooms on native Paseo
   alliance-work status                Read agents, owners, decisions and tracked processes
   alliance-work members owner --agent ID --owner ID|Human --revision N --evidence HANDOFF_FILE
   alliance-work members keep --agent ID [--off]   Keep an agent open; acceptance will not archive it
+  alliance-work models show [--room ID]   Read each room's Peer/Lens allowlist (saved or release default)
+  alliance-work models reset --room ID|--all
+                                      Human only: drop saved settings so rooms follow the release default
   alliance-work policy read --agent ID
   alliance-work policy ack --agent ID --digest SHA256
   alliance-work obligations list [--owner ID|Human]
@@ -418,6 +453,44 @@ try {
     } finally {
       await client.close();
     }
+  } else if (command === "models") {
+    const action = positional[1];
+    if (!["show", "reset"].includes(action) || (action === "reset" && !!flags["--room"] === !!flags["--all"]))
+      throw new Error("Usage: alliance-work models show [--room ID] | models reset --room ID|--all");
+    if (action === "reset" && caller())
+      throw new Error("Room model settings belong to the Human; run models reset outside an agent session.");
+    const client = await daemonClient(home, "alliance-models");
+    try {
+      const rpc = (method, input) => client.invokePluginRpc("alliance-work", method, input);
+      const { rooms } = await rpc("rooms.list", {});
+      const targets = flags["--room"] ? rooms.filter((room) => room.id === flags["--room"]) : rooms;
+      if (flags["--room"] && !targets.length) throw new Error(`Unknown room: ${flags["--room"]}`);
+      const result = [];
+      for (const room of targets) {
+        const { policy, revision, saved } = await rpc(action === "reset" ? "models.reset" : "models.read", {
+          roomId: room.id,
+        });
+        const routes = (role) =>
+          policy.routes
+            .filter((route) => route.role === role)
+            .sort((a, b) => a.priority - b.priority)
+            .map(
+              (route) =>
+                `${route.priority} ${route.harness}/${route.model} ${route.effort}${route.difficulties.length < 4 ? ` (${route.difficulties.join(",")})` : ""}`,
+            );
+        result.push({
+          room: room.id,
+          title: room.title,
+          settings: saved ? `saved revision ${revision}` : "release default",
+          ownerEffort: policy.leadEffort,
+          peer: routes("peer"),
+          lens: routes("lens"),
+        });
+      }
+      output(result);
+    } finally {
+      await client.close();
+    }
   } else if (command === "accept") {
     if (!flags["--agent"] || !flags["--report"])
       throw new Error("Usage: alliance-work accept --agent ID --report /absolute/report.json");
@@ -603,6 +676,13 @@ try {
   } else if (command === "rollback") {
     const current = await installation(home);
     if (!current?.previous) throw new Error("No previous installation is recorded.");
+    if (current.previous.version && isNewerRelease("0.1.18", current.previous.version)) {
+      const blocked = await roomsUnreadableBefore0118(home);
+      if (blocked.length)
+        throw new Error(
+          `Rollback to ${current.previous.version} refused: it cannot read the saved model lists of ${blocked.join(", ")}, which name the same model and effort for Peer and Lens, so every launch there would fail. Run alliance-work models reset --room ID for those rooms (or remove the duplicate in Models), then roll back.`,
+        );
+    }
     output(
       await withMaintenance(home, () =>
         activate({ ...installOptions, root: current.previous.root, paseoHome: current.paseoHome }),

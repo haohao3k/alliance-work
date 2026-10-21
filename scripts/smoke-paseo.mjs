@@ -26,7 +26,8 @@ try {
   receipt.room = room.id;
   for (const [provider, model] of [
     ["alliance-codex-peer", "gpt-6.1-sol"],
-    ["alliance-claude-peer", "claude-opus-5-5"],
+    // Peer routes only: Opus is a Lens route in the release defaults.
+    ["alliance-claude-peer", "claude-sonnet-5-5"],
   ]) {
     const agent = await api.workspaces
       .ref(room.workspaceId)

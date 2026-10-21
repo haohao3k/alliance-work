@@ -64,9 +64,14 @@ try {
     });
     await api.agents.ref(agent.id).archive();
   }
+  // Omitted models: owners stay economical; workers take their role's first route for the harness.
+  const omitted = {
+    codex: { peer: "gpt-6.1-sol", lens: "gpt-6-astra", owner: "gpt-6.1-sol" },
+    claude: { peer: "claude-sonnet-5-5", lens: "claude-opus-5-5", owner: "claude-sonnet-5-5" },
+  };
   for (const harness of ["codex", "claude"]) {
     for (const role of ["hq", "supervisor", "lead", "peer", "lens"])
-      await probe(harness, role, undefined, harness === "codex" ? "gpt-6.1-sol" : "claude-sonnet-5-5");
+      await probe(harness, role, undefined, omitted[harness][role] ?? omitted[harness].owner);
     const premium = harness === "codex" ? "gpt-6-astra" : "claude-opus-5-5";
     await probe(harness, "lead", premium, premium);
   }

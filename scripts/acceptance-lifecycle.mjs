@@ -73,7 +73,8 @@ try {
   const workspace = await api.workspaces.open(cwd);
   const config = (role) => ({
     provider: `alliance-codex-${role}/gpt-6.1-sol`,
-    thinkingOptionId: "medium",
+    // The default Peer route for codex is Sol high; owners keep the cheaper medium.
+    thinkingOptionId: role === "peer" ? "high" : "medium",
     modeId: "full-access",
   });
 

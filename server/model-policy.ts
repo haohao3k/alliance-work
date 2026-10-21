@@ -45,6 +45,7 @@ export function chooseModel(
     const routes = policy.routes
       .filter(
         (route) =>
+          route.role === role &&
           route.harness === harness &&
           (!id || route.model === id) &&
           (!effort || route.effort === effort) &&
@@ -63,10 +64,21 @@ export function chooseModel(
       ),
     );
   }
-  if (!selected)
+  if (!selected) {
+    const allowed = policy.routes
+      .filter((route) => route.role === role && route.harness === harness)
+      .sort((a, b) => a.priority - b.priority)
+      .map((route) => {
+        const live = available.some(
+          (entry) =>
+            entry.id === route.model && entry.thinkingOptions?.some((option) => option.id === route.effort),
+        );
+        return `${route.model} ${route.effort}${live ? "" : " (not in the live catalog)"}`;
+      });
     throw new Error(
-      `No allowed, available ${harness} ${role} model/effort${difficulty ? ` for ${difficulty}` : ""}. Check room Model settings and the live provider catalog.`,
+      `No allowed, available ${harness} ${role} model/effort${difficulty ? ` for ${difficulty}` : ""}${model ? ` (requested ${id}${effort ? ` ${effort}` : ""})` : ""}. This room allows ${allowed.length ? allowed.join("; ") : `no ${harness} ${role} routes`}. The Human changes this in Alliance Work → Models.`,
     );
+  }
   const entry = available.find((item) => item.id === selected.model);
   if (!entry?.thinkingOptions?.some((option) => option.id === selected.effort))
     throw new Error(

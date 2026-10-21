@@ -136,11 +136,17 @@ export const memberLaunch = defineRpc({
 export const roomModelPolicy = defineRpc({
   name: "models.read",
   input: z.object({ roomId: z.string() }),
-  output: z.object({ policy: ModelPolicy, revision: z.number().int() }),
+  // saved=false: the room follows the release defaults (never saved, or reset by the Human).
+  output: z.object({ policy: ModelPolicy, revision: z.number().int(), saved: z.boolean() }),
 });
 export const roomModelPolicySave = defineRpc({
   name: "models.save",
   input: z.object({ roomId: z.string(), policy: ModelPolicy, revision: z.number().int().nonnegative() }),
+  output: roomModelPolicy.output,
+});
+export const roomModelPolicyReset = defineRpc({
+  name: "models.reset",
+  input: z.object({ roomId: z.string() }),
   output: roomModelPolicy.output,
 });
 export const roomModelCatalog = defineRpc({

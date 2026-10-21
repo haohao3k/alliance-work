@@ -25,27 +25,37 @@ kết quả và các quyết định cũ vẫn nằm dưới `~/.alliance-work/r
 
 ## Model theo room
 
-Mở **Alliance Work → Models** ở project cần chỉnh. Chọn mức `routine`, `standard`, `complex`
-hoặc `frontier`, thêm model/effort từ catalog thật, bỏ lựa chọn không muốn dùng và chỉnh priority.
-Số nhỏ được ưu tiên hơn; **Save model settings** lưu riêng cho room trên host đó. Các band có
-thể dùng chung một route. **Reset defaults** chỉ sửa bản nháp, cần Save mới áp dụng.
+Mở **Alliance Work → Models** ở project cần chỉnh. Chọn **Peer list** hoặc **Lens list**: mỗi
+vai có danh sách riêng, số 1 là lựa chọn đầu tiên. Thêm model/effort từ catalog thật vào vai
+đang chọn, bỏ route không muốn dùng, chỉnh thứ tự, hoặc giới hạn một route vào vài mức độ khó.
+**Save model settings** lưu riêng cho room trên host đó; màn hình ghi rõ room đang dùng mặc định
+của bản phát hành hay bản đã lưu. **Reset defaults** chỉ sửa bản nháp, cần Save mới áp dụng.
+Muốn room quay lại theo mặc định của bản phát hành (kể cả các lần cập nhật sau), chạy
+`alliance-work models reset --room ID` (hoặc `--all`); `alliance-work models show` xem danh sách.
 
-Peer/Lens mặc định ưu tiên Sol high hoặc Opus 5.5 medium cho việc triển khai; có Sonnet 5.5
-xhigh cho việc complex, Astra high cho frontier. Lead tự đánh giá độ khó và quyết định cuối
-cùng trong allowlist; Supervisor/HQ có thể can thiệp bằng lý do và bằng chứng. Priority không
-ép phải thử model đầu tiên. Không có classifier tự đọc prompt để định độ khó, và không tự
-đổi model đang chạy. HQ/Supervisor giữ lựa chọn model độc lập với allowlist Peer/Lens.
+Mặc định từ 0.1.18:
 
-Lead **ưu tiên GPT-6 Astra hoặc Claude Opus 5.5, medium/high**, nhưng được chọn model/effort khác
-trong catalog thật khi phù hợp task. Đây là ưu tiên, không phải điều kiện chặn tạo Lead; allowlist
-Peer/Lens không giới hạn model của Lead. Settings cho chỉnh effort ưu tiên khi không chỉ định.
+| Vai | Thứ tự (cao → thấp) |
+|---|---|
+| Peer | claude Sonnet 5.5 high → claude Sonnet 5.5 medium → codex gpt-6.1-sol high → agy gemini-4-argon-medium → pi zai/glm-5.3 high → pi izno-vps/ds/deepseek-v4.1-flash high |
+| Lens | claude Opus 5.5 medium → codex gpt-6-astra medium → agy gemini-4-argon-high |
+
+Lead chọn route cuối cùng trong danh sách của vai đó, đi từ trên xuống, bỏ qua route không có
+trong catalog hoặc hết quota và ghi lý do; Supervisor/HQ có thể can thiệp bằng lý do và bằng
+chứng. Không có classifier tự đọc prompt để định độ khó, và không tự đổi model đang chạy.
+HQ/Supervisor/Lead giữ lựa chọn model độc lập với danh sách Peer/Lens.
+
+HQ/Supervisor/Lead không ghi model thì dùng **GPT-6.1 Sol hoặc Claude Sonnet 5.5**; được chọn
+tường minh model/effort khác trong catalog thật (Astra/Opus khi task cần, ghi lý do). Đây không phải
+điều kiện chặn tạo owner; danh sách Peer/Lens không giới hạn model của owner. Settings cho chỉnh effort ưu tiên khi không chỉ định.
 Nếu model không hỗ trợ effort ưu tiên thì dùng mặc định khả dụng của model. Model/effort được
 chọn tường minh nhưng không có trong catalog vẫn báo lỗi, không tự đổi ngầm.
 
-Gate kiểm tra mọi lượt **tạo agent Alliance** qua UI/native `create_agent` và RPC. Native
-delegation chỉ có model/effort nên gate kiểm tra hợp của allowlist; band độ khó là hướng dẫn
-cho Lead. RPC `members.launch` có `difficulty` thì kiểm tra thêm band được chọn. Bỏ model/effort
-sẽ lấy route khả dụng theo priority, ưu tiên band standard khi không chỉ định độ khó.
+Gate kiểm tra mọi lượt **tạo agent Alliance** qua UI/native `create_agent` và RPC, kể cả khi
+Human tự tạo. Peer/Lens phải khớp đúng harness, model và effort trong danh sách của vai đó.
+RPC `members.launch` có `difficulty` thì kiểm tra thêm mức độ khó. Bỏ model sẽ lấy route đầu
+tiên còn khả dụng của harness đó; bỏ effort sẽ lấy route đầu tiên của model đó. Khi bị từ chối,
+lỗi liệt kê các route room cho phép và chỉ chỗ sửa.
 
 Settings áp dụng cho **launch mới**. Phiên đang mở giữ context cũ; SDK Paseo hiện chưa có hook
 chặn đổi model/effort ngay trong phiên. Khi đổi policy, owner cần bàn giao assignment sang phiên
@@ -240,7 +250,7 @@ HQ, Supervisor, Lead, Peer và Lens. Đăng nhập tài khoản dành riêng cho
 cho bộ role theo [hướng dẫn vận hành](operations.md#agy-role-profiles).
 HOME, config, skills và lịch sử của từng role vẫn tách biệt.
 Room đã lưu model policy cần thêm route AGY trong Model settings trước khi tạo
-Peer/Lens. Model AGY mã hóa effort trong tên, ví dụ `claude-sonnet-5-5-medium`.
+Peer/Lens. Model AGY mã hóa effort trong tên, ví dụ `gemini-4-argon-medium`.
 
 ### Mobbin MCP dùng chung theo user
 

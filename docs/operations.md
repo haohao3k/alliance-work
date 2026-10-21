@@ -708,6 +708,37 @@ uses the standard band and cannot fall through to a frontier route because a che
 unavailable. Explicit saved room policies remain authoritative. Existing native sessions retain
 their model and prompt; use policy read at their next work boundary, with no broadcast or restart.
 
+## Peer and Lens model lists (0.1.18)
+
+Each route now names its role. Peer and Lens have separate ordered lists; every release-default
+route serves all four difficulties, so the order alone expresses the Human's preference:
+
+- Peer: claude `claude-sonnet-5-5` high, claude `claude-sonnet-5-5` medium, codex `gpt-6.1-sol`
+  high, agy `gemini-4-argon-medium`, pi `zai/glm-5.3` high, pi `izno-vps/ds/deepseek-v4.1-flash` high.
+- Lens: claude `claude-opus-5-5` medium, codex `gpt-6-astra` medium, agy `gemini-4-argon-high`.
+
+The gate matches the target role's list exactly. An omitted model takes the harness's first
+standard route that the live catalog offers, so a missing Pi provider falls to the next Pi route
+and never to another harness. A refusal lists the routes the room allows for that harness and role.
+Pi routes need the provider in the Pi Peer role: `zai` credentials in its `auth.json` and the
+`izno-vps` provider (with `ds/deepseek-v4.1-flash`) in its unmanaged `models.json`.
+
+A policy saved before 0.1.18 has no roles; each of its routes applies to both Peer and Lens and is
+written in the per-role form on the next save. `alliance-work models show [--room ID]` prints each
+room's lists and whether they are saved or the release default. `alliance-work models reset
+--room ID|--all` (Human only, refused inside an agent session) deletes the saved row so the room
+follows the release defaults, including later releases. Revisions keep counting through a reset
+(`room_model_policy_resets`), so a settings page opened before the reset cannot overwrite a later
+save. The Models page offers the same reset as **Follow release defaults**.
+
+Rollback: releases before 0.1.18 read routes without roles. A saved list that names the same
+harness/model/effort for both Peer and Lens (for example an upgraded pre-0.1.18 list after any
+save) is invalid there: every Alliance launch in that room, owners included, would fail and the
+old Models page could not open it. `alliance-work rollback` therefore refuses while such a room
+exists and names it; reset it or remove the duplicate first. Release defaults and reset rooms stay
+readable by older releases. Running sessions keep the list in their system prompt, while the gate
+always reads the current list.
+
 ## AGY role profiles
 
 When `agy` is on the installation PATH, preparation adds `agy-hq`, `agy-supervisor`,
@@ -738,9 +769,9 @@ This is a provider adapter, not another coordination server.
 
 AGY's live model IDs encode effort (for example `claude-sonnet-5-5-medium`). The
 catalog exposes only that matching effort; it never translates an unsupported
-selection. New rooms include AGY Sonnet medium/high and Opus high routes.
-Existing saved policies remain unchanged: add the desired AGY routes in the
-room's Model settings before launching a Peer or Lens there.
+selection. Since 0.1.18 the release defaults use AGY Gemini 4 Argon medium for
+Peer and Argon high for Lens. Existing saved policies remain unchanged: add the
+desired AGY routes in the room's Model settings before launching a Peer or Lens there.
 
 Before activation, qualify authenticated MCP calls, two simultaneous native agents,
 and a real owner → peer → owner handback on each target host with

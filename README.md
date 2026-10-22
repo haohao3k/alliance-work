@@ -9,7 +9,8 @@ reasoning and tools. Start with one Supervisor and let the work determine the te
 ## Install
 
 Requires macOS or Linux, Node 24+, npm, Codex 0.160.0+ and Claude Code 2.1.289+.
-Paseo **0.11.2** and Pi **1.0.0** are pinned and installed locally with the package. The repository is private;
+Paseo CLI/client **0.12.0** and Pi **1.0.0** are pinned and installed locally with the package; running 0.11.2 and
+0.12.0 daemons are supported. The repository is private;
 GitHub downloads require `gh auth login` with access to `haohao3k/alliance-work`.
 
 From this checkout:
@@ -189,8 +190,9 @@ in the [durable obligation ledger](docs/operations.md#durable-obligations-0111).
 current policy and open obligations together; no compulsory review or acknowledgement loop.
 
 Durable wakeups can track a deadline, a registered process exit or an exact child turn.
-They preserve owner/revision and restart state without accepting results. Pull delivery is the
-safe default; idle auto-delivery is opt-in. See [commands and delivery limits](docs/operations.md#durable-wakeups-019).
+They preserve owner/revision and restart state without accepting results, and wake their owner
+when it is idle; pull delivery is opt-in. Agents wait with `alliance-work wait` and end their turn
+instead of polling. See [commands and delivery limits](docs/operations.md#durable-wakeups-019).
 
 Current sessions adopt updated operating policy at their next natural work boundary with
 `alliance-work policy read` / `policy ack`; the monitor shows unacknowledged policy. Explicit
@@ -202,13 +204,20 @@ New delegated Alliance agents can now continue unfinished assignments across idl
 failed turns with bounded backoff, wake their owner for review and archive after evidence-bound
 acceptance. Existing chats opt in with `alliance-work autonomy start --agent ID`; inspect with
 `alliance-work autonomy list`, pause with `autonomy checkpoint --agent ID --phase paused --reason TEXT`.
-See [autonomous assignment operation and real-model acceptance](docs/operations.md#autonomous-assignments-0111).
+See [autonomous assignment operation and real-model acceptance](docs/operations.md#autonomous-assignments-0112).
 From 0.1.16 acceptance is the closing decision for every Alliance agent: only the owner chain or
 the Human may accept, Leads/Supervisors/HQ need product acceptance, and `status` explains what
 holds each agent open. See [closing work by decision](docs/operations.md#closing-work-by-decision-0116).
+From 0.1.19 a review ends with a decision that closes it without an ack (`accept`, a rework
+prompt, or `reject --reason`, which tells the child nothing: follow it with rework or archive) or
+with `wakeups defer`; see [handback, waiting and reminders](docs/operations.md#handback-waiting-and-reminders-0119).
+Alliance denies a member's approval request left pending for 5 minutes ([stuck members](docs/operations.md#stuck-members-0119)),
+and a provider limit (Claude's included, which Paseo reports as a completed turn) pauses every prompt
+to that harness's members on the host until it resets ([autonomous assignments](docs/operations.md#autonomous-assignments-0112)).
 
 With `agy` installed, setup adds isolated AGY HQ, Supervisor, Lead, Peer and Lens
-profiles. Use a dedicated Alliance login shared only within that role set. See
+profiles; they run only Gemini models. Use a dedicated Alliance login shared only within that
+role set. See
 [AGY setup and supported behavior](docs/operations.md#agy-role-profiles)
 for authentication and native coordination qualification.
 

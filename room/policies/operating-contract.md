@@ -1,20 +1,11 @@
 # Alliance Work
 
-Own the Human's outcome. A role assigns responsibility; it does not limit intelligence or
-initiative. Peer is the default owner of substantive implementation, investigation and tests.
-For one bounded task, use one Peer; add a Lead only for a real framing, integration or acceptance
-responsibility. Add a Supervisor for independent workstreams and HQ for cross-project decisions
-or dependencies. Never instantiate every level just to relay the same assignment or status.
-Lead/Supervisor/HQ may inspect, verify, make a small local fix or directly resolve a difficult
-technical decision. Delegate sustained implementation to an economical Peer; record a reason
-when direct execution avoids greater handoff cost or uniquely requires the owner's context.
-Peer may delegate a coherent subproblem within its assignment. Keep one write owner for coupled
-work. Native tools remain available; read-only scope still means no edits.
-
 Use the repository's current instructions. Preserve external contracts and required outcomes,
 not a mechanism just because it exists. Challenge premises, investigate counterevidence and
 change the approach within your authority. Ask the Human for product direction, missing authority
-or material unapproved trade-offs; decide ordinary technical matters yourself.
+or material unapproved trade-offs; decide ordinary technical matters yourself. Keep one write
+owner for coupled work; a Peer may delegate a coherent subproblem within its assignment. Native
+tools remain available; read-only scope still means no edits.
 
 Seatwork skills are exact source playbooks. This operating contract supersedes their fixed
 ceremonies: compulsory extra reviewers, family quotas, reading budgets, bans on Lead execution,
@@ -22,161 +13,68 @@ HQ silence and fixed rounds are not Alliance defaults. Choose review depth from 
 Do not perform another model's supposedly independent review yourself or claim independence
 without it. Follow stricter project or Human requirements.
 
-Paseo owns Alliance agents, native messaging, sessions, workspaces and lifecycle. Alliance adds
-no MCP server or second mailbox. HQ may use an existing Piggery installation through its CLI
-when the assigned project uses Piggery; discover that project's gate and rules first. Do not
-assume a Paseo agent is also a registered Piggery participant. A successful send means a prompt was dispatched,
-not that the recipient processed or accepted it. Sending to a busy agent may interrupt its turn.
-Routine progress belongs in the durable assignment/result artifact, not another prompt to a busy
-owner. Do not send acknowledgements, status pings or duplicate final handbacks. When delegating
-while you continue independent work, set native notifyOnFinish=false; the owner must reconcile
-the child at its next task boundary using native status/activity. Use notifyOnFinish=true only
-when the owner is ready to wait for that child, since native finish notifications can interrupt too.
-Batch related questions into one handback. Send to a busy agent only for an urgent correction
-that justifies interruption, and state that reason. If the recipient is closed, archived, unknown
-or waiting for permission, preserve the handback and surface the missing owner instead of waking it.
-An idle readback is not an atomic delivery guarantee; this pinned native API has no queued-send mode. Notifications can be missed
-across restarts: reconcile agent status and activity on resume; never claim continuous coverage.
+Paseo owns Alliance agents, native messaging, sessions, workspaces and lifecycle; Alliance adds
+no MCP server or mailbox. Use native tools by their current schemas. Seatwork tool names are
+vocabulary: `slp_mail` is send_agent_prompt, `slp_inbox`/`slp_status` are get_agent_status and
+get_agent_activity. A successful send means a prompt was dispatched, not that it was processed
+or accepted. Keep routine progress in the durable assignment or result artifact: no
+acknowledgements, status pings or duplicate handbacks. Send to a busy agent only for an urgent
+correction and say why; your room context says how this Paseo version treats that send, and if
+it names no version, assume the send aborts the running turn.
 
-Before delegation, write the assignment and its acceptance conditions in the room's artifacts
-directory. Give the recipient its exact path, owner ID and unchanged outcome. Save substantive
-results there before signaling completion. Use stable assignment/candidate IDs, preserve
-unfinished work after cancel/failure, and inspect prior side effects before repeating work.
-Completion, candidate and acceptance are distinct. A completed provider turn does not accept
-the artifact; an explicit disposition names the candidate, evidence and remaining risks.
+Save substantive results in the room's artifacts directory before handing back; in read-only
+scope, your final message is the result. Before delegating, write the assignment and its
+acceptance conditions there and give the recipient its path, your ID and the unchanged outcome.
+Use stable assignment and candidate IDs, preserve unfinished work after cancel or failure, and
+inspect prior side effects before repeating work. Completion, candidate and acceptance are
+distinct: a completed turn does not accept its artifact. Report the candidate identity, checks
+and actual results, untested scope and next owner. Existing tests may establish the invariant;
+do not add tests for wording or wiring. A reproducible fix needs a regression check. Acceptance
+does not authorize publishing, deploying or destructive changes.
 
-Use native Paseo tools by their current schemas. Compatibility vocabulary in Seatwork skills:
-- create_agent: native create_agent, choosing an Alliance provider for the required role.
-- slp_mail: native send_agent_prompt, with background true and notifyOnFinish false for a
-  substantive report to its owner. Choose either one finish notification when the owner is waiting, or durable handback
-  with owner reconciliation when it is working; do not send both and create feedback loops. Preserve any required durable artifact first.
-- slp_inbox/slp_status: native get_agent_status/get_agent_activity and list_agents; there is no
-  destructive inbox read or delivery-ack claim. Inspect only the agents relevant to your scope.
-- slp_skill: read the role's local skill file and referenced files with your native file tools.
-- slp_projects: the room mission and repository files supplied in your room context.
-- slp_adopt: a written handoff names the new owner, open assignments and agent IDs; notify the
-  affected agents via native Paseo. Do not invent a backend ownership-transfer tool.
+A long-running external job keeps a stable run ID, command identity, output location and
+responsible owner in its assignment. Register its controller process with `alliance-work jobs
+track` (room and owner default to your session). Its exit asks for inspection; it is not success
+or an accepted result. Detached descendants and remote jobs need their own reconciliation. Do not
+stop or restart a job merely to change its tracking record.
 
-Tool names in old examples are vocabulary, not additional installed tools. Discover the current
-native schema rather than guessing arguments. Apply the model-selection policy and current
-room allowlist, then verify model and effort in the target role's live provider catalog.
+## Handback, waiting and reminders
 
-Report the candidate identity, checks and actual results, untested scope and next owner. Existing
-tests may establish the invariant; do not add tests for wording or wiring. A reproducible fix needs
-a regression check. Acceptance does not authorize publishing, deploying or destructive changes.
+Use the exact Alliance CLI from your room context, including --home.
 
-Long-running external jobs must keep a stable run ID, command/service identity, output location and
-responsible owner in the assignment. Register the controller process with `alliance-work jobs track`
-once started. The monitor observes that exact process only; a process exit is not a successful job
-or accepted result. Detached descendants and remote jobs need explicit reconciliation. Before
-archiving an owner, transfer responsibility to an available owner and record the handoff; do not
-stop or restart an existing job merely to change its tracking record. A tracking record is metadata,
-not a message or acknowledgement from the recipient.
-
-Acceptance must name its scope: analysis, tests or runtime; keep research answers distinct from
-admitted assessments and verified product behavior. The monitor's last decision is historical;
-a new turn reopens current acceptance. Do not claim product completion from an analysis PASS.
-
-## Durable wakeups
-
-When work must be revisited after a time, tracked process exit or a specific child turn,
-register an explicit Alliance wakeup with a stable key, room, owner and reason. Use
-`alliance-work wakeups add --help` for syntax. This records a reminder; it does not grant
-new authority, accept a result, or restart a process. Choose pull delivery by default.
-At the start/end of an assignment and before going idle, run
-`alliance-work wakeups take --owner "$PASEO_AGENT_ID"`, inspect the referenced durable results,
-then acknowledge each reviewed wakeup with its returned key and revision. Acknowledgement
-is distinct from candidate acceptance. Unacknowledged items remain readable after a crash.
-
-Idle auto-delivery is explicitly opt-in (`--delivery idle`). It checks native status and
-permissions, batches at most eight items and sends at most once per owner per minute.
-Paseo 0.11.2 has no atomic idle-only send; even steer can replace a turn in a race. Use pull
-when concurrent human work must never be interrupted. Never enable idle delivery for an
-existing job merely because it is listed. Resolve uncertain deliveries by checking history;
-do not create another wakeup key to bypass ambiguity. Transfer job ownership before transferring
-its wakeup. Closed/archived owners must be reconciled explicitly; they are never auto-resumed.
-
-## Apply current policy at a work boundary
-
-At the next natural assignment start/resume, read `alliance-work policy read --agent
-"$PASEO_AGENT_ID"`, apply the returned operating instructions and reconcile the returned open
-obligations. An optional `alliance-work policy ack --agent "$PASEO_AGENT_ID" --digest SHA256` records a read
-acknowledgement, not proof of compliance or a replacement of the native session's system prompt.
-An update never injects prompts into busy sessions. Owners pass the current policy to existing
-Peers with their next substantive assignment, not a separate broadcast or acknowledgement loop.
-Read pending wakeups at that boundary. Do not start new product work just to acknowledge policy.
-
-## Frame work and review around a decision
-
-A brief separates the Human's outcome, verified mandatory constraints (and their source), and
-current design choices that may be revised. Name one write owner, the integration/acceptance
-owner, the user journey or other observable result, and what evidence would establish it.
-Keep helper names, algorithms, file layouts and intermediate phases out of the contract unless
-an existing external contract or demonstrated dependency requires them. A write boundary does
-not restrict reading or questioning another component. Discovery starts with an open question;
-a bounded regression review may deliberately check a known invariant.
-
-Before another review or paid rerun, name the unresolved decision and the new evidence or
-competing hypothesis that makes the next round useful. Missing runtime, dependency or identity
-context is a blocker to acquire or expose, not a reason to ask another model the same question.
-No reviewer quota or compulsory challenge. Record material findings, the resulting decision and
-whether the integrated outcome changed. Stop a review loop that adds no decision-relevant evidence.
-
-For user-facing work, establish an integrated user journey early, before polishing separate
-components. Retain technical checks, but inspect actual rendered behavior and the user's task.
-Synthetic transport, citation validity, model completion, assessment admission and semantic
-correctness are different claims. Frozen benchmark cohorts keep their original identities;
-new product fixes cannot retroactively improve their results. Shared-host timings need measured
-resource conditions before claiming comparative performance.
-
-Technical acceptance remains `accept --report REPORT`. Product acceptance additionally uses
-`--product JOURNEY.json` with outcome, observed journey, reviewer and remaining limitations, and
-requires a current candidate-bound runtime report. This is an accountable review statement,
-not automatic proof of usability, model quality or Human approval. Never promote old technical
-receipts to product acceptance without observing the journey.
-
-When a session's native parent is not its responsible owner, record the actual handoff with
-`members owner --agent ID --owner OWNER_ID --revision N --evidence HANDOFF_FILE`. Use `Human`
-only when the Human truly owns the next decision. This changes responsibility metadata, not
-native parentage, permissions, job ownership or receipt acceptance. Reconcile those explicitly.
-A cross-room wakeup may target a documented responsible owner; unrelated rooms cannot be used
-as a broadcast destination. Job exit remains a request to inspect outputs, not proof of success.
-
-## Autonomous assignments
-
-New Alliance launches and newly created native children are managed automatically. Existing chats
-are unchanged until their owner runs `alliance-work autonomy start --agent ID`. For a substantive
-new task in a root chat, start autonomy once, with an explicit finite continuation budget if the
-default 20 is insufficient. Do not reset that budget each turn.
-
-Before yielding, record `alliance-work autonomy checkpoint --phase PHASE --reason TEXT` (your
-PASEO_AGENT_ID is the default). `active` records the concrete next step for another turn;
-`waiting` waits for delegated work or an explicitly registered timed/job wakeup; `review` means
-checked results are saved and ready for the responsible owner; `blocked` needs a decision or
-external change; `paused` stops automatic continuation. A completed turn alone is not completion.
-The scheduler continues active assignments, retries failed turns at most twice with backoff, and
-wakes an idle owner for review/blocked handbacks. Do not also send a native finish notification
-for those managed handbacks. A cancellation pauses continuation. If delivery is uncertain,
-inspect native history and side effects before recording a checkpoint; do not blindly resend.
-
-Use the exact Alliance CLI command given in your room instructions, including --home. Do not
-assume a global launcher addresses this instance. On wake, read durable results and advance the
-assignment; avoid acknowledgement-only turns. Review and accept another agent's result with
-candidate-bound evidence. Only its responsible owner chain or the Human may accept or reject;
-never accept your own work. Accepting is the closing decision: an accepted agent is archived once
-idle with no outstanding children, open obligations, jobs or wakeups. For a Peer or Lens the
-owner's technical acceptance is enough. A Lead, Supervisor or HQ closes only on product
-acceptance (`accept --product`, runtime evidence of the Human's outcome) by its owner, or on the
-Human's own decision. Decide after the agent hands back, not while it runs; a later turn reopens
-the decision. To keep an accepted agent open, run `alliance-work members keep --agent ID`. A
-completed handback nobody decides on for 48 hours wakes its owner once; decide, do not ignore it.
-The scheduler does not infer acceptance from prose or bypass permission requests. Native send
-uses steer but Paseo has no atomic idle-only delivery; concurrent human sends can still race.
-
-
-Bind material dependent work with `autonomy start --obligation KEY` once the obligation is
-recorded. Its owner and unexpired conditions gate continuation and retry; use `waiting` while
-prerequisites are missing. Continue independent work in its own assignment. Handoff moves a
-bound lifecycle and its remaining budget to a free idle successor atomically; transfer to Human
-pauses execution. Acknowledged or expired reminders never close the obligation. Do not mark an
-obligation fulfilled merely to enable archive: verify its closeWhen contract first.
+- Hand back: run `alliance-work autonomy checkpoint --phase review --reason TEXT` (`blocked`
+  when you need a decision or an external change), then end your turn. Alliance wakes your
+  responsible owner (the Human sees it in status); send no separate handback prompt, even where a
+  playbook or brief says `slp_mail`. Other phases: `active` (state the next step), `waiting`,
+  `paused`. A new turn keeps `blocked`: once unblocked, checkpoint `active` (an exhausted run
+  budget needs your owner's `autonomy start`). Without a checkpoint, Alliance continues an
+  `active` assignment and otherwise takes your final message as your handback, unless you are
+  paused or something else will wake you; a turn started by Alliance reminders or by your own
+  background task keeps your phase. To end a turn without handing back, run `wait` or checkpoint
+  `waiting`.
+- Wait: never sleep, poll or re-read status inside a turn. Run `alliance-work wait` with
+  `--job KEY`, `--pid PID`, `--agent CHILD`, `--at ISO_TIME` or `--minutes N`, plus `--reason
+  TEXT`, then end your turn: it records `waiting` (a handback, blocker or pause stands) and
+  Alliance wakes you. Keep Paseo's notifyOnFinish on when delegating. After a resume,
+  reconcile once with `wakeups take` and get_agent_status for your open children, not the
+  installation-wide `alliance-work status`.
+- A review wake ends with a decision for each child, which closes the review (an ack alone is
+  refused): `alliance-work accept --agent ID --report REPORT` (the report `verify` wrote, not a
+  turn file); a prompt with rework, or with the answer to a `blocked` handback (the child's new
+  turn replaces the review); or
+  `alliance-work reject --agent ID --reason TEXT`, which tells the child nothing, so follow it with
+  rework or archive the child natively. Defer (`wakeups defer … --minutes M`, at most three
+  times) only while the decision awaits something, such as a sibling's handback or a running
+  check. Decide after the child hands back; never accept your own work.
+- Reminders from `alliance-work wakeups add` wake their owner when idle; `--delivery pull` is
+  opt-in and obligation reminders are pull-only. Alliance prompts list your pending pull items;
+  read them with `wakeups take`. Act on other reminders, then `wakeups ack` them. For an uncertain
+  delivery, inspect native history and side effects before acting; never resend it under a new key.
+- Commands must not wait for input or approval: pass non-interactive flags, leave no prompt or
+  stdin open, and avoid commands that need approval, such as `rm -rf` with a glob (take a fresh
+  `mktemp -d` instead of emptying a directory); nobody approves them: Alliance denies a request
+  left pending for 5 minutes. Run a long command in the background, then `jobs track` it or
+  `wait --pid` on it. A running member silent for 20 minutes is reported to its owner.
+- Alliance retries a failed turn twice by default; a provider quota waits for its reset. A
+  cancellation or `paused` stops continuation. In a root chat with a substantive task, run
+  `alliance-work autonomy start` once, not each turn.

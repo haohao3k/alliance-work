@@ -224,7 +224,7 @@ test("pre-0.1.18 saved routes apply to both Peer and Lens; reset returns a room 
       store.modelPolicy("legacy").policy,
     );
     const stale = store.modelPolicy("legacy");
-    const reset = store.resetModelPolicy("legacy");
+    const { removed: _kept, ...reset } = store.resetModelPolicy("legacy");
     // Revisions keep counting through a reset; only the saved row is gone.
     assert.deepEqual(reset, { policy: defaultModelPolicy(), revision: 3, saved: false });
     assert.throws(() => store.saveModelPolicy("legacy", stale.policy, stale.revision), /changed elsewhere/);
@@ -348,9 +348,18 @@ test("room policy persists independently, validates coverage and rejects stale e
 
 test("omitted owner models stay economical; premium owners need an explicit choice", () => {
   const policy = defaultModelPolicy();
+  // The live AGY catalog also lists Claude models; AGY owners still default to Gemini.
+  const agyLive = [
+    ...agy,
+    ...["medium", "high"].map((effort) => model(`claude-sonnet-5-5-${effort}`, [effort])),
+  ];
   for (const role of ["hq", "supervisor", "lead"] as const) {
     assert.equal(chooseModel(policy, role, "codex", catalog).model, "gpt-6.1-sol");
     assert.equal(chooseModel(policy, role, "claude", catalog).model, "claude-sonnet-5-5");
+    assert.deepEqual(chooseModel(policy, role, "agy", agyLive), {
+      model: "gemini-4-argon-medium",
+      thinkingOptionId: "medium",
+    });
     assert.equal(chooseModel(policy, role, "codex", catalog, "gpt-6-astra", "high").model, "gpt-6-astra");
     // Owners ignore the worker lists entirely.
     assert.equal(
@@ -428,8 +437,30 @@ test("reset clears unreadable lists, never lowers the revision and can require t
     assert.deepEqual([cleared.revision, cleared.saved], [4, false], "max(row 1, counter 3) + 1");
     // The Models page passes the revision it shows (plain was saved once: revision 1).
     assert.throws(() => store.resetModelPolicy("plain", 0), /changed elsewhere/);
-    assert.equal(store.resetModelPolicy("plain", 1).saved, false);
+    const plain = store.resetModelPolicy("plain", 1);
+    assert.equal(plain.saved, false);
     assert.deepEqual(roomsUnreadableBefore0118(home), ["shared room (shared)"]);
+    // Each reset keeps the removed row byte for byte, even when it cannot be parsed; a room with
+    // nothing saved has nothing to keep.
+    assert.equal(cleared.removed?.revision, 1);
+    assert.equal(plain.removed?.revision, 1);
+    assert.equal(store.resetModelPolicy("plain").removed, undefined);
+    const copies = new DatabaseSync(join(home, "rooms.sqlite"), { readOnly: true });
+    const copy = (id?: number) =>
+      copies.prepare("SELECT roomId, revision, data FROM room_model_policy_removed WHERE id=?").get(id ?? -1);
+    assert.deepEqual(
+      { ...copy(cleared.removed?.id) },
+      {
+        roomId: "broken",
+        revision: 1,
+        data: JSON.stringify({
+          leadEffort: "medium",
+          routes: [{ harness: "future", model: "x", effort: "high" }],
+        }),
+      },
+    );
+    assert.deepEqual({ ...copy(plain.removed?.id) }, { roomId: "plain", revision: 1, data: "{" });
+    copies.close();
   } finally {
     store.close();
   }

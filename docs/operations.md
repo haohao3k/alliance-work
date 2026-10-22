@@ -158,7 +158,8 @@ dependency changes, verified by native tests and shipped with a new release.
 | `setup --refresh` | Rebuild managed assets from the current version, preserving private state |
 | `update --check` | Read latest stable release from `haohao3k/alliance-work`; no file changes |
 | `update` | Verify/download a release, check it, then activate it when idle |
-| `update --wait-idle MIN` | Stage and check now; activate as soon as readback is idle, for at most MIN minutes |
+| `update --wait-idle MIN` | Stage and check now; activate as soon as readback is idle, for at most MIN minutes. Scheduled prompts keep running until each activation attempt |
+| `update --wait-idle MIN --hold` | The same, but scheduled prompts stay paused from the end of staging until activation, so agents you stop are not woken: for a busy host |
 | `update --bundle DIR` | Same staged update from a release `deploy` copied here; needs no GitHub access |
 | `deploy --host H …` | From a machine with `gh`, push the release over SSH and run `update --bundle` on each host |
 | `rollback` | Activate the previous installation root, preserving current rooms and credentials |
@@ -184,41 +185,68 @@ Without `--detach` the controller follows each log until the host records its ex
 removes the temporary directory on success. Interrupting the controller does not stop a remote
 update; its log stays on the host. `--remember` saves the host list to `~/.alliance-work/fleet.json`.
 
-`--wait-idle MIN` stages and checks first, then waits for idleness instead of failing. If an
-agent starts between the idle readback and activation, the restored candidate waits again until
-the deadline. A staged copy that never became active is removed, including after Ctrl-C during
-the wait; if activation itself was interrupted or failed after switching, the copy is kept and
-the command says to run `doctor`. Over SSH (`--bundle`) a
-stopped daemon is refused rather than started with the remote shell's environment: start Paseo
-on that host normally, then rerun. An agent cannot run a non-detached wait (it would wait for
-itself). Ctrl-C or a hang-up releases the maintenance lock; a lock whose process has died on
-the same host is treated as stale.
+`--wait-idle MIN` stages and checks first, then waits for idleness instead of failing. Since
+0.1.19 scheduled prompts (continuations, retries, handback reminders) keep running while it
+stages and waits, and pause only for each activation attempt. An attempt starts once readback is
+idle: it takes the scheduler pause, waits up to two minutes for a plugin round that began after
+the pause (or finds no plugin running), re-reads the installation and stops if the same or a
+newer release is already active, then runs the candidate's installer. If an agent started
+meanwhile, the attempt releases the pause and the update keeps waiting until the deadline. A
+staged copy that never became active is removed, including after Ctrl-C during the wait; if
+activation itself was interrupted or failed after switching, the copy is kept and the command
+says to run `doctor`. Over SSH (`--bundle`) a stopped daemon is refused rather than started with
+the remote shell's environment: start Paseo on that host normally, then rerun. An agent cannot
+run a non-detached wait (it would wait for itself). Ctrl-C or a hang-up removes only the locks
+the command holds; a lock whose process has died on the same host is treated as stale.
 
-The scheduler pause during the wait exists only in a running 0.1.16 plugin. For the first
-deploy to hosts that still run 0.1.15, their plugin keeps continuing active assignments, so a
-busy host may never be idle within the wait. Choose a quiet window, or pause busy assignments
-there first (`alliance-work autonomy checkpoint --agent ID --phase paused --reason …`).
+With `--hold` (only with `--wait-idle`; `deploy` passes it on) the update takes the scheduler
+pause as soon as staging and checks end, logs that scheduled prompts are paused, and keeps the
+pause through the wait and every activation attempt; a busy attempt no longer releases it. If an
+older release's maintenance command holds the pause at that moment, the update waits until it can
+take it.
 
-To activate on a busy host now instead of waiting, stop its running agents with the Paseo CLI
-of the active release, addressed to the Alliance instance. Use Node 24 (the one named in the
-launcher), and pass `--home`: without it the CLI addresses `~/.paseo`.
+An installed CLI older than 0.1.19 holds the pause for the whole wait, so for a waiting deploy
+to such a host the remote side runs the candidate's own CLI instead (one extra `npm ci`), with
+`--hold` when given. Update the controller first. That older CLI knows only the scheduler pause:
+while the candidate holds just `.maintenance-mutex` (while it stages, and while it waits without
+`--hold`), the older CLI's `update`, `rollback`, `setup --refresh` and `auth` still run. Do not run
+them on that host while `~/.alliance-work/.maintenance-mutex` exists. Because assignments keep
+running during the wait, a busy host may not become idle in time: choose a quiet window, or empty
+the host as below.
 
-```sh
-I="$HOME/.alliance-work/installation.json"
-ROOT=$(node -p "require('$I').root"); PASEO_HOME=$(node -p "require('$I').paseoHome")
-ap() { node "$ROOT/node_modules/@getpaseo/cli/bin/paseo" "$@" --home "$PASEO_HOME"; }
-ap agent ls --json            # note which agents are running
-ap agent stop AGENT_ID        # repeat until agent ls shows none running
-```
+To activate on a busy host without waiting for its work to finish:
 
-A parent woken by a child's stop notice starts a turn; stop it the same way. A waiting update
-activates within about 20 seconds of idleness. Only after `alliance-work doctor` reports the new
-version, send each stopped agent a short message saying why it was stopped and what to check; a
-turn sent after a cancellation resumes its assignment:
+1. Start a held waiting update: `alliance-work deploy --host H --wait-idle 120 --hold --detach` on
+   the controller, or `alliance-work update --wait-idle 120 --hold` on the host. Agents keep working
+   while it stages and checks the release.
+2. Once its log says scheduled prompts are paused and `alliance-work status` on the host shows
+   `wakeupHealth.error` "Maintenance lock held…", stop the running agents with the Paseo CLI of the
+   active release, addressed to the Alliance instance. Use Node 24 (the one named in the launcher),
+   and pass `--home`: without it the CLI addresses `~/.paseo`.
 
-```sh
-ap agent send AGENT_ID --prompt-file resume.md --no-wait
-```
+   ```sh
+   I="$HOME/.alliance-work/installation.json"
+   ROOT=$(node -p "require('$I').root"); PASEO_HOME=$(node -p "require('$I').paseoHome")
+   ap() { node "$ROOT/node_modules/@getpaseo/cli/bin/paseo" "$@" --home "$PASEO_HOME"; }
+   ap agent ls --json            # note which agents are running
+   ap agent stop AGENT_ID        # repeat until agent ls shows none running
+   ```
+
+   A parent woken by a child's stop notice starts a turn; stop it the same way. No continuation,
+   retry or reminder starts meanwhile.
+3. The update starts activating within about 20 seconds of idleness and releases the pause when it
+   ends. Only after `alliance-work doctor` reports the new version, send each stopped agent a short
+   message saying why it was stopped and what to check; a turn sent after a cancellation resumes its
+   assignment:
+
+   ```sh
+   ap agent send AGENT_ID --prompt-file resume.md --no-wait
+   ```
+
+Do not stop agents before the pause is held. Without `--hold` a waiting update leaves scheduled
+prompts running while it waits, and an update without `--wait-idle` pauses them only when it
+starts: in both cases an idle assignment may be continued, or an owner reminded, into an agent
+you just stopped, and an update without a wait then refuses the busy host.
 
 ### Long-lived sessions after an update (0.1.17)
 
@@ -237,11 +265,15 @@ Updates do not rewrite the development checkout. Release code lives under
 activated root. No release in the private repository means no downloadable update; there is
 no fallback to another repository or an unpinned branch.
 
-A maintenance lock prevents competing installer/updater processes. Before mutation and again
-before hot reload, native readback must show no running/starting agents and no active workspace
-scripts. Unknown status is refused. Finish current work and rerun; updates do not kill agents.
-Native sessions reported as `closed` after a daemon restart are inactive and permit maintenance.
-Do not start assignments while maintenance is running.
+One maintenance command runs per home: it holds `.maintenance-mutex` for its whole run, which
+pauses nothing. `.maintenance-lock` is the scheduler pause running plugins read; every command
+except a waiting update holds it for its whole run (a waiting update holds it for each activation
+attempt, or from the end of staging with `--hold`), and a 0.1.19 CLI refuses to start while an
+older release's command holds it. Before mutation and again before hot reload, native readback
+must show no running/starting agents and no active workspace scripts. Unknown status is refused.
+Finish current work and rerun; updates do not kill agents. Native sessions reported as `closed`
+after a daemon restart are inactive and permit maintenance. Do not start assignments while
+maintenance is running.
 
 Managed profiles, the installation record, CLI launcher and dedicated Paseo configuration are
 saved beneath `~/.alliance-work/backups/` before activation. Handwritten changes to managed
@@ -259,10 +291,20 @@ defaults until explicitly saved. Older code ignores this table; rollback preserv
 `rollback` is a code
 and generated-profile rollback, not a rollback of work the agents have performed. A source
 installation uses the current checkout bytes; rollback does not undo edits to that checkout.
+Rolling back below 0.1.19 also removes the handback-only assignment records 0.1.19 created,
+because older releases would continue them; their undecided handbacks fall to the 48-hour
+reminder. Each assignment that turns keeping its phase moved past its member's last turn is set
+back on that turn, which older releases review. A reminder 0.1.19 stored without `--delivery` is
+idle, so an older CLI re-adds that key
+only with `--delivery idle`. The pull-reminder migration runs once per home: reminders an older
+release stores pull after a rollback stay pull when 0.1.19 returns. Sessions created on 0.1.19 keep instructions that use `alliance-work
+wait`, `reject` and `wakeups defer`, which older CLIs refuse: after such a rollback, send those
+agents a short note (instead of `wait`, add a reminder with `wakeups add … --delivery idle` and end
+the turn; decide with `accept` or a rework prompt), or recreate them.
 
 Backups/releases are retained until you remove them deliberately. Keep the current and previous
-installation roots. For a stale `.maintenance-lock`, read its `owner.json`, verify that process
-has exited, then remove that lock directory and rerun the command.
+installation roots. For a stale `.maintenance-mutex` or `.maintenance-lock`, read its
+`owner.json`, verify that process has exited, then remove that lock directory and rerun the command.
 
 Native diagnostics remain available:
 
@@ -347,6 +389,7 @@ alliance-work jobs list
 alliance-work jobs owner --key stable-run-id --owner NEXT_AGENT_ID --revision 1
 ```
 
+Inside an agent session `--room` and `--owner` default to that session's room and agent.
 The key is global to the installation. PID identity includes Linux boot ID and process start time
 (or macOS process start time). Reused/exited PIDs cannot appear running. Only registered processes
 are observed; this is not discovery of every background task. A controller exit means result
@@ -358,13 +401,22 @@ that recipient. Keep the handoff and output paths in the durable assignment.
 ## Non-interrupting coordination policy
 
 Ordinary progress goes into the assignment/result artifact. Avoid progress pings and duplicate
-handbacks. Set native `notifyOnFinish=false` when the owner will continue independent work, then
-reconcile at its next task boundary. Use finish notification when the owner is waiting. Urgent
-corrections can still intentionally interrupt. This release does not add a mailbox or claim a
-native queued-send guarantee: Paseo 0.11.2 exposes interrupt/steer, not atomic idle-only delivery.
-The Alliance resume RPC refuses closed, archived, unknown and non-idle agents, but a concurrent
-native send can still race its readback. Existing sessions keep already-loaded instructions until
-fresh context is created; never restart active work just to replace its instructions.
+handbacks: a worker hands back by saving its result, checkpointing `review` or `blocked` and
+ending its turn, and Alliance wakes its responsible owner (see
+[Handback, waiting and reminders](#handback-waiting-and-reminders-0119)). Agents wait with
+`alliance-work wait` instead of polling and keep native `notifyOnFinish` on: Paseo's notice also
+reports the child's permission requests during the turn it watches. Nobody approves commands for
+Alliance members: Alliance denies a request left pending for 5 minutes, and owners never answer one
+(see [Stuck members](#stuck-members-0119)). Urgent
+corrections can still intentionally interrupt: Paseo 0.12 steers a running Claude, Codex or Pi
+turn by default and interrupts AGY, while 0.11.2 aborts the running turn. New agents get the rule
+for the daemon the plugin last connected to (`status` shows it in `wakeupHealth.daemon`) and keep
+it: after moving a daemon back from 0.12 to 0.11.2, tell older agents that a send aborts a running
+turn. There is no mailbox or queued-send guarantee. The Alliance resume RPC refuses unknown,
+archived, permission-blocked and running agents and reopens a closed session; a turn that starts
+during its readback is steered, except on AGY, which cannot steer (0.12 interrupts it, 0.11.2
+refuses the send). Existing sessions keep already-loaded instructions until fresh context is
+created; never restart active work just to replace its instructions.
 
 ## Candidate identity
 
@@ -392,24 +444,41 @@ alliance-work wakeups add --room ROOM --owner OWNER --key child-result --reason 
 alliance-work wakeups list
 alliance-work wakeups take --owner OWNER
 alliance-work wakeups ack --key KEY --owner OWNER --revision N
+alliance-work wakeups defer --key KEY --owner OWNER --revision N --minutes 30
 alliance-work wakeups cancel --key KEY --owner OWNER --revision N
 alliance-work wakeups owner --key KEY --owner OLD --next-owner NEW --revision N
 ```
 
 Use `status` to read member `lastTurnId`. Turn triggers bind that exact generation and cancel
-when superseded or accepted; job triggers bind boot/process identity and the recorded job owner
-revision. Transfer the job first, then its wakeup. A process exit only asks for inspection.
+when superseded or decided (accepted or rejected); job triggers bind boot/process identity and
+the recorded job owner revision. Transfer the job first, then its wakeup. A process exit only
+asks for inspection.
 Owner changes are metadata, not acknowledgement by the new owner. CLI owner defaults to
 `PASEO_AGENT_ID`; local operators can supply it explicitly, as with existing Alliance CLI actions.
 
-The default `pull` delivery never sends a native prompt. `take` returns at most eight pending
-or delivered items; repeated reads keep them available until `ack`. Check durable artifacts and
-reconcile side effects before acknowledging. This does not accept any candidate.
-For optional automatic delivery, add `--delivery idle` when creating the obligation. Native
-readback must be idle, unarchived and free of permissions; missing/busy owners keep pending work.
-At most eight items are sent in a batch, with a one-minute cooldown per owner. This mode is best
-effort: Paseo 0.11.2 has no atomic idle-only send and its steer fallback can replace a concurrent
-turn. Use pull for jobs requiring zero interruption. No closed session is auto-resurrected.
+Since 0.1.19 a reminder wakes its owner when idle unless it is added with `--delivery pull`;
+obligation-linked reminders stay pull-only, and re-adding a key stored as pull before 0.1.19
+without `--delivery` keeps it pull. Older releases stored every reminder pull unless it asked
+otherwise, and nothing pushes a pull reminder, so owners waiting on one stalled. The first load of
+0.1.19 therefore migrates those once (recorded as SQLite `user_version` 1 in `rooms.sqlite`): each
+open one that is not linked to an obligation becomes idle and wakes its owner once, batched with
+its other items, unless it was created and came due more than 72 hours earlier (a job reminder
+comes due when its job exits); that one is canceled with a note saying so. A reminder still
+waiting for its time, job or child turn counts as recent. Reminders added later keep the delivery
+they ask for.
+Idle delivery needs native readback idle or closed (Paseo reopens a closed session), unarchived
+and free of permissions, and an owner neither paused by a cancellation nor held by a provider
+limit (see [Autonomous assignments](#autonomous-assignments-0112)); other owners keep pending
+work. At most eight items are sent in a batch, with a one-minute cooldown per owner. This
+is best effort: Paseo has no atomic idle-only send, so a concurrent turn can be steered or
+interrupted. `pull` never sends a native prompt; every prompt the plugin sends an owner lists its
+pending pull items, and `take` returns at most eight pending or delivered items, unread ones
+first, keeping them until `ack`. Check durable artifacts and reconcile side effects before
+acknowledging. This does not accept any candidate. `defer` postpones a due or delivered reminder
+by 1–1440 minutes, at most three times. A review of a child's turn closes when its owner decides,
+and an `ack` before that is refused (see [0.1.19](#handback-waiting-and-reminders-0119)). An
+archived owner's reminders and reviews are canceled, also when Paseo archived the owner natively;
+none moves up the chain. A later handback of its child asks the nearest live owner.
 
 Repeats are time-only: `--every-ms 60000 --max-runs 3` (minimum one minute, maximum 100 runs).
 They rearm only after acknowledgement, from the acknowledgement time; missed intervals never
@@ -422,9 +491,13 @@ history for seven days (see 0.1.16 below).
 States distinguish scheduled, pending, dispatching, delivered, acknowledged, canceled, expired
 and uncertain. Dispatch claims are transactional. A crash or failed acknowledgement during
 native send leaves `uncertain`; it is never automatically resent, even after restart. Inspect
-native history, then acknowledge or cancel explicitly. Native delivery is not exactly-once
-execution or proof that the owner read the evidence. The CLI/UI exposes revisions for stale-write
-protection. The plugin releases its timer and waits for in-flight observation on unload.
+native history, then acknowledge or cancel explicitly. One exception: a send to a closed owner
+whose session failed to load delivered nothing (Paseo loads the session before it records the
+prompt), so that batch stays pending for when the owner is idle, or is tried again an hour later.
+A timeout or a lost connection during that load is `uncertain` like any other ambiguous send.
+Native delivery is not exactly-once execution or proof that the owner read the evidence. The
+CLI/UI exposes revisions for stale-write protection. The plugin releases its timer and waits for
+in-flight observation on unload.
 
 ## Responsibility and policy adoption (0.1.10)
 
@@ -471,7 +544,7 @@ alliance-work accept --agent LEAD_ID --report /absolute/runtime/report.json --pr
 
 Test/analysis reports cannot accept a product journey. Runtime PASS is necessary, not sufficient:
 the reviewer must inspect the actual journey and state its limits. The command records this
-attestation; it cannot determine whether an invented journey is true. A new turn still reopens
+attestation; it cannot determine whether an invented journey is true. New work still reopens
 current acceptance; historical product acceptance remains labeled historical. Review depth follows
 risk and new evidence, not a fixed number of peers or rounds.
 
@@ -569,8 +642,10 @@ an older installer; preserve and reconcile the ledger before any manually manage
 
 The plugin owns a durable assignment policy; Paseo still owns execution, sessions, permissions
 and transport. New Alliance launches and native Alliance children are enabled automatically.
-Existing sessions are not retroactively enabled. Root chats enable themselves once for a
-substantive task, following the room contract; operators can enable an existing assignment:
+Other sessions are not: since 0.1.19 an owned one gets a handback-only record that is never
+continued and is retried only once at each provider limit's reset (see 0.1.19 below). Root chats
+enable themselves once for a substantive task, following the room contract; operators can enable
+an existing assignment:
 
 ```sh
 alliance-work autonomy start --agent AGENT_ID --max-continuations 20 --max-retries 2
@@ -582,28 +657,66 @@ alliance-work autonomy checkpoint --agent AGENT_ID --phase paused --reason 'Oper
 `status` includes autonomy phase, reason, counters and delivery state. `start` explicitly resets
 the finite budget; do not repeat it each turn. `--auto-archive false` keeps accepted work open.
 A start on an existing assignment adopts its retained last turn; archived agents require explicit
-native reopening first. A native new turn reopens a prior review, never a deliberate pause.
+native reopening first. A new turn sent by an owner, the Human or Paseo's finish notice reopens a
+prior review as active work and ends a cancellation pause. It never ends a deliberate pause or
+`blocked`: only a checkpoint (`active`, `waiting` or `review`) or `autonomy start` does, so an
+unblocked agent checkpoints `active` itself, except after an exhausted run budget (see below). A
+turn the plugin starts on an idle or closed agent to deliver its own wake batch (reminders,
+reviews, notices) changes no phase; unless the agent is `active`, its end is neither taken as a
+handback nor continued. A checkpoint made in that turn still counts, and if the turn fails, the
+failure is handled like any other. The same holds for a turn Claude Code starts by itself when a
+background task or Monitor event finishes (Paseo names it `autonomous-…`): unless the agent is
+`active` it changes no phase, its end is neither a handback nor continued nor retried (a provider
+limit it ended on is still waited out, see below), and it does not end a cancellation pause; only a
+checkpoint in it counts. Since 0.1.19 either turn also leaves the agent's handback standing: its
+review is not asked again and still names the handback's turn file, the owner's decision on it
+stands, and a decision may be recorded while the turn runs. A checkpoint in such a turn is a new
+handback that needs its own decision; a canceled one is new work, and so is a wake batch's turn
+that fails while the agent is waiting, unless it failed on a provider limit.
 
 Before ending a managed turn, agents checkpoint `active` with the next concrete step, `waiting`
 for a dependency, `review` with checked results, `blocked` for a decision, or `paused` to stop.
-An optional `--turn TURN_ID` rejects stale checkpoints. Waiting work uses child handbacks or an
-explicit time/job wakeup. Completion of a model turn alone never means task acceptance.
+An optional `--turn TURN_ID` rejects stale checkpoints. Waiting work ends its turn and is woken
+by a child's handback or by `alliance-work wait` (see 0.1.19 below). Completion of a model turn
+alone never means task acceptance.
 
 Every 15 seconds, eligible active work receives a native SDK continuation after at least 15
 seconds of idle time following its recorded outcome. Failed turns retry after 30 then 60 seconds,
 with a default two retries across the assignment. Limits are 0–5 retries and 1–100 continuations
-(default 20). Exhaustion becomes blocked and requests owner review. Cancellation pauses the
-assignment; permissions, busy/unknown agents and archived agents are never bypassed. A known
-failed turn may resume an error/closed session using the native SDK. Shared-auth renewal still
-requires its original auth owner as described above; retries do not renew credentials.
+(default 20). Exhaustion becomes blocked and requests owner review. Only `autonomy start` renews
+the budget, and that is the owner's or the Human's decision: an `active` checkpoint is blocked
+again at the next round. Since 0.1.19 two continuations in a row that end without a checkpoint
+hand the last final message to the owner as a review instead of a third.
 
-Review/blocked handbacks create one durable idle-delivery wakeup for the current owner and turn.
-They reuse the existing wakeup queue and acknowledgement protocol. Disable native finish pings
-for managed handbacks to avoid duplicate notifications. The owner must inspect and explicitly
-accept candidate-bound evidence. Only then may the plugin archive an idle agent, with no pending
-permissions, live native children, unfinished responsibilities, tracked jobs or unresolved owner
-wakeups. Native children are archived separately before their parent so native cascade cannot
-silently archive unreviewed or unmanaged children. Paused assignments stay open.
+Since 0.1.19 a failure that names a provider quota or a reset time waits for that time instead (30
+minutes for a quota that names none): one retry at the reset plus a minute, without using the budget, at most
+three waits in a row before it is blocked. Claude Code answers a refused request with a notice as
+the turn's final message, and Paseo 0.11.2 and 0.12.0 report that turn completed; Alliance treats
+a Claude turn ending on one ("You've hit your session limit · resets 9:40pm (Asia/Ho_Chi_Minh)",
+"API Error: …", "Failed to authenticate. …", "There's an issue with the selected model (…)",
+"Not logged in · Please run /login") as failed with that text, and gives back a continuation or
+retry that such a limit cut short. Claude prints a reset less than a day away as its minute alone,
+so a printed time up to five minutes past is that reset (retried a minute later), not tomorrow's.
+Until a limit lifts, Alliance prompts no member of that harness on the host: no continuation, retry
+or wake batch. The plugin cannot tell which login a role uses, so it holds them all, which is
+conservative. A wake batch whose turn ended on the limit is sent again after it lifts; a turn
+Claude Code started by itself has no prompt of its own, so its limit sends no earlier batch again.
+The owner hears once per limit, owner and harness, only for a wait of five minutes or longer; that
+notice lapses at the retry time, so an owner held by the same limit never gets it. Cancellation
+pauses the assignment; permissions, busy/unknown agents and archived agents are never bypassed. A
+known failed turn may resume an error/closed session using the native SDK. Shared-auth renewal
+still requires its original auth owner as described above; retries do not renew credentials.
+
+Review/blocked handbacks create one durable idle-delivery wakeup for the nearest live owner and
+that turn; since 0.1.19 it is due two minutes after the turn ends and closes when the owner
+decides, so an owner that decides on Paseo's own finish notice first is not woken again. A blocker
+asks its owner once, whatever later turns end without a checkpoint; it asks again when its reason
+changes, when the owner decides, or after the agent leaves `blocked` and blocks again. The owner
+must inspect and explicitly accept candidate-bound evidence. Only then may the plugin archive an
+idle agent, with no pending permissions, live native children, unfinished responsibilities,
+tracked jobs or unresolved owner wakeups. Native children are archived separately before their
+parent so native cascade cannot silently archive unreviewed or unmanaged children. Paused
+assignments stay open.
 
 ### Closing work by decision (0.1.16)
 
@@ -620,19 +733,23 @@ autonomy existed; continuation remains opt-in for those. The rules:
 - A decision binds to the turn it reviewed. `accept` is refused while the agent is running, when
   its state cannot be read, and when a new turn starts during evidence validation. A later turn
   reopens the decision; so does any newer message Paseo records for the agent, even if the
-  turn's start hook was lost.
+  turn's start hook was lost. Since 0.1.19 a turn that only keeps the agent's phase (see
+  [Autonomous assignments](#autonomous-assignments-0112)) is not later work: the handback and the
+  decision stand through it, and `accept` may be recorded while it runs.
 - A cancellation pauses continuation; the next turn sent to that agent resumes it. Acceptance
   recorded after a cancellation closes it. A deliberate `checkpoint --phase paused` keeps the
-  agent open until it is started again. While an owner is paused by a cancellation, the plugin
-  sends it no reminders; they wait for `wakeups take` or the Human's next message.
+  agent open until it is started again. While an owner is paused by a cancellation, until its next
+  turn, the plugin pushes it no reminders; they wait for `wakeups take`. A `paused` checkpoint or
+  an obligation handoff stops only the owner's own continuation; its reminders still reach it.
 - `alliance-work members keep --agent ID` keeps an agent open whatever its decision (`--off`
   clears it). Its owner chain, the Human or the agent itself may set it. `autonomy start`
   without `--auto-archive` keeps the previously recorded choice.
 - Children archived or deleted natively no longer hold their parent open. An agent restored
   natively after an earlier auto-archive stays open until it gets new work or a new decision.
 - A completed turn nobody decides on for 48 hours wakes the responsible owner once per turn and
-  owner (idle delivery), unless a review reminder for that turn is still unfinished, and at most
-  four per ten-minute scan. Undecided Human-owned work is never prompted; the Human's own
+  owner (idle delivery), unless a review reminder for that turn is still to be sent or was sent
+  less than 48 hours ago; so an undecided review is asked again once. At most four such reminders
+  go out per ten-minute scan. Undecided Human-owned work is never prompted; the Human's own
   acceptance closes it like any other. Records from before 0.1.16 start that clock after
   upgrade, spread over the following day.
 - The Human is whoever runs the CLI outside an agent session (no `PASEO_AGENT_ID`, no Alliance
@@ -644,10 +761,13 @@ autonomy existed; continuation remains opt-in for those. The rules:
 
 Finished wakeups (acknowledged, canceled, expired) are removed seven days after their last change,
 except a reminder that still names the member's current turn and anything linked to an open
-obligation. The 1000-record cap applies to unfinished wakeups only. While a maintenance lock is
-held (an update waiting for idleness), the plugin starts no continuation, retry or reminder
-turns, and `status` reports the pause in `wakeupHealth`. A lock whose process died, or that
-predates a reboot, is ignored by the plugin and replaced by the next maintenance command.
+obligation. The 1000-record cap applies to unfinished wakeups only. While the scheduler pause is
+held (a maintenance command, a waiting update while it activates, or from the end of staging
+with `--hold`), the plugin starts no
+continuation, retry or reminder turns and denies no approval request, and `status` reports the
+pause in `wakeupHealth`. A lock
+whose process died, or that predates a reboot, is ignored by the plugin and replaced by the next
+maintenance command.
 
 State and counters survive plugin reload and daemon restart. Dispatch is claimed before send;
 a crash or ambiguous response is quarantined as `uncertain` and never automatically replayed.
@@ -674,6 +794,81 @@ measured outcomes; portable fixture tests additionally exercise cancellation, pe
 ambiguous dispatch, stale events and native-child archive protection.
 
 
+### Handback, waiting and reminders (0.1.19)
+
+A worker hands back by saving its result, recording `autonomy checkpoint --phase review` (or
+`blocked`) and ending its turn; it sends no handback prompt. Every member whose responsible owner
+is an Alliance agent has an assignment record, including members given an owner with `members
+owner` after their session started. A completed turn of a `waiting` assignment that recorded no
+checkpoint and was not started by the plugin to deliver its own wake batch or by Claude Code
+itself, with no obligation,
+no reminder of its own that still applies and no child running or just created to wake it, is
+treated as its handback. A record created only for this is handback-only: each such turn goes to
+the owner for review, and any failed turn, a wake batch's included, as `blocked`, unless a provider
+limit ended it (that is waited out as described above); its next turn makes it wait again (a wake
+batch's turn leaves it as it is), and until `autonomy start` or an `active` checkpoint makes it an
+assignment it is never continued and is retried only once at each limit's reset.
+The review reminder goes to the nearest unarchived owner up the decision chain and is due two
+minutes after the turn ends, so an owner that already acted on Paseo's own finish notice is not
+woken again. A review about a child that is archived, by Alliance or natively in Paseo, is
+canceled instead of sent. A review ends with a decision on that turn:
+
+```sh
+alliance-work accept --agent ID --report /absolute/report.json   # the report verify printed
+alliance-work reject --agent ID --reason 'What the handback lacks'
+alliance-work wakeups defer --key KEY --owner OWNER --revision N --minutes 30
+```
+
+`accept` takes the report `alliance-work verify` wrote for the candidate, never the turn file the
+review names; anything else is refused with that advice. Rework is a prompt to the agent; its new
+turn replaces the review. A decision on that turn (`accept` or `reject`) closes the review by
+itself; an archived owner's reviews are canceled. An `ack` after the decision succeeds without changing anything and says the
+decision closed it; wake batches say that only their other items need an ack. Before a decision,
+a newer turn, or the agent being archived, kept or re-owned, `ack` on a review is refused and
+names these choices. `wakeups cancel` stays available, with the 48-hour reminder as the backstop.
+
+Agents wait by ending the turn, never by sleeping or polling inside it:
+
+```sh
+alliance-work wait --agent CHILD --reason 'Review its result'
+alliance-work wait --pid 12345 --title 'Benchmark controller' --reason 'Read the benchmark output'
+alliance-work wait --minutes 30 --reason 'Check the deployment'   # or --job RUN_KEY, --at ISO_TIME
+```
+
+`wait` takes exactly one trigger. It registers an idle reminder for the owner (`--owner` and
+`--room` default to the agent session), tracks `--pid` as a job first, and records a `waiting`
+checkpoint when the owner is the caller; then the agent ends its turn and is woken. It never
+withdraws a handback, a blocker or a pause: when the caller's assignment is in `review`, `blocked`
+or `paused`, whichever turn set it, it registers the reminder without a checkpoint and says so.
+`--agent` waits for the child's running turn and is refused when the child is not running one (a
+turn that only keeps its phase does not count). A turn whose own checkpoint was `waiting` or
+`active` handed nothing back: its reminder asks for an ack, not a decision.
+Repeating the same request returns the same key; for `--minutes`, within the same turn.
+
+### Stuck members (0.1.19)
+
+Nobody approves commands for Alliance members, so Alliance answers their approval requests itself.
+It records when it first sees each request: from Paseo's `agent.permission_requested` hook, or
+from the first sweep that lists it (a request already pending when the plugin loads). Five
+minutes later it denies the request through Paseo (`respondToPermission`, `behavior` `deny`);
+it never allows one. The message tells the member to redo the step without anything that needs
+approval, for example to write into a fresh `mktemp -d` directory instead of running `rm -rf`
+with a glob, and to go on; Claude reads it as the denied call's result and its turn continues.
+This covers every Alliance member, root chats included, and no other Paseo agent. `status` shows
+the last denial (`members[].denied`: request id, tool, command and time). The nearest live member
+owner is not woken: it gets a pull item, listed in its next Alliance prompt, that lapses after six
+hours. A request still pending after its denial is denied again at the next sweep, every 15
+seconds while the scheduler runs.
+
+A running member whose turn has shown no activity for 20 minutes, with no approval request
+pending, gets one notice to its nearest available owner (idle delivery, lapsing after six hours);
+a member without a live member owner gets none. A long command the member tracks with
+`alliance-work jobs track` is not reported. The notice names the command still running and how to
+interrupt the member on that daemon: on Paseo 0.12 send with `activeTurnBehavior` `interrupt`,
+because a steer reaches a Claude turn only after the running tool call returns; on 0.11.2 any send
+interrupts; on either, `cancel_agent` first also works. Inspect its activity, then let it run or
+interrupt it and tell it what to do instead.
+
 ## Combined lifecycle and obligations (0.1.12)
 
 Version 0.1.12 unifies the two local 0.1.11 candidates. It pins Paseo CLI/client/plugin 0.12.0
@@ -683,7 +878,8 @@ never restarts a running daemon; a host Paseo upgrade is separate, explicit main
 Bind dependent continuation with `autonomy start --agent ID --obligation KEY`. The obligation
 must be open and owned by that agent. Both ordinary continuation and failed-turn retry wait for
 all unexpired prerequisite observations; waiting does not consume budget. `waiting` with a bound
-condition resumes when it becomes ready. Independent unbound assignments may keep working.
+condition resumes when it becomes ready. Independent unbound assignments may keep working. An
+assignment bound to an obligation that was fulfilled, canceled or handed off is not continued.
 Linked pull reminders remain informational; their expiry or ACK never authorizes execution.
 
 A managed obligation handoff transfers the binding and remaining retry/continuation budget in
@@ -727,9 +923,11 @@ A policy saved before 0.1.18 has no roles; each of its routes applies to both Pe
 written in the per-role form on the next save. `alliance-work models show [--room ID]` prints each
 room's lists and whether they are saved or the release default. `alliance-work models reset
 --room ID|--all` (Human only, refused inside an agent session) deletes the saved row so the room
-follows the release defaults, including later releases. Revisions keep counting through a reset
-(`room_model_policy_resets`), so a settings page opened before the reset cannot overwrite a later
-save. The Models page offers the same reset as **Follow release defaults**.
+follows the release defaults, including later releases. Since 0.1.19 each deleted list is kept
+verbatim in `rooms.sqlite`, table `room_model_policy_removed`, and the command prints its id and
+revision; the Models page reset keeps it too. There is no restore command. Revisions keep counting
+through a reset (`room_model_policy_resets`), so a settings page opened before the reset cannot
+overwrite a later save. The Models page offers the same reset as **Follow release defaults**.
 
 Rollback: releases before 0.1.18 read routes without roles. A saved list that names the same
 harness/model/effort for both Peer and Lens (for example an upgraded pre-0.1.18 list after any
@@ -767,11 +965,15 @@ explicit project skills. The generated MCP configuration contains the native
 Paseo endpoint bound to that agent, and is removed when the session closes.
 This is a provider adapter, not another coordination server.
 
-AGY's live model IDs encode effort (for example `claude-sonnet-5-5-medium`). The
+AGY's live model IDs encode effort (for example `gemini-4-argon-medium`). The
 catalog exposes only that matching effort; it never translates an unsupported
-selection. Since 0.1.18 the release defaults use AGY Gemini 4 Argon medium for
-Peer and Argon high for Lens. Existing saved policies remain unchanged: add the
-desired AGY routes in the room's Model settings before launching a Peer or Lens there.
+selection. AGY runs only Gemini models (0.1.19): owners default to
+`gemini-4-argon-medium`, a launch naming another AGY model is refused for every role,
+a saved AGY route naming one is passed over, and the Models page neither offers nor
+saves one. Running sessions keep their model. Since 0.1.18 the release defaults use
+AGY Gemini 4 Argon medium for Peer and Argon high for Lens. Existing saved policies
+remain unchanged: add the desired AGY routes in the room's Model settings before
+launching a Peer or Lens there.
 
 Before activation, qualify authenticated MCP calls, two simultaneous native agents,
 and a real owner → peer → owner handback on each target host with

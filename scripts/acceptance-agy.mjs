@@ -62,8 +62,8 @@ try {
     const agent = await workspace.agents.create({
       title: `AGY ${role} qualification`,
       config: {
-        // Owners are free; the Peer must use its room route (Argon medium by default).
-        provider: `alliance-agy-${role}/${role === "peer" ? "gemini-4-argon-medium" : "claude-sonnet-5-5-medium"}`,
+        // AGY runs only Gemini: the owner default and the Peer's first room route are both Argon medium.
+        provider: `alliance-agy-${role}/gemini-4-argon-medium`,
         thinkingOptionId: "medium",
         modeId: "full-access",
       },

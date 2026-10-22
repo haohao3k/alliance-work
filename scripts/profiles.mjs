@@ -23,6 +23,7 @@ export const codexIsolationFeatures = {
   tool_suggest: false,
 };
 export const roles = ["hq", "supervisor", "lead", "peer", "lens"];
+const ownerRoles = new Set(["hq", "supervisor", "lead"]);
 export const harnesses = ["codex", "claude", "pi"];
 export const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 /** @typedef {{harness:string,role:string,home:string,osHome:string,executable:string,files:Record<string,string>,skillDirectories:string[],skillEntries:string[],extensionPaths:string[]}} Profile */
@@ -56,6 +57,12 @@ export async function prepareProfiles({ home, executables, isolatedRoot = undefi
   const provenance = JSON.parse(await readFile(join(root, "vendor/seatwork/provenance.json"), "utf8"));
   const ownership = await readFile(join(root, "room/policies/agent-ownership.md"), "utf8");
   const operating = await readFile(join(root, "room/policies/operating-contract.md"), "utf8");
+  // Releases before 0.1.19 have no owner duties and give every role the same policies. Rollback
+  // builds their profiles with this code, so a root without the file keeps that assembly.
+  const ownerDuties = await readFile(join(root, "room/policies/owner-duties.md"), "utf8").catch((e) => {
+    if (e.code === "ENOENT") return null;
+    throw e;
+  });
   const laws = await readFile(join(root, "room/policies/engineering-laws.md"), "utf8");
   const modelSelection = await readFile(join(root, "room/policies/model-selection.md"), "utf8");
   const mapping = await readFile(join(root, "room/policies/seatwork-mapping.md"), "utf8");
@@ -152,9 +159,16 @@ export async function prepareProfiles({ home, executables, isolatedRoot = undefi
         }
       }
       const roleText = await readFile(join(root, "room/roles", `${role}.md`), "utf8");
+      // Delegation, decisions and Seatwork's coordination vocabulary are written for owner roles.
+      const owner =
+        ownerDuties === null
+          ? `${mapping}\n\n${modelSelection}\n\n`
+          : ownerRoles.has(role)
+            ? `${ownerDuties}\n\n${mapping}\n\n${modelSelection}\n\n`
+            : "";
       await manage(
         join(roleHome, "root-instructions.md"),
-        `${ownership}\n\n${laws}\n\n${operating}\n\n${mapping}\n\n${modelSelection}\n\n${roleText}`,
+        `${ownership}\n\n${laws}\n\n${operating}\n\n${owner}${roleText}`,
       );
       if (harness === "codex")
         await manage(

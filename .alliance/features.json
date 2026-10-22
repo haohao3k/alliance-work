@@ -22,6 +22,34 @@
         {
           "id": "rooms.resume",
           "expect": "Resume does not interrupt active work or accept late receipts"
+        },
+        {
+          "id": "rooms.late-owner",
+          "expect": "An owner assigned after a session started receives its handback"
+        },
+        {
+          "id": "rooms.wait",
+          "expect": "A coordinator waiting on its worker's turn is not continued meanwhile and is woken when that turn ends; an ack closes that reminder unless the turn handed back, which needs a decision"
+        },
+        {
+          "id": "rooms.silence",
+          "expect": "A member silent for 20 minutes wakes its idle owner once per incident with how to interrupt it; tracked jobs and Human-owned work only show in status; an unsent notice is withdrawn"
+        },
+        {
+          "id": "rooms.approval",
+          "expect": "An Alliance member's approval request is denied 5 minutes after Alliance first saw it (Paseo's hook or the first sweep after a load), with how to redo the step, and never allowed; status shows the denial and the owner gets a pull item, not a wake"
+        },
+        {
+          "id": "rooms.provider-limit",
+          "expect": "A Claude limit or API-error notice in a completed turn counts as a failure; a limit holds every prompt to that harness's members on the host until its reset, then each member whose own turn it cut is retried once without budget and a wake batch it cut short is sent again"
+        },
+        {
+          "id": "rooms.launch-env",
+          "expect": "Agent sessions launch with input prompts off; the Human's own launches and logins keep theirs"
+        },
+        {
+          "id": "rooms.send-rule",
+          "expect": "New agents learn how a send treats a running agent on the connected Paseo daemon"
         }
       ]
     },
@@ -41,11 +69,15 @@
         },
         {
           "id": "models.policy-persistence",
-          "expect": "Policies persist, reject stale edits, upgrade pre-0.1.18 lists and reset to release defaults"
+          "expect": "Policies persist, reject stale edits, upgrade pre-0.1.18 lists and reset to release defaults, keeping each removed list"
         },
         {
           "id": "models.economical-defaults",
           "expect": "Omitted models use economical owner or standard worker routes; premium selection is deliberate and saved policies remain authoritative"
+        },
+        {
+          "id": "models.agy-gemini",
+          "expect": "AGY runs only Gemini models: no role launches another and the Models page neither offers nor saves one"
         }
       ]
     },
@@ -109,11 +141,19 @@
         },
         {
           "id": "maintenance.rollback",
-          "expect": "Rollback retains auth, sessions and room artifacts"
+          "expect": "Rollback retains auth, sessions and room artifacts; onto a release before 0.1.19 it builds that release's prompts, removes 0.1.19's handback-only records and sets each assignment that turns keeping its phase moved past its member's last turn back on that turn"
         },
         {
           "id": "maintenance.release-integrity",
           "expect": "Corrupt release rejected before activation"
+        },
+        {
+          "id": "maintenance.wait-pause",
+          "expect": "A waiting update pauses scheduled prompts only for each activation attempt, once a scheduler round confirms the pause; with --hold it keeps them paused from the end of staging through activation"
+        },
+        {
+          "id": "maintenance.mutex",
+          "expect": "One maintenance command runs per home; a waiting one pauses nothing and an interrupted one removes only its own locks"
         }
       ]
     },
@@ -137,7 +177,7 @@
         },
         {
           "id": "operations.resume",
-          "expect": "Unknown and closed recipients receive no resume prompt"
+          "expect": "Unknown, archived and permission-blocked recipients receive no resume prompt; a closed session is reopened"
         }
       ]
     },
@@ -153,7 +193,7 @@
         },
         {
           "id": "wakeups.delivery",
-          "expect": "Batching and ambiguous delivery never trigger an automatic resend"
+          "expect": "Batching and ambiguous delivery never trigger an automatic resend; a send the daemon refused is retried"
         },
         {
           "id": "wakeups.repeat",
@@ -161,11 +201,11 @@
         },
         {
           "id": "wakeups.turn",
-          "expect": "Superseded or accepted work cannot wake an owner"
+          "expect": "Superseded or decided (accepted or rejected) work cannot wake an owner"
         },
         {
           "id": "wakeups.owner",
-          "expect": "Unavailable owners hold delivery and stale owner edits fail"
+          "expect": "Unavailable owners hold delivery, closed owners are woken, a closed session that fails to load keeps its batch for later, and stale owner edits fail"
         },
         {
           "id": "wakeups.job",
@@ -182,6 +222,22 @@
         {
           "id": "wakeups.bounds",
           "expect": "Idle delivery bounds batch size and enforces owner cooldown"
+        },
+        {
+          "id": "wakeups.decision",
+          "expect": "A review is acknowledged only after a decision on its turn or a newer turn; deferral is bounded"
+        },
+        {
+          "id": "wakeups.default",
+          "expect": "Reminders wake their idle owner unless pull is chosen, never before a requested grace delay; older pull keys re-add unchanged"
+        },
+        {
+          "id": "wakeups.visibility",
+          "expect": "Pushed batches list pending pull reminders without claiming them; take returns unread reminders first"
+        },
+        {
+          "id": "wakeups.pull-migration",
+          "expect": "The first 0.1.19 load makes open pull reminders older releases stored wake their owner once, cancels those that came due over 72 hours earlier and keeps obligation reminders pull; later reminders keep the delivery they ask for"
         }
       ]
     },
@@ -205,7 +261,11 @@
         },
         {
           "id": "obligations.recovery",
-          "expect": "Session recovery restores common policy and current open obligations without messaging owners"
+          "expect": "Session recovery restores common policy and current open obligations without messaging owners; recovery snapshots and resume prompts list pending pull reminders"
+        },
+        {
+          "id": "obligations.policy-size",
+          "expect": "Role instructions stay within their word budget; Peer and Lens carry no owner duties"
         }
       ]
     },
@@ -225,7 +285,7 @@
         },
         {
           "id": "autonomy.uncertain",
-          "expect": "Unknown dispatch survives reload without duplicate sending"
+          "expect": "Unknown dispatch survives reload without duplicate sending; a refused send is retried"
         },
         {
           "id": "autonomy.archive",
@@ -241,7 +301,43 @@
         },
         {
           "id": "autonomy.obligations",
-          "expect": "Prerequisites gate retries and continuations; handoff preserves budget; open obligations prevent archive"
+          "expect": "Prerequisites gate retries and continuations, and an obligation no longer open holds its bound assignment; handoff preserves budget, also to a member that only handed back; open obligations prevent archive"
+        },
+        {
+          "id": "autonomy.handback",
+          "expect": "A turn ending without a checkpoint is the handback when nothing else will wake the agent"
+        },
+        {
+          "id": "autonomy.handback-only",
+          "expect": "A member that only hands back to its owner is never continued and is retried only once at each provider limit's reset; each of its other turns, failed ones included, goes to the owner until an assignment is started"
+        },
+        {
+          "id": "autonomy.reopened",
+          "expect": "Prompts after a reopened handback or a quota retry do not repeat a reason that no longer applies"
+        },
+        {
+          "id": "autonomy.quota",
+          "expect": "A provider quota waits for its reset without using retries, at most three times in a row before it is blocked, and the owner hears of a long wait once; a short or unstated rate limit is retried within minutes"
+        },
+        {
+          "id": "autonomy.self-started",
+          "expect": "A turn Claude Code starts by itself keeps the phase it found and is neither continued nor retried, except, while its member waits, once at the reset of a provider limit it ended on; the handback it found stands with its review and decision, a decision may be recorded meanwhile, and a checkpoint in it is a new handback"
+        },
+        {
+          "id": "autonomy.unchecked",
+          "expect": "Two continuations in a row without a checkpoint hand the final message to the owner instead of a third"
+        },
+        {
+          "id": "autonomy.review-failure",
+          "expect": "A failure after a review checkpoint in the same turn keeps the handback for review"
+        },
+        {
+          "id": "autonomy.blocked",
+          "expect": "Exhausted budgets request review and only a start renews them; a new turn keeps a block until the agent checkpoints or is started, an explicit blocker is kept, and a blocker asks its owner once"
+        },
+        {
+          "id": "autonomy.prompts",
+          "expect": "Continuation and review prompts name the current CLI and the agent's pending pull reminders"
         }
       ]
     },
@@ -277,7 +373,27 @@
         },
         {
           "id": "lifecycle.deploy",
-          "expect": "Bundles are checksum-verified and handed to the installed launcher with the wait option"
+          "expect": "Bundles are checksum-verified and handed to the installed launcher with the wait option; a host older than 0.1.19 waits with the candidate's own CLI"
+        },
+        {
+          "id": "lifecycle.owned",
+          "expect": "Members with a live member owner get an assignment; a recent undecided handback wakes the nearest live owner, an older one the 48h reminder"
+        },
+        {
+          "id": "lifecycle.reask",
+          "expect": "A delivered review left undecided for 48 hours is asked again once"
+        },
+        {
+          "id": "lifecycle.archived-owner",
+          "expect": "An archived owner's reminders and reviews end; none moves up the chain"
+        },
+        {
+          "id": "lifecycle.hold",
+          "expect": "Only a Human's cancel holds pushed reminders; an owner that paused itself still gets them and the turn they start keeps its pause"
+        },
+        {
+          "id": "lifecycle.at-rest",
+          "expect": "Running work, pending wakeups and permissions hold an accepted agent open; a closed session is at rest"
         }
       ]
     }
@@ -634,6 +750,16 @@
       ]
     },
     {
+      "id": "autonomy.retry-batch",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "autonomy.retry-batch"],
+      "assertions": [
+        {
+          "id": "autonomy.retry-batch",
+          "behavior": "autonomy.retry"
+        }
+      ]
+    },
+    {
       "id": "autonomy.uncertain",
       "command": ["$NODE", "scripts/verify-contract.mjs", "autonomy.uncertain"],
       "assertions": [
@@ -760,6 +886,316 @@
         {
           "id": "lifecycle.deploy",
           "behavior": "lifecycle.deploy"
+        }
+      ]
+    },
+    {
+      "id": "rooms.late-owner",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "rooms.late-owner"],
+      "assertions": [
+        {
+          "id": "rooms.late-owner",
+          "behavior": "rooms.late-owner"
+        }
+      ]
+    },
+    {
+      "id": "rooms.wait",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "rooms.wait"],
+      "assertions": [
+        {
+          "id": "rooms.wait",
+          "behavior": "rooms.wait"
+        }
+      ]
+    },
+    {
+      "id": "rooms.silence",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "rooms.silence"],
+      "assertions": [
+        {
+          "id": "rooms.silence",
+          "behavior": "rooms.silence"
+        }
+      ]
+    },
+    {
+      "id": "rooms.launch-env",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "rooms.launch-env"],
+      "assertions": [
+        {
+          "id": "rooms.launch-env",
+          "behavior": "rooms.launch-env"
+        }
+      ]
+    },
+    {
+      "id": "rooms.send-rule",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "rooms.send-rule"],
+      "assertions": [
+        {
+          "id": "rooms.send-rule",
+          "behavior": "rooms.send-rule"
+        }
+      ]
+    },
+    {
+      "id": "models.agy-gemini",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "models.agy-gemini"],
+      "assertions": [
+        {
+          "id": "models.agy-gemini",
+          "behavior": "models.agy-gemini"
+        }
+      ]
+    },
+    {
+      "id": "maintenance.wait-pause",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "maintenance.wait-pause"],
+      "assertions": [
+        {
+          "id": "maintenance.wait-pause",
+          "behavior": "maintenance.wait-pause"
+        }
+      ]
+    },
+    {
+      "id": "maintenance.mutex",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "maintenance.mutex"],
+      "assertions": [
+        {
+          "id": "maintenance.mutex",
+          "behavior": "maintenance.mutex"
+        }
+      ]
+    },
+    {
+      "id": "wakeups.decision",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "wakeups.decision"],
+      "assertions": [
+        {
+          "id": "wakeups.decision",
+          "behavior": "wakeups.decision"
+        }
+      ]
+    },
+    {
+      "id": "wakeups.default",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "wakeups.default"],
+      "assertions": [
+        {
+          "id": "wakeups.default",
+          "behavior": "wakeups.default"
+        }
+      ]
+    },
+    {
+      "id": "wakeups.visibility",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "wakeups.visibility"],
+      "assertions": [
+        {
+          "id": "wakeups.visibility",
+          "behavior": "wakeups.visibility"
+        }
+      ]
+    },
+    {
+      "id": "obligations.policy-size",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "obligations.policy-size"],
+      "assertions": [
+        {
+          "id": "obligations.policy-size",
+          "behavior": "obligations.policy-size"
+        }
+      ]
+    },
+    {
+      "id": "autonomy.handback",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "autonomy.handback"],
+      "assertions": [
+        {
+          "id": "autonomy.handback",
+          "behavior": "autonomy.handback"
+        }
+      ]
+    },
+    {
+      "id": "autonomy.handback-only",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "autonomy.handback-only"],
+      "assertions": [
+        {
+          "id": "autonomy.handback-only",
+          "behavior": "autonomy.handback-only"
+        }
+      ]
+    },
+    {
+      "id": "autonomy.reopened",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "autonomy.reopened"],
+      "assertions": [
+        {
+          "id": "autonomy.reopened",
+          "behavior": "autonomy.reopened"
+        }
+      ]
+    },
+    {
+      "id": "autonomy.quota",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "autonomy.quota"],
+      "assertions": [
+        {
+          "id": "autonomy.quota",
+          "behavior": "autonomy.quota"
+        }
+      ]
+    },
+    {
+      "id": "autonomy.review-failure",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "autonomy.review-failure"],
+      "assertions": [
+        {
+          "id": "autonomy.review-failure",
+          "behavior": "autonomy.review-failure"
+        }
+      ]
+    },
+    {
+      "id": "autonomy.blocked",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "autonomy.blocked"],
+      "assertions": [
+        {
+          "id": "autonomy.blocked",
+          "behavior": "autonomy.blocked"
+        }
+      ]
+    },
+    {
+      "id": "autonomy.prompts",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "autonomy.prompts"],
+      "assertions": [
+        {
+          "id": "autonomy.prompts",
+          "behavior": "autonomy.prompts"
+        }
+      ]
+    },
+    {
+      "id": "lifecycle.owned",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "lifecycle.owned"],
+      "assertions": [
+        {
+          "id": "lifecycle.owned",
+          "behavior": "lifecycle.owned"
+        }
+      ]
+    },
+    {
+      "id": "lifecycle.reask",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "lifecycle.reask"],
+      "assertions": [
+        {
+          "id": "lifecycle.reask",
+          "behavior": "lifecycle.reask"
+        }
+      ]
+    },
+    {
+      "id": "lifecycle.archived-owner",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "lifecycle.archived-owner"],
+      "assertions": [
+        {
+          "id": "lifecycle.archived-owner",
+          "behavior": "lifecycle.archived-owner"
+        }
+      ]
+    },
+    {
+      "id": "lifecycle.hold",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "lifecycle.hold"],
+      "assertions": [
+        {
+          "id": "lifecycle.hold",
+          "behavior": "lifecycle.hold"
+        }
+      ]
+    },
+    {
+      "id": "rooms.approval",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "rooms.approval"],
+      "assertions": [
+        {
+          "id": "rooms.approval",
+          "behavior": "rooms.approval"
+        }
+      ]
+    },
+    {
+      "id": "rooms.provider-limit",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "rooms.provider-limit"],
+      "assertions": [
+        {
+          "id": "rooms.provider-limit",
+          "behavior": "rooms.provider-limit"
+        }
+      ]
+    },
+    {
+      "id": "rooms.provider-limit-batch",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "rooms.provider-limit-batch"],
+      "assertions": [
+        {
+          "id": "rooms.provider-limit-batch",
+          "behavior": "rooms.provider-limit"
+        }
+      ]
+    },
+    {
+      "id": "wakeups.pull-migration",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "wakeups.pull-migration"],
+      "assertions": [
+        {
+          "id": "wakeups.pull-migration",
+          "behavior": "wakeups.pull-migration"
+        }
+      ]
+    },
+    {
+      "id": "autonomy.self-started",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "autonomy.self-started"],
+      "assertions": [
+        {
+          "id": "autonomy.self-started",
+          "behavior": "autonomy.self-started"
+        }
+      ]
+    },
+    {
+      "id": "autonomy.self-started-hooks",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "autonomy.self-started-hooks"],
+      "assertions": [
+        {
+          "id": "autonomy.self-started-hooks",
+          "behavior": "autonomy.self-started"
+        }
+      ]
+    },
+    {
+      "id": "autonomy.unchecked",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "autonomy.unchecked"],
+      "assertions": [
+        {
+          "id": "autonomy.unchecked",
+          "behavior": "autonomy.unchecked"
+        }
+      ]
+    },
+    {
+      "id": "lifecycle.at-rest",
+      "command": ["$NODE", "scripts/verify-contract.mjs", "lifecycle.at-rest"],
+      "assertions": [
+        {
+          "id": "lifecycle.at-rest",
+          "behavior": "lifecycle.at-rest"
         }
       ]
     }

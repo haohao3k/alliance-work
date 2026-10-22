@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { PaseoApi } from "@getpaseo/client";
 import { type AutonomyState, pauseKind } from "../shared/autonomy";
-import { responsibleOwner } from "../shared/operations";
+import { atRest, responsibleOwner } from "../shared/operations";
+import { asking } from "../shared/wakeups";
 import type { Autonomy } from "./autonomy";
 import { observeJob } from "./jobs.mjs";
 import type { MemberRecord, RoomStore } from "./store";
@@ -42,6 +43,16 @@ export function decisionChain(store: RoomStore, id: string) {
     current = parent ? responsibleOwner(parent) : null;
   }
   return chain;
+}
+
+/** The nearest owner up the decision chain that is an Alliance member not archived; null when none. */
+export function availableOwner(store: RoomStore, id: string) {
+  return (
+    decisionChain(store, id).find((owner) => {
+      const member = store.member(owner);
+      return member && !member.archivedAt;
+    }) ?? null
+  );
 }
 
 /**
@@ -149,7 +160,7 @@ export class Lifecycle {
           `${member.role} needs product acceptance (accept --product) by its owner, or the Human's decision`,
         );
     }
-    if (live.status !== "idle") blockers.push(`agent is ${live.status}`);
+    if (!atRest(live.status)) blockers.push(`agent is ${live.status}`);
     // A turn whose start hook was lost still shows up as a newer message in Paseo.
     if (
       live.lastMessageAt &&
@@ -168,7 +179,7 @@ export class Lifecycle {
       if (!state) blockers.push(`child ${child.id} state unknown`);
       else if (state.archived) continue;
       else if (child.decision !== "accepted") blockers.push(`child ${child.id} not accepted`);
-      else if (state.status !== "idle" || state.permissions)
+      else if (!atRest(state.status) || state.permissions)
         blockers.push(`child ${child.id} still ${state.status}`);
     }
     for (const job of this.store.jobs().filter((j) => j.ownerId === member.id))
@@ -201,6 +212,12 @@ export class Lifecycle {
       this.store.updateMember(id, { archivedAt: new Date(this.now()).toISOString() });
     const a = this.autonomy.get(id);
     if (a && a.phase !== "archived") this.autonomy.markArchived(id);
+  }
+
+  /** Paseo archived this agent: record it and settle its reminders now, not at the next sweep. */
+  async archived(id: string) {
+    this.markArchived(id);
+    await this.wakes.settle();
   }
 
   /** null: Paseo no longer has the agent (it was deleted). undefined: readback failed. */
@@ -281,7 +298,7 @@ export class Lifecycle {
     });
     if (nativeChildren.entries.length) return;
     const fresh = await this.live(api, member.id);
-    if (!fresh || fresh.archived || fresh.status !== "idle" || fresh.permissions) return;
+    if (!fresh || fresh.archived || !atRest(fresh.status) || fresh.permissions) return;
     if (
       fresh.lastMessageAt &&
       member.decisionAt &&
@@ -321,10 +338,11 @@ export class Lifecycle {
       if (member.archivedAt || member.decision !== "open" || member.lastOutcome !== "completed") continue;
       if (!member.lastTurnId) continue;
       const a = this.autonomy.get(member.id);
-      // Active or waiting assignments still have a scheduled next step of their own.
-      if (a && ["active", "waiting", "archived"].includes(a.phase)) continue;
-      const owner = responsibleOwner(member);
-      if (!owner || !this.store.member(owner) || this.store.member(owner)?.archivedAt) continue;
+      // Active assignments have a next step of their own; waiting ones while something will wake them.
+      if (a && ["active", "archived"].includes(a.phase)) continue;
+      if (a?.phase === "waiting" && (this.autonomy.bound(a) || this.autonomy.wakeSource(member.id))) continue;
+      const owner = availableOwner(this.store, member.id);
+      if (!owner) continue;
       const since = member.lastTurnEndedAt ?? member.staleSince;
       if (since === undefined) {
         // Records from before 0.1.16 have no turn end time. Start their clock now, spread over a
@@ -351,12 +369,17 @@ export class Lifecycle {
         } catch {
           /* Changed concurrently; the next scan re-evaluates. */
         }
-      // An unfinished review reminder for this turn already asks the current owner to decide.
-      if (forTurn.some((w) => w.ownerId === owner)) continue;
+      // A review reminder for this turn that will be pushed, or was sent in the last 48 hours,
+      // already asks the current owner to decide; one sent earlier is asked again, once. The
+      // owner's own pull reminder on the turn is never pushed and does not count.
+      const recent = (w: (typeof forTurn)[number]) =>
+        !["delivered", "uncertain"].includes(w.state) ||
+        now - (w.lastSentAt ?? w.updatedAt) < STALE_DECISION_MS;
+      if (forTurn.some((w) => w.ownerId === owner && asking(w) && recent(w))) continue;
       const key = `stale-decision-${hashOf(`${member.id}:${turnId}:${owner}`).slice(0, 32)}`;
       if (this.wakes.list().some((w) => w.key === key)) continue;
       const live = await this.live(api, member.id);
-      if (!live || live.archived || live.status !== "idle") continue;
+      if (!live || live.archived || !atRest(live.status)) continue;
       const ownerLive = await this.live(api, owner);
       if (!ownerLive || ownerLive.archived) continue;
       const hours = Math.floor((now - since) / 3600000);
@@ -365,7 +388,7 @@ export class Lifecycle {
           key,
           roomId: member.roomId,
           ownerId: owner,
-          reason: `Decision pending for ${hours}h on ${member.role} ${member.id}: its last turn completed and nobody accepted, rejected or archived it. Read ${member.resultPath ?? member.assignment}. Accept with evidence (alliance-work accept), request rework, or archive it natively if it is abandoned.`,
+          reason: `Decision pending for ${hours}h on ${member.role} ${member.id}: its last turn completed and nobody accepted, rejected or archived it. Read ${member.resultPath ?? member.assignment}; archive it natively if it is abandoned.`,
           trigger: { kind: "turn", agentId: member.id, turnId },
           delivery: "idle",
         });

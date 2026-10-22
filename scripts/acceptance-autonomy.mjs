@@ -1,7 +1,7 @@
 // Real-model, disposable-daemon acceptance. No production daemon or credentials are changed.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { createPaseoApi } from "@getpaseo/client";
@@ -10,12 +10,27 @@ import { runVerification } from "../server/evidence.mjs";
 import { sourceIdentity } from "./capabilities.mjs";
 import { activate } from "./maintenance.mjs";
 import { paseo, requireIdle } from "./paseo.mjs";
-import { projectRoot } from "./profiles.mjs";
+import { projectRoot, roles } from "./profiles.mjs";
 
 const output = resolve(process.argv[2] ?? "");
-if (!process.argv[2] || !process.argv[3])
-  throw new Error("Usage: node scripts/acceptance-autonomy.mjs NEW_OUTPUT CODEX_AUTH_SOURCE");
+// AUTH is the Codex auth source for codex, or an owner-only credentials.env.json for claude.
+const [auth, harness = "codex"] = process.argv.slice(3);
+if (!process.argv[2] || !auth || !["codex", "claude"].includes(harness))
+  throw new Error(
+    "Usage: node scripts/acceptance-autonomy.mjs NEW_OUTPUT CODEX_AUTH_SOURCE|CLAUDE_CREDENTIALS [codex|claude]",
+  );
+// The fleet's Claude owners run Opus; Peers take the default Sonnet route.
+const model = (role) =>
+  harness === "codex" ? "gpt-6.1-sol" : role === "peer" ? "claude-sonnet-5-5" : "claude-opus-5-5";
 await mkdir(output, { recursive: false, mode: 0o700 });
+// Claude roles read their credential from their own home; the copies are removed at the end.
+const credentials = roles.map((role) => join(output, "roles/claude", role, "credentials.env.json"));
+const copyCredentials = async () => {
+  for (const path of credentials) {
+    await copyFile(auth, path);
+    await chmod(path, 0o600);
+  }
+};
 const home = join(output, "home"),
   paseoHome = join(output, "paseo"),
   cwd = join(output, "project");
@@ -27,7 +42,8 @@ const port = listener.address().port;
 await new Promise((r) => listener.close(r));
 const receipt = {
   startedAt: new Date().toISOString(),
-  model: "gpt-6.1-sol",
+  harness,
+  model: { owner: model("lead"), peer: model("peer") },
   effort: "medium",
   events: [],
   agents: [],
@@ -47,14 +63,36 @@ async function wait(label, predicate, ms = 360000) {
 const exists = async (path) => await readFile(path, "utf8").catch(() => "");
 const rpc = (method, input = {}) => client.invokePluginRpc("alliance-work", method, input);
 try {
+  // Another installed daemon version (the fleet runs 0.11.2), started before activation adopts it.
+  if (process.env.ALLIANCE_TEST_DAEMON_CLI) {
+    await mkdir(paseoHome, { recursive: true });
+    await writeFile(
+      join(paseoHome, "config.json"),
+      JSON.stringify({
+        version: 1,
+        daemon: { listen: `127.0.0.1:${port}`, relay: { enabled: false } },
+        features: { webUi: { enabled: true } },
+      }),
+    );
+    await writeFile(
+      join(paseoHome, "alliance-instance.json"),
+      JSON.stringify({ allianceHome: home, root: projectRoot }),
+    );
+    execFileSync(
+      process.execPath,
+      [process.env.ALLIANCE_TEST_DAEMON_CLI, "daemon", "start", "--home", paseoHome],
+      { timeout: 30000 },
+    );
+  }
   await activate({
     home,
     paseoHome,
     port,
     binDir: join(output, "bin"),
     isolatedRoot: join(output, "roles"),
-    authFrom: process.argv[3],
+    authFrom: harness === "codex" ? auth : undefined,
   });
+  if (harness === "claude") await copyCredentials();
   receipt.sourceDigest = await sourceIdentity(projectRoot);
   client = new DaemonClient({
     url: `ws://127.0.0.1:${port}/ws`,
@@ -65,10 +103,10 @@ try {
   await client.connect();
   const workspace = await api.workspaces.open(cwd);
   const config = (role) => ({
-    provider: `alliance-codex-${role}/gpt-6.1-sol`,
-    // The default Peer route for codex is Sol high; owners keep the cheaper medium.
+    provider: `alliance-${harness}-${role}/${model(role)}`,
+    // The default Peer route is Sol or Sonnet high; owners keep the cheaper medium.
     thinkingOptionId: role === "peer" ? "high" : "medium",
-    modeId: "full-access",
+    modeId: harness === "claude" ? "bypassPermissions" : "full-access",
   });
   const owner = await workspace.agents.create({ title: "Autonomy E2E owner", config: config("lead") });
   receipt.agents.push(owner.id);
@@ -86,8 +124,9 @@ try {
   const managed = (await rpc("autonomy.list")).find((m) => m.agentId === worker.id);
   assert.ok(managed, "native child is managed without an explicit start command");
   const roomId = (await rpc("rooms.list")).members.find((m) => m.id === worker.id).roomId;
+  // Written only when the driver observes the condition: a worker that finds it earlier records the
+  // prerequisite itself and so bypasses the gate under test.
   const evidence = join(cwd, "dependency-evidence.txt");
-  await writeFile(evidence, "Test operator verified dependency readiness in the disposable environment.\n");
   const addObligation = (key, ownerId, assignment, nextAction) =>
     rpc("obligations.add", {
       key,
@@ -144,12 +183,18 @@ try {
   assert.equal((await rpc("autonomy.list")).find((a) => a.agentId === worker.id).continuations, 0);
   assert.equal((await rpc("obligations.list")).find((o) => o.key === "stages").state, "open");
   receipt.checks.prerequisiteAfterReload = { pass: true, noContinuationBeforeObservation: true };
+  await writeFile(evidence, "Test operator verified dependency readiness in the disposable environment.\n");
   await observe("stages");
-  await wait("owner woke and reviewed three turns", () => exists(join(cwd, "owner-reviewed.txt")));
+  const observedAt = Date.now();
+  // Two more worker turns, then the review reaches the owner two minutes after the last one ends.
+  await wait("owner woke and reviewed three turns", () => exists(join(cwd, "owner-reviewed.txt")), 900000);
+  const ownerReviewedMs = Date.now() - observedAt;
   const rooms = await rpc("rooms.list");
   const member = rooms.members.find((m) => m.id === worker.id);
   const auto = (await rpc("autonomy.list")).find((m) => m.agentId === worker.id);
-  assert.equal(auto.continuations, 2);
+  // A worker may checkpoint waiting on the unmet prerequisite in its first turn, as the contract
+  // says; that costs one more continuation once the condition is observed.
+  assert.ok([2, 3].includes(auto.continuations), `continuations ${auto.continuations}`);
   assert.equal(auto.phase, "review");
   assert.equal(member.decision, "open");
   assert.equal(member.archived, false);
@@ -157,6 +202,7 @@ try {
   receipt.checks.continuation = { pass: true, automaticTurns: auto.continuations };
   receipt.checks.ownerWake = {
     pass: true,
+    afterObservationMs: ownerReviewedMs,
     wakeups: rooms.wakeups.filter((w) => w.trigger.agentId === worker.id),
   };
   // No stale artifacts: verification is bound to actual generated candidate files.
@@ -188,10 +234,22 @@ try {
   await action("stages", { action: "fulfill" });
   await wait("plugin auto archive", async () => (await worker.refresh())?.agent.archivedAt);
   receipt.checks.archive = { pass: true, agentId: worker.id };
-  // Native failed-turn test: an invalid model causes a real provider rejection. Restore
-  // configuration after observing failure; only the plugin may send the retry prompt.
+  // Native failed-turn test: an invalid model causes a real provider rejection. Claude Code refuses
+  // an unknown model and completes a turn that ends on a provider error, so a Claude turn fails at
+  // launch instead: the launcher refuses invalid role credential JSON. Restore configuration after
+  // observing failure; only the plugin may send the retry prompt.
   const retry = await workspace.agents.create({ title: "Autonomy E2E retry", config: config("peer") });
   receipt.agents.push(retry.id);
+  const failure =
+    harness === "claude"
+      ? {
+          inject: () => writeFile(credentials[roles.indexOf("peer")], "{\n", { mode: 0o600 }),
+          restore: copyCredentials,
+        }
+      : {
+          inject: () => client.setAgentModel(retry.id, "alliance-e2e-invalid-model"),
+          restore: () => client.setAgentModel(retry.id, model("peer")),
+        };
   const retryBrief = join(cwd, "retry-brief.txt");
   await writeFile(
     retryBrief,
@@ -204,7 +262,7 @@ try {
     maxContinuations: 2,
     obligationKey: "retry",
   });
-  await client.setAgentModel(retry.id, "alliance-e2e-invalid-model");
+  await failure.inject();
   await retry
     .send(
       `After provider recovery, write retry-recovered.txt containing recovered in ${cwd}; then run ${cli} autonomy checkpoint --phase review --reason 'Recovered provider failure'. Do not delegate.`,
@@ -215,8 +273,8 @@ try {
     async () => (await rpc("rooms.list")).members.find((m) => m.id === retry.id)?.lastOutcome === "failed",
     90000,
   );
-  await client.setAgentModel(retry.id, "gpt-6.1-sol");
-  console.log(JSON.stringify({ phase: "failure-observed-model-restored", agent: retry.id }));
+  await failure.restore();
+  console.log(JSON.stringify({ phase: "failure-observed-provider-restored", agent: retry.id }));
   await new Promise((r) => setTimeout(r, 35000));
   assert.equal(
     (await rpc("autonomy.list")).find((a) => a.agentId === retry.id).retries,
@@ -288,6 +346,7 @@ try {
   } catch (error) {
     receipt.events.push({ daemonCleanup: error.message });
   }
+  if (harness === "claude") for (const path of credentials) await rm(path, { force: true });
   receipt.finishedAt = new Date().toISOString();
   await writeFile(join(output, "receipt.json"), JSON.stringify(receipt, null, 2), { mode: 0o600 });
   console.log(JSON.stringify({ output, pass: receipt.pass, checks: receipt.checks, error: receipt.error }));

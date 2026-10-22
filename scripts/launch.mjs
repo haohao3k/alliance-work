@@ -10,6 +10,20 @@ import { contextPolicy } from "./context-policy.mjs";
 import { assertNoLinks, codexIsolationFeatures, loadManifest, verifyProfile } from "./profiles.mjs";
 import { userMcpServers } from "./user-mcp.mjs";
 
+/**
+ * Agent turns have no terminal to answer a prompt, so a tool that asks would hang the turn. These
+ * make common tools fail or proceed instead. Not CI, which changes how tools behave.
+ */
+const nonInteractive = {
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
+  GIT_TERMINAL_PROMPT: "0",
+  GCM_INTERACTIVE: "never",
+  GH_PROMPT_DISABLED: "1",
+  PIP_NO_INPUT: "1",
+  DEBIAN_FRONTEND: "noninteractive",
+  npm_config_yes: "true",
+};
+
 export function profileEnvironment(profile, home, ambient = process.env, credentials = {}) {
   /** @type {Record<string,string>} */
   const env = {};
@@ -113,6 +127,8 @@ export async function launchPlan(
     );
   if ((metadataCommand && profile.harness !== "pi") || accountCommand)
     return { executable: profile.executable, args, env, cwd, authSource: source };
+  // Only agent sessions (Paseo sets PASEO_AGENT_ID); the Human's own launches keep their prompts.
+  if (ambient.PASEO_AGENT_ID) for (const [key, value] of Object.entries(nonInteractive)) env[key] ??= value;
   const bundle = await projectSkills(cwd);
   const userServers = await userMcpServers(home, profile.harness);
   if (profile.harness === "claude") {

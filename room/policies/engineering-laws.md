@@ -1,7 +1,6 @@
 # Engineering laws — core v1
 
-These laws apply to HQ, Supervisor, Lead, Peer and Lens. Roles assign responsibility,
-not capability ceilings. Act within the Human's authority; keep initiative and independent work moving.
+These laws apply to HQ, Supervisor, Lead, Peer and Lens.
 
 1. **An open obligation keeps an owner.** Sessions end; obligations survive. Before retiring an
    owner, transfer its open obligations explicitly to a live successor or the Human who owns the
@@ -13,8 +12,8 @@ not capability ceilings. Act within the Human's authority; keep initiative and i
    runtime and observed behavior. Never activate by interrupting current work.
 4. **Claims have scope and time.** Name candidate, environment, observation time and remaining
    limits. Old handbacks and expired observations are history, not current runtime truth.
-5. **Coordination must earn its interruption.** Keep one writer for coupled work. Batch routine
-   handbacks at natural boundaries. No status ping loops, reviewer quotas or compulsory councils.
+5. **Coordination must earn its interruption.** Batch routine handbacks at natural boundaries.
+   No status ping loops, reviewer quotas or compulsory councils.
 6. **Done matches the contract.** Fixture, analysis, local-only, integrated and serving are
    different acceptance scopes. Tests, delivery receipts and reviews do not close an obligation
    without evidence for its closeWhen contract. Respect deliberate waits for Human decisions.
@@ -29,21 +28,22 @@ not capability ceilings. Act within the Human's authority; keep initiative and i
 
 When a law is violated: stop only the dependent action, rethink its premise using evidence,
 reconcile ownership/conditions/authority/claims, then resume within authority. Record material
-changes in the existing obligation or handback. Continue unrelated authorized work. Ask the
-Human only for missing authority, product direction or a material unapproved trade-off.
+changes in the existing obligation or handback. Continue unrelated authorized work.
 
-At a new assignment, resume or context compaction, recover current policy and your open
-obligations with `alliance-work policy read --agent "$PASEO_AGENT_ID"`. Read the linked assignment
-and the session snapshot at `$ALLIANCE_CONTEXT` when supplied. The snapshot is regenerated on
-native session open; it is task context, not proof that the model read it. Read current policy
-and evidence before side effects. This is one recovery read, not a mandatory acknowledgement
-ceremony. A loaded snapshot may age; refresh obligations before executing a dependent action.
-There is no universal native compaction callback; preserve this recovery instruction in handbacks.
+A new session already has current policy: read its assignment and start. After a resume or
+context compaction, recover current policy and open obligations once with `alliance-work policy
+read --agent "$PASEO_AGENT_ID"`, then read the linked assignment; the snapshot at
+`$ALLIANCE_CONTEXT` repeats that policy, so read only its obligations and pending items there.
+Reconcile open obligations before side effects (`policy ack` only records the read) and refresh
+them before a dependent action. There is no universal compaction callback: preserve this
+recovery instruction in handbacks.
 
 Persist material future work with `alliance-work obligations add --file FILE.json`; use
 `obligations action --file FILE.json` for evidence-backed observation, reconciliation, handoff or
-closure. See docs/operations.md for the schema. Do not turn every tool call into an obligation.
-Link its reminder using `wakeups add --obligation KEY ...`; these reminders use pull delivery,
-because this native API cannot atomically guarantee an idle-only send. No background message
-is required. Notification expiry or acknowledgement never erases the underlying obligation.
-Old unlinked wakeups remain as recorded; do not infer authority or migrate them from prose.
+closure (schema in docs/operations.md). Do not turn every tool call into an obligation. Bind
+dependent work with `autonomy start --obligation KEY`: its owner and unexpired conditions gate
+continuation and retry, so checkpoint `waiting` while prerequisites are missing. A handoff moves
+the binding and its remaining budget to an idle successor; a handoff to the Human pauses
+execution. Linked reminders (`wakeups add --obligation KEY`) are pull-only; their acknowledgement
+or expiry never closes the obligation. Never fulfil one merely to enable archive. Do not infer
+authority from old unlinked reminders.

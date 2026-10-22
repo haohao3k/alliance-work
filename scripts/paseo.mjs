@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
 import { projectRoot } from "./profiles.mjs";
 
@@ -88,6 +89,58 @@ export async function reloadRegisteredPlugin(home, root = projectRoot) {
   paseo(["plugin", "reload", "alliance-work"], home, root);
 }
 
+/**
+ * True once no scheduler round that began before `since` (epoch ms) can still send a prompt: the
+ * plugin reports a round started later (rounds run one at a time and read the pause first, since
+ * 0.1.16), or no Alliance plugin is running. False after `timeoutMs`, e.g. while a round is stuck.
+ */
+export async function schedulerPaused(since, { health, running, timeoutMs = 120000, interval = 3000 }) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    try {
+      const { checkedAt } = await health();
+      if (checkedAt && Date.parse(checkedAt) > since) return true;
+    } catch {
+      // Without an answer only a plugin that is not running shows that no round is in flight.
+      if (!(await running().catch(() => true))) return true;
+    }
+    if (Date.now() >= deadline) return false;
+    await sleep(interval);
+  }
+}
+
+/** schedulerPaused for this Paseo home: the plugin's wakeupHealth via rooms.list. */
+export async function schedulerPausedAt(home, since, root = projectRoot) {
+  const config = JSON.parse(await readFile(join(home, "config.json"), "utf8"));
+  const client = new DaemonClient({
+    url: `ws://${config.daemon.listen}/ws`,
+    clientId: "alliance-maintenance",
+    password: process.env.ALLIANCE_PASEO_PASSWORD,
+    connectTimeoutMs: 10000,
+  });
+  let connected = false;
+  try {
+    return await schedulerPaused(since, {
+      health: async () => {
+        if (!connected) {
+          await client.connect();
+          connected = true;
+        }
+        return (await client.invokePluginRpc("alliance-work", "rooms.list", {})).wakeupHealth;
+      },
+      running: async () => {
+        const plugins = paseo(["plugin", "ls"], home, root);
+        const plugin = (Array.isArray(plugins) ? plugins : plugins.plugins)?.find(
+          (p) => p.id === "alliance-work",
+        );
+        return plugin?.status === "running";
+      },
+    });
+  } finally {
+    await client.close().catch(() => undefined);
+  }
+}
+
 export async function verifyRuntime(home, root = projectRoot) {
   const state = await instanceState(home, root);
   if (state?.localDaemon !== "running" || state.connectedDaemon !== "reachable")
@@ -99,8 +152,14 @@ export async function verifyRuntime(home, root = projectRoot) {
   if (resolve(plugin.path ?? "") !== resolve(root))
     throw new Error("Running Alliance plugin is not the selected candidate source.");
   const url = `http://${state.listen}`;
+  const get = (path) => fetch(url + path, { signal: AbortSignal.timeout(10000) });
   for (const path of ["/api/health", "/"]) {
-    const response = await fetch(url + path, { signal: AbortSignal.timeout(10000) });
+    // A pooled keep-alive socket left idle while the paseo calls above blocked the event loop may
+    // already be closed by the daemon; its reuse fails with ECONNRESET. Retry once on a new one.
+    const response = await get(path).catch((error) => {
+      if (error?.cause?.code !== "ECONNRESET") throw error;
+      return get(path);
+    });
     if (!response.ok) throw new Error(`Alliance ${path} returned ${response.status}.`);
   }
   return { version: state.daemonVersion, url, plugin: plugin.status };

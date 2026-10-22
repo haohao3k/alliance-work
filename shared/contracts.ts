@@ -80,6 +80,19 @@ export const Member = z.object({
   // "Human" or the deciding agent ID; absent for decisions recorded before v0.1.16.
   decisionBy: z.string().optional(),
   decisionScope: z.enum(["technical", "product"]).nullable(),
+  // Its running turn has been quiet since `since`; key: the owner's notice, null when none is woken.
+  silence: z
+    .object({
+      turnId: z.string().nullable(),
+      since: z.string(),
+      key: z.string().nullable(),
+      notifiedAt: z.string().nullable(),
+    })
+    .optional(),
+  // The last approval request Alliance denied for it: nobody approves commands for members.
+  denied: z
+    .object({ requestId: z.string(), tool: z.string(), command: z.string().nullable(), at: z.string() })
+    .optional(),
   lifecycle: z.object({
     state: z.enum(["archived", "archivable", "held", "awaiting-decision", "rejected"]),
     blockers: z.array(z.string()),
@@ -101,7 +114,15 @@ export const roomList = defineRpc({
         ownerLabel: z.string(),
       }),
     ),
-    wakeupHealth: z.object({ checkedAt: z.string().nullable(), error: z.string().nullable() }),
+    wakeupHealth: z.object({
+      checkedAt: z.string().nullable(),
+      error: z.string().nullable(),
+      // The daemon the scheduler last connected to; null before its first connection.
+      daemon: z
+        .object({ version: z.string().nullable(), agentMessageProvenance: z.boolean() })
+        .nullable()
+        .optional(),
+    }),
   }),
 });
 export const roomCreate = defineRpc({
@@ -148,7 +169,10 @@ export const roomModelPolicyReset = defineRpc({
   name: "models.reset",
   // The Models page passes the revision it shows; the Human's CLI resets unconditionally.
   input: z.object({ roomId: z.string(), revision: z.number().int().nonnegative().optional() }),
-  output: roomModelPolicy.output,
+  // removed: the deleted saved list, kept raw in rooms.sqlite table room_model_policy_removed.
+  output: roomModelPolicy.output.extend({
+    removed: z.object({ id: z.number().int(), revision: z.number().int(), at: z.string() }).optional(),
+  }),
 });
 export const roomModelCatalog = defineRpc({
   name: "models.catalog",

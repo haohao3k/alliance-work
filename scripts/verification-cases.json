@@ -25,7 +25,7 @@
   },
   "models.policy-persistence": {
     "file": "tests/model-policy.test.ts",
-    "pattern": "room policy persists independently|pre-0.1.18 saved routes apply"
+    "pattern": "room policy persists independently|pre-0.1.18 saved routes apply|reset clears unreadable lists"
   },
   "skills.skill-selection": {
     "file": "tests/project-skills.test.ts",
@@ -57,7 +57,7 @@
   },
   "maintenance.rollback": {
     "file": "tests/maintenance.test.ts",
-    "pattern": "rollback restores managed profiles"
+    "pattern": "rollback restores managed profiles|rollback onto a release before 0.1.19|rollback below 0.1.19"
   },
   "maintenance.release-integrity": {
     "file": "tests/maintenance.test.ts",
@@ -129,7 +129,7 @@
   },
   "obligations.recovery": {
     "file": "tests/rooms.test.ts",
-    "pattern": "session recovery restores"
+    "pattern": "session recovery restores|resume prompts and recovery snapshots list"
   },
   "autonomy.continuation": {
     "file": "tests/autonomy.test.ts",
@@ -138,6 +138,10 @@
   "autonomy.retry": {
     "file": "tests/autonomy.test.ts",
     "pattern": "failed turns retry"
+  },
+  "autonomy.retry-batch": {
+    "file": "tests/lifecycle.test.ts",
+    "pattern": "a waiting lead whose wake batch's turn fails with a provider error"
   },
   "autonomy.uncertain": {
     "file": "tests/autonomy.test.ts",
@@ -157,7 +161,7 @@
   },
   "autonomy.obligations": {
     "file": "tests/autonomy.test.ts",
-    "pattern": "bound continuation|accepted work cannot archive|obligation handoff"
+    "pattern": "bound continuation|accepted work cannot archive|obligation handoff|bound to an obligation that is no longer open"
   },
   "models.economical-defaults": {
     "file": "tests/model-policy.test.ts",
@@ -190,5 +194,129 @@
   "lifecycle.deploy": {
     "file": "tests/deploy.test.ts",
     "pattern": "the remote half hands the bundle"
+  },
+  "rooms.late-owner": {
+    "file": "tests/rooms.test.ts",
+    "pattern": "an owner assigned after a session started receives its handback"
+  },
+  "rooms.wait": {
+    "file": "tests/rooms.test.ts",
+    "pattern": "a coordinator waiting on its worker's turn"
+  },
+  "rooms.silence": {
+    "file": "tests/rooms.test.ts",
+    "pattern": "a running member silent for 20 minutes|a silence notice the busy owner"
+  },
+  "rooms.approval": {
+    "file": "tests/rooms.test.ts",
+    "pattern": "an approval request still pending 5 minutes"
+  },
+  "rooms.provider-limit": {
+    "file": "tests/rooms.test.ts",
+    "pattern": "ryzen's 2026-10-21 Claude session limit|a review batch whose turn ended on ryzen's session limit|a Claude API error that Paseo reports|a Claude limit notice recorded inside its printed reset minute|a limit in a turn Claude Code starts by itself|Claude's 'Not logged in' notice"
+  },
+  "rooms.provider-limit-batch": {
+    "file": "tests/lifecycle.test.ts",
+    "pattern": "a waiting lead whose wake batch's turn ends on a provider limit"
+  },
+  "rooms.launch-env": {
+    "file": "tests/rooms.test.ts",
+    "pattern": "agent sessions run tools with input prompts off"
+  },
+  "rooms.send-rule": {
+    "file": "tests/rooms.test.ts",
+    "pattern": "new agents learn how sends behave"
+  },
+  "models.agy-gemini": {
+    "file": "tests/agy.test.ts",
+    "pattern": "AGY runs only Gemini models"
+  },
+  "maintenance.wait-pause": {
+    "file": "tests/maintenance.test.ts",
+    "pattern": "a waiting update pauses scheduled prompts only|an activation attempt waits for a scheduler round|with --hold a waiting update keeps"
+  },
+  "maintenance.mutex": {
+    "file": "tests/maintenance-lock.test.ts",
+    "pattern": "one maintenance command runs per home"
+  },
+  "wakeups.decision": {
+    "file": "tests/wakeups.test.ts",
+    "pattern": "a review is acknowledged only after a decision"
+  },
+  "wakeups.default": {
+    "file": "tests/wakeups.test.ts",
+    "pattern": "a reminder wakes its idle owner|a reminder added with a grace delay"
+  },
+  "wakeups.visibility": {
+    "file": "tests/wakeups.test.ts",
+    "pattern": "a pushed batch lists the owner's pending pull|take returns new reminders ahead"
+  },
+  "wakeups.pull-migration": {
+    "file": "tests/wakeups.test.ts",
+    "pattern": "the first 0.1.19 load makes reminders older releases stored pull"
+  },
+  "obligations.policy-size": {
+    "file": "tests/maintenance.test.ts",
+    "pattern": "role instructions stay within their word budget"
+  },
+  "autonomy.handback": {
+    "file": "tests/autonomy.test.ts",
+    "pattern": "a turn that ends without a checkpoint hands back"
+  },
+  "autonomy.handback-only": {
+    "file": "tests/autonomy.test.ts",
+    "pattern": "an owned member without an assignment hands each turn back"
+  },
+  "autonomy.reopened": {
+    "file": "tests/autonomy.test.ts",
+    "pattern": "prompts after a reopened handback or a quota retry"
+  },
+  "autonomy.quota": {
+    "file": "tests/autonomy.test.ts",
+    "pattern": "a provider quota failure waits for its reset|a provider quota that does not lift|a short or unstated rate limit|a Pi usage limit that says when it resets"
+  },
+  "autonomy.self-started": {
+    "file": "tests/autonomy.test.ts",
+    "pattern": "a turn Claude Code starts by itself keeps the handback"
+  },
+  "autonomy.self-started-hooks": {
+    "file": "tests/rooms.test.ts",
+    "pattern": "a handback stands through turns Claude Code starts by itself|a review names the turn that handed back|a failed turn Claude Code starts by itself"
+  },
+  "autonomy.unchecked": {
+    "file": "tests/autonomy.test.ts",
+    "pattern": "an assignment continued twice without a checkpoint"
+  },
+  "autonomy.review-failure": {
+    "file": "tests/autonomy.test.ts",
+    "pattern": "a failure after a review checkpoint"
+  },
+  "autonomy.blocked": {
+    "file": "tests/autonomy.test.ts",
+    "pattern": "continuation exhaustion requests review|an exhausted run budget is renewed by autonomy start|a blocker asks its owner once"
+  },
+  "autonomy.prompts": {
+    "file": "tests/autonomy.test.ts",
+    "pattern": "continuation and review prompts name the current CLI"
+  },
+  "lifecycle.owned": {
+    "file": "tests/lifecycle.test.ts",
+    "pattern": "owned members get an assignment"
+  },
+  "lifecycle.reask": {
+    "file": "tests/lifecycle.test.ts",
+    "pattern": "a review sent over 48 hours ago"
+  },
+  "lifecycle.archived-owner": {
+    "file": "tests/lifecycle.test.ts",
+    "pattern": "an archived owner's reminders end|an archive seen by the assignment sweep"
+  },
+  "lifecycle.hold": {
+    "file": "tests/lifecycle.test.ts",
+    "pattern": "or that paused itself"
+  },
+  "lifecycle.at-rest": {
+    "file": "tests/lifecycle.test.ts",
+    "pattern": "a closed one is at rest"
   }
 }

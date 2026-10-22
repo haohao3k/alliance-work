@@ -3,7 +3,7 @@ import { constants, rmSync } from "node:fs";
 import { access, chmod, lstat, mkdir, readFile, rm, rmdir, unlink } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { bootTime, LOCK, takeLock } from "../server/maintenance-lock.mjs";
+import { bootTime, LOCK, lockState, MUTEX, takeLock } from "../server/maintenance-lock.mjs";
 import { authStatus, setAuthSource } from "./auth.mjs";
 import { inspectCapabilities } from "./capabilities.mjs";
 import { run } from "./distribution.mjs";
@@ -36,41 +36,66 @@ export async function installation(home) {
 }
 /** Cleanups to run if the process is interrupted while it holds the maintenance lock. */
 export const onInterrupt = new Set();
-export async function withMaintenance(home, action) {
+/** Whether this process holds the scheduler pause; an interrupt removes only locks it holds. */
+let paused = false;
+const ownerRecord = (started = new Date()) =>
+  `${JSON.stringify({ pid: process.pid, host: hostname(), boot: bootTime(), started: started.toISOString() })}\n`;
+/**
+ * Pause scheduled prompts: running plugins read LOCK at the start of every round. Returns when it
+ * was taken (epoch ms). Throws while another command holds it.
+ */
+export async function pauseScheduler(home) {
+  const path = await takeLock(home);
+  paused = true;
+  const started = new Date();
+  await atomicWrite(join(path, "owner.json"), ownerRecord(started));
+  return started.getTime();
+}
+export async function resumeScheduler(home) {
+  if (!paused) return;
+  paused = false;
+  await rm(join(home, LOCK), { recursive: true, force: true });
+}
+/**
+ * One maintenance command per home: it holds MUTEX for its whole run and, unless `pause` is false,
+ * the scheduler pause too. A waiting update passes false and pauses for each activation attempt.
+ */
+export async function withMaintenance(home, action, { pause = true } = {}) {
   await assertNoLinks(home);
   await mkdir(home, { recursive: true, mode: 0o700 });
-  const path = join(home, LOCK);
   if (process.env.ALLIANCE_PARENT_MAINTENANCE === String(process.ppid)) {
-    const owner = await readFile(join(path, "owner.json"), "utf8").then(JSON.parse);
+    // The candidate installer runs under the pause its parent update holds.
+    const owner = await readFile(join(home, LOCK, "owner.json"), "utf8").then(JSON.parse);
     if (owner.pid !== process.ppid) throw new Error("Parent maintenance lock does not match.");
     return action();
   }
-  await takeLock(home);
-  // Interrupting a long wait must not leave the lock or a staged copy behind.
+  const mutex = await takeLock(home, MUTEX);
+  // Interrupting a long wait must not leave a lock or a staged copy behind.
   const signals = ["SIGINT", "SIGTERM", "SIGHUP"];
   const onSignal = (signal) => {
     for (const cleanup of onInterrupt)
       try {
         cleanup();
       } catch {}
-    rmSync(path, { recursive: true, force: true });
+    if (paused) rmSync(join(home, LOCK), { recursive: true, force: true });
+    rmSync(mutex, { recursive: true, force: true });
     process.exit(128 + (signal === "SIGINT" ? 2 : signal === "SIGTERM" ? 15 : 1));
   };
   for (const signal of signals) process.on(signal, onSignal);
   try {
-    await atomicWrite(
-      join(path, "owner.json"),
-      JSON.stringify({
-        pid: process.pid,
-        host: hostname(),
-        boot: bootTime(),
-        started: new Date().toISOString(),
-      }) + "\n",
-    );
+    await atomicWrite(join(mutex, "owner.json"), ownerRecord());
+    // Releases before 0.1.19 take only the pause; refuse while one of their commands runs.
+    const older = await lockState(home);
+    if (older.held)
+      throw new Error(
+        `Another maintenance operation owns ${older.path}. If it crashed, verify its process has exited before removing this lock.`,
+      );
+    if (pause) await pauseScheduler(home);
     return await action();
   } finally {
     for (const signal of signals) process.off(signal, onSignal);
-    await rm(path, { recursive: true, force: true });
+    await resumeScheduler(home);
+    await rm(mutex, { recursive: true, force: true });
   }
 }
 export async function findExecutable(name) {

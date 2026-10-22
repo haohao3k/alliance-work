@@ -14,7 +14,8 @@ export const WakeInput = z
     reason: z.string().trim().min(1).max(2000),
     obligationKey: z.string().min(1).max(160).optional(),
     trigger: WakeTrigger,
-    delivery: z.enum(["pull", "idle"]).default("pull"),
+    // Omitted: see defaultDelivery. Wakeups.add fills it in so the input hash matches an explicit value.
+    delivery: z.enum(["pull", "idle"]).optional(),
     everyMs: z
       .number()
       .int()
@@ -23,9 +24,11 @@ export const WakeInput = z
       .optional(),
     maxRuns: z.number().int().min(1).max(100).default(1),
     expiresAt: z.number().int().nonnegative().optional(),
+    /** Grace from now before the reminder can become due, whatever its trigger. */
+    delayMs: z.number().int().min(0).max(86400000).optional(),
   })
   .superRefine((v, ctx) => {
-    if (v.obligationKey && v.delivery !== "pull")
+    if (v.obligationKey && v.delivery === "idle")
       ctx.addIssue({
         code: "custom",
         message: "Obligation wakeups require pull: this native API has no atomic idle-only send",
@@ -34,6 +37,9 @@ export const WakeInput = z
       ctx.addIssue({ code: "custom", message: "Repeats need a time trigger and maxRuns >= 2" });
     if (!v.everyMs && v.maxRuns !== 1) ctx.addIssue({ code: "custom", message: "maxRuns requires everyMs" });
   });
+/** A reminder wakes its idle owner unless it asks for pull; obligation reminders are pull-only. */
+export const defaultDelivery = (input: { obligationKey?: string }) =>
+  input.obligationKey ? ("pull" as const) : ("idle" as const);
 export const WakeRecord = z.object({
   key: z.string(),
   roomId: z.string(),
@@ -66,8 +72,14 @@ export const WakeRecord = z.object({
   jobRevision: z.number().optional(),
   messageId: z.string().nullable(),
   lastSentAt: z.number().nullable(),
+  /** Times the owner deferred this reminder (wakeups defer). */
+  defers: z.number().optional(),
 });
 export type WakeRecordValue = z.infer<typeof WakeRecord>;
+/** The reminder still asks its owner: it will be pushed, or it was sent. A pending pull item never is. */
+export const asking = (w: Pick<WakeRecordValue, "state" | "delivery">) =>
+  !["acknowledged", "canceled", "expired"].includes(w.state) &&
+  (w.delivery === "idle" || w.state === "delivered" || w.state === "uncertain");
 export const wakeList = defineRpc({ name: "wakeups.list", input: z.object({}), output: z.array(WakeRecord) });
 export const wakeAdd = defineRpc({ name: "wakeups.add", input: WakeInput, output: WakeRecord });
 export const wakeTake = defineRpc({
@@ -81,8 +93,10 @@ export const wakeAction = defineRpc({
     key: z.string(),
     ownerId: z.string(),
     revision: z.number().int().positive(),
-    action: z.enum(["ack", "cancel", "owner"]),
+    action: z.enum(["ack", "cancel", "owner", "defer"]),
     nextOwnerId: z.string().optional(),
+    /** defer: the reminder is due again after this many minutes. */
+    minutes: z.number().int().min(1).max(1440).optional(),
   }),
   output: WakeRecord,
 });

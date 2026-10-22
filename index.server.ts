@@ -24,6 +24,7 @@ import {
   roomModelPolicySave,
   settings,
 } from "./shared/contracts";
+import { allowedModel } from "./shared/model-policy";
 import { obligationAction, obligationAdd, obligationHistory, obligationList } from "./shared/obligations";
 import { wakeAction, wakeAdd, wakeList, wakeTake } from "./shared/wakeups";
 
@@ -75,7 +76,14 @@ export default function contribute(server: PluginServerContext) {
   server.handle(wakeAdd, async (input) => (await get()).wakeups.add(input));
   server.handle(wakeTake, async ({ ownerId }) => (await get()).wakeups.take(ownerId));
   server.handle(wakeAction, async (input) =>
-    (await get()).wakeups.action(input.key, input.ownerId, input.revision, input.action, input.nextOwnerId),
+    (await get()).wakeups.action(
+      input.key,
+      input.ownerId,
+      input.revision,
+      input.action,
+      input.nextOwnerId,
+      input.minutes,
+    ),
   );
   server.handle(jobTrack, async (input) => (await get()).trackJob(input));
   server.handle(jobOwner, async (input, { paseo }) =>
@@ -98,7 +106,7 @@ export default function contribute(server: PluginServerContext) {
   );
   server.handle(roomModelCatalog, async ({ roomId, harness, role }, { paseo }) => ({
     models: (await (await get()).modelCatalog(roomId, harness, role, paseo))
-      .filter((model) => model.isSelectable !== false)
+      .filter((model) => model.isSelectable !== false && allowedModel(harness, model.id))
       .map((model) => ({
         id: model.id,
         label: model.label,
@@ -199,6 +207,14 @@ export default function contribute(server: PluginServerContext) {
   server.on("agent.turn_ended", async (event) => {
     if (allianceProvider(event.agent.provider))
       await (await get()).endTurn(event.agent, event.turnId, event.outcome, event.timeline);
+  });
+  // Nobody approves a member's commands: the plugin denies a request 5 minutes after this.
+  server.on("agent.permission_requested", async ({ agent, request }) => {
+    if (allianceProvider(agent.provider)) (await get()).liveness.requested(agent.id, request.id);
+  });
+  // Without this the scheduler learns of an archive only when it next reads the agent.
+  server.on("agent.archived", async ({ agent }) => {
+    if (allianceProvider(agent.provider)) await (await get()).lifecycle.archived(agent.id);
   });
   return async () => {
     unsubscribe();

@@ -22,6 +22,28 @@ export const AutonomyRecord = z.object({
   delivery: z.enum(["none", "dispatching", "sent", "uncertain"]),
   messageId: z.string().nullable(),
   updatedAt: z.number(),
+  /** The turn that was current at the latest checkpoint; a turn without one may be a handback. */
+  checkpointTurnId: z.string().nullable().optional(),
+  /** The due retry waits out a provider quota and does not use the retry budget. */
+  quotaRetry: z.boolean().optional(),
+  /** Quota waits in a row; at the cap the assignment is blocked for its owner instead. */
+  quotaWaits: z.number().int().optional(),
+  /**
+   * Recorded only so an owned member's handbacks reach its owner: until `autonomy start` or an
+   * `active` checkpoint makes it an assignment, it is never continued and is retried only at a
+   * provider limit's reset.
+   */
+  handbackOnly: z.boolean().optional(),
+  /** The plugin's own wake batch, sent at `at` with these reminders; the turn it starts is the plugin's. */
+  wakeBatch: z.object({ at: z.number(), keys: z.array(z.string()) }).optional(),
+  /** The current turn was started by a wake batch or by the agent itself: it keeps the phase it found. */
+  wakeTurnId: z.string().nullable().optional(),
+  /** The plugin's last continuation or retry, by message, and the budget it used. */
+  charged: z.object({ messageId: z.string(), retry: z.boolean() }).optional(),
+  /** Continuation turns since the last checkpoint that ended without one. */
+  unchecked: z.number().int().optional(),
+  /** The blocker its owner was asked about (hash of owner and reason) and that review's key. */
+  blocker: z.object({ hash: z.string(), review: z.string() }).optional(),
 });
 export type AutonomyState = z.infer<typeof AutonomyRecord>;
 export const autonomyList = defineRpc({

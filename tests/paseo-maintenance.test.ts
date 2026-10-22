@@ -1,19 +1,20 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { cp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join, relative } from "node:path";
 import { test } from "node:test";
 import { createPaseoApi } from "@getpaseo/client";
 import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
-import { activate, installation } from "../scripts/maintenance.mjs";
-import { instanceState, paseo, requireIdle, verifyRuntime } from "../scripts/paseo.mjs";
+import { activate, installation, pauseScheduler, resumeScheduler } from "../scripts/maintenance.mjs";
+import { instanceState, paseo, requireIdle, schedulerPausedAt, verifyRuntime } from "../scripts/paseo.mjs";
 import { loadManifest, projectRoot } from "../scripts/profiles.mjs";
 import { temporary } from "./temp";
 
 test("native Paseo switches release roots and restores the previous plugin after failed activation", {
   skip: process.env.ALLIANCE_NATIVE_PASEO_TESTS !== "1",
-  timeout: 120000,
+  // About 90 s on an idle host; three activations each typecheck, so a loaded host takes far longer.
+  timeout: 480000,
 }, async (t) => {
   const dir = await temporary("alliance-paseo-maintenance-");
   const home = join(dir, "home"),
@@ -118,6 +119,34 @@ test("native Paseo switches release roots and restores the previous plugin after
     };
     assert.equal(after.rooms.length, before.rooms.length + 1);
     assert(after.members.some((member) => member.id === created.id));
+    // A finished scheduler round names the daemon it connected to (agents are told how sends
+    // behave on it) and no failed sweep. Rounds take well under 5 s and start every 15 s.
+    const daemonVersion = (await instanceState(paseoHome))?.daemonVersion;
+    type Health = { checkedAt: string | null; error: string | null; daemon?: unknown };
+    let health: Health | undefined;
+    for (let i = 0; i < 40; i++) {
+      health = ((await client.invokePluginRpc("alliance-work", "rooms.list", {})) as { wakeupHealth: Health })
+        .wakeupHealth;
+      if (health.daemon && Date.now() - Date.parse(health.checkedAt ?? "") > 5000) break;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    assert.deepEqual(health && { error: health.error, daemon: health.daemon }, {
+      error: null,
+      daemon: { version: daemonVersion, agentMessageProvenance: !String(daemonVersion).startsWith("0.11.") },
+    });
+    // A waiting update pauses scheduled prompts for an activation attempt, then waits for a round
+    // that began after the pause; that round reports the pause.
+    const since = await pauseScheduler(home);
+    try {
+      assert.equal(await schedulerPausedAt(paseoHome, since), true);
+      for (let i = 0; i < 10 && !health?.error; i++)
+        health = (
+          (await client.invokePluginRpc("alliance-work", "rooms.list", {})) as { wakeupHealth: Health }
+        ).wakeupHealth;
+      assert.match(health?.error ?? "", /Maintenance lock held/);
+    } finally {
+      await resumeScheduler(home);
+    }
     // Read/ack and ownership must cross the real plugin RPC without starting a model turn.
     const policy = (await client.invokePluginRpc("alliance-work", "policy.read", {
       agentId: created.id,
@@ -189,19 +218,45 @@ test("native Paseo switches release roots and restores the previous plugin after
     assert.equal(history[1].ownerId, null);
     assert.equal((await created.refresh())?.agent.status, "idle");
 
-    await client.invokePluginRpc("alliance-work", "jobs.track", {
-      key: "native-controller",
-      roomId: policyRoomId,
-      ownerId: created.id,
-      pid: process.pid,
-      title: "Native fixture controller",
-    });
+    // Inside an agent session the CLI takes the room and the owner from the session.
+    const asAgent = (...args: string[]) =>
+      spawnSync(process.execPath, [join(projectRoot, "scripts/cli.mjs"), ...args, "--home", home], {
+        encoding: "utf8",
+        timeout: 30000,
+        env: { ...process.env, PASEO_AGENT_ID: created.id, ALLIANCE_BOUND_ROOM: policyRoomId },
+      });
+    const track = asAgent(
+      "jobs",
+      "track",
+      "--pid",
+      String(process.pid),
+      "--key",
+      "native-controller",
+      "--title",
+      "Native fixture controller",
+    );
+    assert.equal(track.status, 0, track.stderr);
+    // An agent waits by registering what wakes it, then ends its turn. Nothing is sent while the
+    // process runs, and repeating the command registers nothing new.
+    const waited = asAgent("wait", "--pid", String(process.pid), "--reason", "Fixture controller exits");
+    assert.equal(waited.status, 0, waited.stderr);
+    const waitKey = /^Registered (\S+)\. End your turn now; Alliance wakes you\.$/m.exec(waited.stdout)?.[1];
+    assert(waitKey, waited.stdout);
+    assert.equal(
+      asAgent("wait", "--pid", String(process.pid), "--reason", "Fixture controller exits").stdout,
+      waited.stdout,
+    );
     const tracked = (await client.invokePluginRpc("alliance-work", "rooms.list", {})) as {
-      jobs: { state: string; ownerId: string; ownerStatus: string }[];
+      jobs: { key: string; state: string; ownerId: string; ownerStatus: string }[];
+      wakeups: { key: string; ownerId: string; delivery: string; state: string; trigger: { key?: string } }[];
     };
-    assert.equal(tracked.jobs[0].state, "running");
-    assert.equal(tracked.jobs[0].ownerId, created.id);
-    assert.equal(tracked.jobs[0].ownerStatus, "available");
+    const controller = tracked.jobs.find((job) => job.key === "native-controller");
+    assert.equal(controller?.state, "running");
+    assert.equal(controller?.ownerId, created.id);
+    assert.equal(controller?.ownerStatus, "available");
+    const wake = tracked.wakeups.find((w) => w.key === waitKey);
+    assert.deepEqual(wake && [wake.ownerId, wake.delivery, wake.state], [created.id, "idle", "scheduled"]);
+    assert.equal(tracked.jobs.find((job) => job.key === wake?.trigger.key)?.state, "running");
     const wakeRoomId = after.rooms.find((room) => room.cwd === cwd)?.id;
     assert(wakeRoomId);
     await client.invokePluginRpc("alliance-work", "wakeups.add", {
@@ -210,6 +265,7 @@ test("native Paseo switches release roots and restores the previous plugin after
       ownerId: created.id,
       reason: "Inspect test evidence",
       trigger: { kind: "time", at: Date.now() },
+      delivery: "pull",
     });
     const taken = (await client.invokePluginRpc("alliance-work", "wakeups.take", {
       ownerId: created.id,

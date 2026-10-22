@@ -2,7 +2,7 @@
 // No production daemon or credentials are changed.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join, resolve } from "node:path";
 import { createPaseoApi } from "@getpaseo/client";
@@ -11,12 +11,21 @@ import { runVerification } from "../server/evidence.mjs";
 import { sourceIdentity } from "./capabilities.mjs";
 import { activate } from "./maintenance.mjs";
 import { paseo } from "./paseo.mjs";
-import { projectRoot } from "./profiles.mjs";
+import { projectRoot, roles } from "./profiles.mjs";
 
 const output = resolve(process.argv[2] ?? "");
-if (!process.argv[2] || !process.argv[3])
-  throw new Error("Usage: node scripts/acceptance-lifecycle.mjs NEW_OUTPUT CODEX_AUTH_SOURCE");
+// AUTH is the Codex auth source for codex, or an owner-only credentials.env.json for claude.
+const [auth, harness = "codex"] = process.argv.slice(3);
+if (!process.argv[2] || !auth || !["codex", "claude"].includes(harness))
+  throw new Error(
+    "Usage: node scripts/acceptance-lifecycle.mjs NEW_OUTPUT CODEX_AUTH_SOURCE|CLAUDE_CREDENTIALS [codex|claude]",
+  );
+// The fleet's Claude owners run Opus; Peers take the default Sonnet route.
+const model = (role) =>
+  harness === "codex" ? "gpt-6.1-sol" : role === "peer" ? "claude-sonnet-5-5" : "claude-opus-5-5";
 await mkdir(output, { recursive: false, mode: 0o700 });
+// Claude roles read their credential from their own home; the copies are removed at the end.
+const credentials = roles.map((role) => join(output, "roles/claude", role, "credentials.env.json"));
 const home = join(output, "home"),
   paseoHome = join(output, "paseo"),
   cwd = join(output, "project");
@@ -26,7 +35,13 @@ const listener = createServer();
 await new Promise((r) => listener.listen(0, "127.0.0.1", r));
 const port = listener.address().port;
 await new Promise((r) => listener.close(r));
-const receipt = { startedAt: new Date().toISOString(), model: "gpt-6.1-sol", agents: [], checks: {} };
+const receipt = {
+  startedAt: new Date().toISOString(),
+  harness,
+  model: { owner: model("lead"), peer: model("peer") },
+  agents: [],
+  checks: {},
+};
 let client, api;
 const cli = `${process.execPath} ${join(projectRoot, "scripts/cli.mjs")} --home ${home}`;
 const log = (phase, extra = {}) => console.log(JSON.stringify({ phase, ...extra }));
@@ -54,14 +69,40 @@ const proof = (scenario, kind = "test") =>
     command: [process.execPath, "-e", "require('fs').readdirSync('.')"],
   });
 try {
+  // Another installed daemon version (the fleet runs 0.11.2), started before activation adopts it.
+  if (process.env.ALLIANCE_TEST_DAEMON_CLI) {
+    await mkdir(paseoHome, { recursive: true });
+    await writeFile(
+      join(paseoHome, "config.json"),
+      JSON.stringify({
+        version: 1,
+        daemon: { listen: `127.0.0.1:${port}`, relay: { enabled: false } },
+        features: { webUi: { enabled: true } },
+      }),
+    );
+    await writeFile(
+      join(paseoHome, "alliance-instance.json"),
+      JSON.stringify({ allianceHome: home, root: projectRoot }),
+    );
+    execFileSync(
+      process.execPath,
+      [process.env.ALLIANCE_TEST_DAEMON_CLI, "daemon", "start", "--home", paseoHome],
+      { timeout: 30000 },
+    );
+  }
   await activate({
     home,
     paseoHome,
     port,
     binDir: join(output, "bin"),
     isolatedRoot: join(output, "roles"),
-    authFrom: process.argv[3],
+    authFrom: harness === "codex" ? auth : undefined,
   });
+  if (harness === "claude")
+    for (const path of credentials) {
+      await copyFile(auth, path);
+      await chmod(path, 0o600);
+    }
   receipt.sourceDigest = await sourceIdentity(projectRoot);
   client = new DaemonClient({
     url: `ws://127.0.0.1:${port}/ws`,
@@ -72,10 +113,10 @@ try {
   await client.connect();
   const workspace = await api.workspaces.open(cwd);
   const config = (role) => ({
-    provider: `alliance-codex-${role}/gpt-6.1-sol`,
-    // The default Peer route for codex is Sol high; owners keep the cheaper medium.
+    provider: `alliance-${harness}-${role}/${model(role)}`,
+    // The default Peer route is Sol or Sonnet high; owners keep the cheaper medium.
     thinkingOptionId: role === "peer" ? "high" : "medium",
-    modeId: "full-access",
+    modeId: harness === "claude" ? "bypassPermissions" : "full-access",
   });
 
   // A. A real Peer cannot accept itself; its real Lead accepts it and the plugin archives it.
@@ -232,6 +273,7 @@ try {
   try {
     paseo(["daemon", "stop"], paseoHome);
   } catch {}
+  if (harness === "claude") for (const path of credentials) await rm(path, { force: true });
   receipt.finishedAt = new Date().toISOString();
   await writeFile(join(output, "receipt.json"), JSON.stringify(receipt, null, 2), { mode: 0o600 });
   console.log(JSON.stringify({ output, pass: receipt.pass, checks: receipt.checks, error: receipt.error }));

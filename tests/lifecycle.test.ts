@@ -5,9 +5,10 @@ import { test } from "node:test";
 import type { PaseoApi } from "@getpaseo/client";
 import { Autonomy } from "../server/autonomy";
 import { authorizeDecision, Lifecycle, REMINDERS_PER_SCAN, STALE_DECISION_MS } from "../server/lifecycle";
-import { type MemberRecord, RoomStore } from "../server/store";
+import { type MemberRecord, newTurn, RoomStore } from "../server/store";
 import { Wakeups } from "../server/wakeups";
 import type { RoleName } from "../shared/contracts";
+import type { WakeRecordValue } from "../shared/wakeups";
 import { temporary } from "./temp";
 
 type Agent = { status: string; archived: boolean; permissions: number; parent?: string };
@@ -54,6 +55,7 @@ async function fleet() {
   let onRefresh: (id: string) => void = () => {};
   const archived: string[] = [];
   const sent: string[] = [];
+  const texts: { id: string; text: string }[] = [];
   const api = {
     agents: {
       list: async ({ filter }: { filter: { labels: Record<string, string> } }) => ({
@@ -80,8 +82,9 @@ async function fleet() {
           archived.push(id);
           return { archivedAt: "archived" };
         },
-        send: async () => {
+        send: async (text: string) => {
           sent.push(id);
+          texts.push({ id, text });
         },
       }),
     },
@@ -89,6 +92,40 @@ async function fleet() {
   const wakes = new Wakeups(store, () => now);
   const autonomy = new Autonomy(store, wakes, () => now);
   const lifecycle = new Lifecycle(store, wakes, autonomy, () => now);
+  /**
+   * A native turn as the runtime's hooks record it: started, then ended. One that keeps the phase
+   * it found leaves the member's handback standing unless it ends as new work.
+   */
+  const begin = (id: string, turnId: string, a = autonomy) => {
+    a.started(id, turnId);
+    if (!a.carrying(id)) store.updateMember(id, newTurn(turnId));
+  };
+  const finish = (id: string, turnId: string, outcome = "completed", a = autonomy, error?: string) => {
+    const carried = a.carrying(id);
+    const result = { lastOutcome: outcome, resultPath: join(home, `${turnId}.json`), lastTurnEndedAt: now };
+    if (!carried) store.updateMember(id, result);
+    a.ended(id, turnId, outcome, error);
+    if (carried && !a.carrying(id)) store.updateMember(id, { ...newTurn(turnId), ...result });
+  };
+  /** `alliance-work wait` run by `self` in its session, against the RPCs the plugin serves. */
+  const wait = async (
+    self: string,
+    request: { reason: string; agent?: string; minutes?: string },
+    say: (line: string) => void = () => {},
+  ) => {
+    const { registerWait } = await import("../scripts/wait.mjs");
+    // biome-ignore lint/suspicious/noExplicitAny: RPC inputs are validated by the plugin
+    const rpc = async (method: string, input: any) => {
+      if (method === "wakeups.add") return wakes.add(input);
+      if (method === "wakeups.list") return wakes.list();
+      if (method === "autonomy.list") return autonomy.list();
+      if (method === "autonomy.checkpoint")
+        return autonomy.checkpoint(input.agentId, input.phase, input.reason, input.turnId);
+      if (method === "rooms.list") return { members: store.members() };
+      throw new Error(`Unexpected RPC ${method}`);
+    };
+    return registerWait(rpc, { roomId: "room", ownerId: self, self, ...request }, say);
+  };
   /** Record a completed turn and an acceptance the way the runtime does. */
   const accept = (id: string, by: string | null, scope: "technical" | "product" = "technical") => {
     authorizeDecision(store, id, by);
@@ -113,6 +150,13 @@ async function fleet() {
     accept,
     archived,
     sent,
+    texts,
+    begin,
+    finish,
+    wait,
+    now: () => now,
+    /** The first lines of the prompts this agent received. */
+    heads: (id: string) => texts.filter((t) => t.id === id).map((t) => t.text.split("\n", 1)[0]),
     sweep: () => lifecycle.sweep(api),
     onRefresh: (fn: (id: string) => void) => {
       onRefresh = fn;
@@ -292,7 +336,7 @@ test("archived unaccepted children stop blocking a parent; live unaccepted child
   }
 });
 
-test("running work, pending wakeups and permissions hold an accepted agent open", async () => {
+test("running work, pending wakeups and permissions hold an accepted agent open; a closed one is at rest", async () => {
   const f = await fleet();
   try {
     f.accept("peer", "lead");
@@ -316,6 +360,11 @@ test("running work, pending wakeups and permissions hold an accepted agent open"
     await f.wakes.action(w.key, "peer", w.revision, "ack");
     await f.sweep();
     assert.deepEqual(f.archived, ["peer"]);
+    // Paseo reports every session closed after a daemon restart; that is not running work.
+    f.accept("sibling", "lead");
+    (f.agents.get("sibling") as Agent).status = "closed";
+    await f.sweep();
+    assert.deepEqual(f.archived, ["peer", "sibling"]);
   } finally {
     f.store.close();
   }
@@ -346,6 +395,85 @@ test("a completed handback left undecided for 48h wakes its owner once; Human-ow
       reminders.every((w) => w.ownerId === "lead"),
       "the Human-owned supervisor is never prompted",
     );
+  } finally {
+    f.store.close();
+  }
+});
+
+test("owned members get an assignment; a recent handback wakes the nearest live owner, an older one the 48h reminder", async () => {
+  const f = await fleet();
+  try {
+    // The lead was archived before deciding; its children's handbacks go up to the supervisor.
+    f.store.updateMember("lead", { archivedAt: "archived" });
+    (f.agents.get("lead") as Agent).archived = true;
+    const handback = (id: string, endedAt: number) =>
+      f.store.updateMember(id, {
+        lastTurnId: `${id}-t`,
+        lastOutcome: "completed",
+        resultPath: "r.json",
+        lastTurnEndedAt: endedAt,
+      });
+    handback("peer", 1_000_000);
+    handback("sibling", 1_000_000 - STALE_DECISION_MS);
+    handback("sup", 1_000_000);
+    await f.autonomy.tick(f.api);
+    const phase = (id: string) => f.autonomy.get(id)?.phase;
+    assert.equal(phase("peer"), "review", "a recent undecided handback is put up for review");
+    assert.equal(phase("sibling"), "waiting", "an older one is left to the 48h reminder");
+    assert.equal(phase("sup"), undefined, "Human-owned work gets no assignment");
+    assert.equal(phase("lead"), undefined, "an archived member is left alone");
+    f.advance(120000);
+    await f.autonomy.tick(f.api);
+    await f.wakes.tick(f.api);
+    await f.sweep();
+    f.advance(60000);
+    await f.autonomy.tick(f.api);
+    await f.wakes.tick(f.api);
+    assert.deepEqual(f.sent, ["sup", "sup"], "one review and one 48h reminder, both to the supervisor");
+    assert.deepEqual(
+      f.wakes.list().map((w) => [w.ownerId, w.trigger.kind === "turn" && w.trigger.agentId]),
+      [
+        ["sup", "peer"],
+        ["sup", "sibling"],
+      ],
+    );
+  } finally {
+    f.store.close();
+  }
+});
+
+test("a review sent over 48 hours ago and still undecided is asked again once", async () => {
+  const f = await fleet();
+  try {
+    f.store.updateMember("peer", {
+      lastTurnId: "p1",
+      lastOutcome: "completed",
+      resultPath: "r.json",
+      lastTurnEndedAt: 1_000_000 - 3600000,
+    });
+    f.wakes.add({
+      key: "review-peer",
+      roomId: "room",
+      ownerId: "lead",
+      reason: "Review peer",
+      trigger: { kind: "turn", agentId: "peer", turnId: "p1" },
+      delivery: "idle",
+    });
+    await f.wakes.tick(f.api);
+    assert.deepEqual(f.sent, ["lead"]);
+    (f.agents.get("peer") as Agent).status = "closed"; // the daemon restarted since
+    const stale = () => f.wakes.list().filter((w) => w.key.startsWith("stale-decision-"));
+    f.advance(STALE_DECISION_MS - 3600000);
+    await f.sweep();
+    assert.equal(stale().length, 0, "a review sent less than 48h ago still stands");
+    f.advance(70 * 60000);
+    await f.sweep();
+    assert.equal(stale().length, 1, "the unsettled review is asked again");
+    await f.wakes.tick(f.api);
+    assert.deepEqual(f.sent, ["lead", "lead"]);
+    f.advance(10 * 60000);
+    await f.sweep();
+    assert.equal(stale().length, 1, "once per turn and owner");
   } finally {
     f.store.close();
   }
@@ -457,7 +585,7 @@ test("restarting an assignment keeps an earlier auto-archive opt-out", async () 
   }
 });
 
-test("plugin reminders never resume an owner the Human cancelled; they wait for pull", async () => {
+test("plugin reminders never resume an owner the Human cancelled or that paused itself; a cancelled one waits for pull", async () => {
   const f = await fleet();
   try {
     f.autonomy.start("lead");
@@ -479,6 +607,70 @@ test("plugin reminders never resume an owner the Human cancelled; they wait for 
     f.autonomy.started("lead", "lead-t2"); // the Human resumes the lead
     await f.wakes.tick(f.api);
     assert.deepEqual(f.sent, ["lead"]);
+    // An owner that paused itself still hears of its children's handbacks; the turn that reads
+    // them keeps the pause.
+    f.autonomy.checkpoint("lead", "paused", "Waiting for the Human");
+    f.store.updateMember("sibling", { lastTurnId: "s1", lastOutcome: "completed", resultPath: "r.json" });
+    f.wakes.add({
+      key: "review-sibling",
+      roomId: "room",
+      ownerId: "lead",
+      reason: "review",
+      trigger: { kind: "turn", agentId: "sibling", turnId: "s1" },
+      delivery: "idle",
+    });
+    f.advance(60000);
+    await f.wakes.tick(f.api);
+    assert.deepEqual(f.sent, ["lead", "lead"]);
+    f.autonomy.started("lead", "lead-t3");
+    assert.equal(f.autonomy.get("lead")?.phase, "paused");
+  } finally {
+    f.store.close();
+  }
+});
+
+test("an archived owner's reminders end, its reviews too: none moves up the chain", async () => {
+  const f = await fleet();
+  try {
+    f.store.updateMember("peer", { lastTurnId: "p1", lastOutcome: "completed", resultPath: "r.json" });
+    const add = (key: string, trigger: WakeRecordValue["trigger"]) =>
+      f.wakes.add({ key, roomId: "room", ownerId: "lead", reason: key, trigger, delivery: "idle" });
+    add("review-peer", { kind: "turn", agentId: "peer", turnId: "p1" });
+    add("lead-timer", { kind: "time", at: 1_000_000 });
+    (f.agents.get("lead") as Agent).archived = true; // archived natively; seen at delivery
+    await f.wakes.tick(f.api);
+    await f.wakes.tick(f.api);
+    const state = (key: string) => f.wakes.list().find((w) => w.key === key)?.state;
+    assert.equal(state("lead-timer"), "canceled");
+    assert.equal(state("review-peer"), "canceled");
+    assert.deepEqual(
+      f.wakes.list().filter((w) => w.ownerId !== "lead"),
+      [],
+      "nothing is moved to the supervisor",
+    );
+    assert.deepEqual(f.sent, [], "the archived owner is never sent");
+  } finally {
+    f.store.close();
+  }
+});
+
+test("an archive seen by the assignment sweep also ends the agent's pull reminders", async () => {
+  const f = await fleet();
+  try {
+    f.autonomy.start("peer");
+    f.wakes.add({
+      key: "peer-check",
+      roomId: "room",
+      ownerId: "peer",
+      reason: "Check the build",
+      trigger: { kind: "time", at: 1_000_000 },
+      delivery: "pull",
+    });
+    (f.agents.get("peer") as Agent).archived = true; // the archive event was missed
+    await f.autonomy.tick(f.api);
+    await f.wakes.tick(f.api);
+    assert.ok(f.member("peer").archivedAt);
+    assert.equal(f.wakes.list()[0].state, "canceled");
   } finally {
     f.store.close();
   }
@@ -645,6 +837,375 @@ test("legacy stale baselines differ per member and a former owner's reminder is 
     f.advance(10 * 60000);
     await f.sweep();
     assert.equal(f.wakes.list().find((w) => w.key === old?.key)?.state, "canceled");
+  } finally {
+    f.store.close();
+  }
+});
+
+test("a blocked lead woken by its child's review keeps its block and is not continued, also across a plugin reload", async () => {
+  const f = await fleet();
+  try {
+    f.autonomy.start("lead");
+    f.begin("lead", "l1");
+    f.autonomy.checkpoint("lead", "blocked", "Needs the Human's decision D10", "l1");
+    f.finish("lead", "l1");
+    f.autonomy.start("peer");
+    f.begin("peer", "p1");
+    f.autonomy.checkpoint("peer", "review", "Report saved", "p1");
+    f.finish("peer", "p1");
+    await f.autonomy.tick(f.api);
+    f.advance(120000); // past the review's grace
+    await f.wakes.tick(f.api);
+    assert.deepEqual(f.heads("lead"), ["Alliance wakeups for owner lead:"]);
+    // The batch starts the lead's turn; the plugin reloaded in between.
+    const reloaded = new Autonomy(f.store, f.wakes, f.now);
+    f.begin("lead", "l2", reloaded);
+    assert.equal(reloaded.get("lead")?.phase, "blocked");
+    assert.equal(reloaded.get("lead")?.reason, "Needs the Human's decision D10");
+    f.finish("lead", "l2", "completed", reloaded);
+    for (let n = 0; n < 4; n++) {
+      f.advance(60000);
+      await reloaded.tick(f.api);
+      await f.wakes.tick(f.api);
+    }
+    assert.deepEqual(f.heads("lead"), ["Alliance wakeups for owner lead:"], "never continued");
+    assert.equal(reloaded.get("lead")?.phase, "blocked");
+  } finally {
+    f.store.close();
+  }
+});
+
+test("a coordinator's turn that only reads a wake batch is not its handback; a turn it is sent otherwise is", async () => {
+  const f = await fleet();
+  try {
+    await f.autonomy.tick(f.api); // the owned lead gets a handback-only record
+    assert.equal(f.autonomy.get("lead")?.handbackOnly, true);
+    f.advance(10 * 60000); // its never-run children no longer count as just created
+    f.autonomy.start("peer");
+    f.begin("peer", "p1");
+    f.autonomy.checkpoint("peer", "review", "Report saved", "p1");
+    f.finish("peer", "p1");
+    await f.autonomy.tick(f.api);
+    f.advance(120000);
+    await f.wakes.tick(f.api);
+    assert.deepEqual(f.heads("lead"), ["Alliance wakeups for owner lead:"]);
+    const asksSup = () => f.wakes.list().filter((w) => w.ownerId === "sup").length;
+    f.begin("lead", "l1");
+    f.finish("lead", "l1");
+    await f.autonomy.tick(f.api);
+    assert.equal(f.autonomy.get("lead")?.phase, "waiting", "reading the review was not its handback");
+    assert.equal(asksSup(), 0);
+    f.begin("lead", "l2"); // the Human's own message
+    f.finish("lead", "l2");
+    await f.autonomy.tick(f.api);
+    assert.equal(f.autonomy.get("lead")?.phase, "review");
+    assert.equal(asksSup(), 1);
+  } finally {
+    f.store.close();
+  }
+});
+
+/** A waiting lead's own reminder is pushed at `at`, and the turn that batch starts ends as given. */
+async function batchTurnEnds(at: number, outcome: string, error?: string) {
+  const f = await fleet();
+  f.advance(at - 5 * 60000 - f.now());
+  f.autonomy.start("lead");
+  f.begin("lead", "l1");
+  // What `alliance-work wait --minutes 5` records: an idle time reminder, then waiting.
+  f.wakes.add({
+    key: "wait-l1",
+    roomId: "room",
+    ownerId: "lead",
+    reason: "Check the release build",
+    trigger: { kind: "time", at: f.now() + 5 * 60000 },
+    delivery: "idle",
+  });
+  f.autonomy.checkpoint("lead", "waiting", "Waiting on wait-l1: Check the release build", "l1");
+  f.finish("lead", "l1");
+  f.advance(5 * 60000);
+  await f.wakes.tick(f.api);
+  assert.deepEqual(f.heads("lead"), ["Alliance wakeups for owner lead:"]);
+  f.begin("lead", "l2"); // the batch's turn ends at once
+  f.finish("lead", "l2", outcome, f.autonomy, error);
+  return {
+    ...f,
+    rounds: async (n: number, ms: number) => {
+      for (let i = 0; i < n; i++) {
+        f.advance(ms);
+        await f.autonomy.tick(f.api);
+        await f.wakes.tick(f.api);
+      }
+    },
+    retries: () => f.heads("lead").filter((head) => head.startsWith("Alliance retry")).length,
+  };
+}
+
+test("a waiting lead whose wake batch's turn fails with a provider error is retried within minutes", async () => {
+  const f = await batchTurnEnds(1_000_000 + 5 * 60000, "failed", "stream disconnected before completion");
+  try {
+    await f.rounds(4, 60000);
+    assert.equal(f.retries(), 1, "retried within minutes");
+    assert.deepEqual(f.heads("sup"), [], "a brief failure is not news for its owner");
+  } finally {
+    f.store.close();
+  }
+});
+
+test("a waiting lead whose wake batch's turn ends on a provider limit keeps waiting and is not retried", async () => {
+  // ryzen, 2026-10-21: the plugin pushed a review to Lead 5e3d3284 at 14:17:20Z; that turn
+  // (foreground-turn-10) completed at 14:17:21Z on this notice, which the runtime reports as a
+  // failure with that text. Wakeups sends such a batch again after the reset.
+  const f = await batchTurnEnds(
+    Date.parse("2026-10-21T14:17:21Z"),
+    "failed",
+    "You've hit your session limit · resets 9:40pm (Asia/Ho_Chi_Minh)",
+  );
+  try {
+    await f.rounds(30, 60000); // to 14:47Z
+    assert.equal(f.retries(), 0, "the batch, not a retry, wakes it again");
+    assert.equal(f.autonomy.get("lead")?.phase, "waiting");
+  } finally {
+    f.store.close();
+  }
+});
+
+test("a handback-only coordinator whose wake batch's turn fails goes to its owner as blocked within minutes", async () => {
+  const f = await fleet();
+  try {
+    await f.autonomy.tick(f.api); // the owned lead gets a handback-only record
+    f.advance(10 * 60000);
+    f.autonomy.start("peer");
+    f.begin("peer", "p1");
+    f.autonomy.checkpoint("peer", "review", "Report saved", "p1");
+    f.finish("peer", "p1");
+    await f.autonomy.tick(f.api);
+    f.advance(120000);
+    await f.wakes.tick(f.api);
+    assert.deepEqual(f.heads("lead"), ["Alliance wakeups for owner lead:"]);
+    f.begin("lead", "l1");
+    f.finish("lead", "l1", "failed", f.autonomy, "stream disconnected before completion");
+    for (let n = 0; n < 4; n++) {
+      f.advance(60000);
+      await f.autonomy.tick(f.api);
+      await f.wakes.tick(f.api);
+    }
+    assert.equal(f.autonomy.get("lead")?.phase, "blocked");
+    assert.deepEqual(f.heads("sup"), ["Alliance wakeups for owner sup:"], "its owner hears within minutes");
+    assert.equal(f.heads("lead").length, 1, "it is never retried");
+  } finally {
+    f.store.close();
+  }
+});
+
+for (const [phase, via] of [
+  ["blocked", "its wake batch"],
+  ["review", "its wake batch"],
+  ["blocked", "Paseo's finish notice"],
+] as const)
+  test(`wait in a lead's turn started by ${via} keeps the ${phase} that turn found, and its owner is asked about it`, async () => {
+    const f = await fleet();
+    try {
+      f.autonomy.start("lead");
+      f.autonomy.start("peer");
+      f.begin("lead", "l1");
+      const why = phase === "blocked" ? "Needs the Human's decision D10" : "Release notes ready";
+      f.autonomy.checkpoint("lead", phase, why, "l1");
+      f.finish("lead", "l1");
+      (f.agents.get("sup") as Agent).status = "running"; // busy, so the lead's review waits
+      f.begin("peer", "p1");
+      f.autonomy.checkpoint("peer", "review", "Report saved", "p1");
+      f.finish("peer", "p1");
+      await f.autonomy.tick(f.api);
+      if (via === "its wake batch") {
+        f.advance(120000);
+        await f.wakes.tick(f.api);
+        assert.deepEqual(f.heads("lead"), ["Alliance wakeups for owner lead:"]);
+      }
+      // That turn sends the peer rework and waits for it.
+      f.begin("lead", "l2");
+      f.begin("peer", "p2");
+      const said: string[] = [];
+      await f.wait("lead", { reason: "Rework of the report", agent: "peer" }, (line) => said.push(line));
+      f.finish("lead", "l2");
+      (f.agents.get("sup") as Agent).status = "idle";
+      for (let n = 0; n < 4; n++) {
+        f.advance(60000);
+        await f.autonomy.tick(f.api);
+        await f.wakes.tick(f.api);
+      }
+      assert.equal(f.autonomy.get("lead")?.phase, phase, "wait did not replace it");
+      assert.equal(said.length, 1, "and said so");
+      assert.deepEqual(
+        f.heads("sup"),
+        ["Alliance wakeups for owner sup:"],
+        "the supervisor is asked about it",
+      );
+    } finally {
+      f.store.close();
+    }
+  });
+
+test("a review about an archived child closes, is never moved or pushed, and acking it is a no-op", async () => {
+  const f = await fleet();
+  try {
+    const review = (key: string, agentId: string, turnId: string) => {
+      f.store.updateMember(agentId, { lastTurnId: turnId, lastOutcome: "completed", resultPath: "r.json" });
+      f.wakes.add({
+        key,
+        roomId: "room",
+        ownerId: "lead",
+        reason: key,
+        trigger: { kind: "turn", agentId, turnId },
+        delivery: "idle",
+      });
+    };
+    review("review-sibling", "sibling", "s1");
+    await f.wakes.tick(f.api);
+    assert.deepEqual(f.sent, ["lead"]);
+    const delivered = f.wakes.list()[0];
+    // 0.1.18 recorded an archive on the assignment only.
+    f.autonomy.start("sibling");
+    f.autonomy.markArchived("sibling");
+    f.advance(60000);
+    await f.wakes.tick(f.api);
+    assert.equal(f.wakes.list()[0].state, "canceled");
+    assert.doesNotThrow(() => f.wakes.action(delivered.key, "lead", delivered.revision, "ack"));
+    // The lead was archived too before deciding on the peer, which Paseo had already archived.
+    review("review-peer", "peer", "p1");
+    f.autonomy.start("peer");
+    f.autonomy.markArchived("peer");
+    f.store.updateMember("lead", { archivedAt: "archived" });
+    await f.wakes.tick(f.api);
+    await f.wakes.tick(f.api);
+    assert.equal(f.wakes.list().find((w) => w.key === "review-peer")?.state, "canceled");
+    assert.deepEqual(
+      f.wakes.list().filter((w) => w.ownerId === "sup"),
+      [],
+      "nothing is moved up to the supervisor",
+    );
+    assert.deepEqual(f.sent, ["lead"]);
+  } finally {
+    f.store.close();
+  }
+});
+
+test("the first pass records members Paseo archived while no release ran, so their reminders end", async () => {
+  const f = await fleet();
+  try {
+    // Archived natively under 0.1.18, which recorded nothing for members without an assignment.
+    f.wakes.add({
+      key: "sup-check",
+      roomId: "room",
+      ownerId: "sup",
+      reason: "Check the release",
+      trigger: { kind: "time", at: 1_000_000 },
+      delivery: "pull",
+    });
+    for (const id of ["sup", "sibling"]) (f.agents.get(id) as Agent).archived = true;
+    await f.autonomy.tick(f.api);
+    await f.wakes.tick(f.api);
+    assert.ok(f.member("sup").archivedAt && f.member("sibling").archivedAt);
+    assert.equal(f.wakes.list()[0].state, "canceled");
+    assert.equal(f.autonomy.get("sibling"), undefined, "no record is made for an archived member");
+  } finally {
+    f.store.close();
+  }
+});
+
+test("an owner's own pull reminder on its child's turn holds back neither the child's review nor the 48h reminder", async () => {
+  const f = await fleet();
+  try {
+    const watch = (key: string, agentId: string, turnId: string) =>
+      f.wakes.add({
+        key,
+        roomId: "room",
+        ownerId: "lead",
+        reason: "Read the report later",
+        trigger: { kind: "turn", agentId, turnId },
+        delivery: "pull",
+      });
+    f.autonomy.start("peer");
+    f.begin("peer", "p1");
+    watch("lead-watch-p1", "peer", "p1");
+    f.autonomy.checkpoint("peer", "review", "Report saved", "p1");
+    f.finish("peer", "p1");
+    await f.autonomy.tick(f.api);
+    f.advance(120000);
+    await f.wakes.tick(f.api);
+    assert.deepEqual(f.heads("lead"), ["Alliance wakeups for owner lead:"]);
+    // A handback with no assignment record is asked for after 48 hours, pull item or not.
+    f.store.updateMember("sibling", {
+      lastTurnId: "s1",
+      lastOutcome: "completed",
+      resultPath: "r.json",
+      lastTurnEndedAt: f.now(),
+    });
+    watch("lead-watch-s1", "sibling", "s1");
+    f.advance(STALE_DECISION_MS);
+    await f.sweep();
+    const stale = f.wakes
+      .list()
+      .filter(
+        (w) =>
+          w.key.startsWith("stale-decision-") && w.trigger.kind === "turn" && w.trigger.agentId === "sibling",
+      );
+    assert.deepEqual(
+      stale.map((w) => w.ownerId),
+      ["lead"],
+    );
+  } finally {
+    f.store.close();
+  }
+});
+
+test("a child whose turn end was lost stops holding back its owner's handback once Paseo shows it at rest", async () => {
+  const f = await fleet();
+  try {
+    f.store.updateMember("peer", { lastTurnId: "p1", lastOutcome: null }); // the daemon died mid-turn
+    (f.agents.get("peer") as Agent).status = "closed";
+    f.store.updateMember("lead", {
+      lastTurnId: "l1",
+      lastOutcome: "completed",
+      resultPath: "l1.json",
+      lastTurnEndedAt: f.now(),
+    });
+    const round = async () => {
+      await f.autonomy.tick(f.api);
+      await f.sweep();
+      await f.wakes.tick(f.api);
+    };
+    await round();
+    f.advance(STALE_DECISION_MS + 60000);
+    await round();
+    assert.deepEqual(f.heads("sup"), ["Alliance wakeups for owner sup:"], "the lead's handback reaches sup");
+  } finally {
+    f.store.close();
+  }
+});
+
+test("an owner's wait on a child whose turn end was lost stops holding back the 48h reminder", async () => {
+  const f = await fleet();
+  try {
+    f.autonomy.start("lead");
+    f.autonomy.start("peer");
+    f.begin("lead", "l1");
+    f.begin("peer", "p1");
+    await f.wait("lead", { reason: "The peer's report", agent: "peer" });
+    f.finish("lead", "l1");
+    // The daemon died mid-turn: Paseo shows the peer closed; its turn end never reached the plugin.
+    (f.agents.get("peer") as Agent).status = "closed";
+    const round = async () => {
+      await f.autonomy.tick(f.api);
+      await f.sweep();
+      await f.wakes.tick(f.api);
+    };
+    for (let n = 0; n < 2; n++) {
+      f.advance(5 * 60000);
+      await round();
+    }
+    f.advance(STALE_DECISION_MS);
+    await round();
+    assert.deepEqual(f.heads("sup"), ["Alliance wakeups for owner sup:"], "the waiting lead reaches sup");
   } finally {
     f.store.close();
   }

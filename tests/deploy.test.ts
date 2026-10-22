@@ -63,6 +63,7 @@ test("the remote half hands the bundle to an installed launcher that understands
       "#!/bin/sh",
       "# Alliance Work managed launcher",
       'if [ "$1" = "--help" ]; then echo "  alliance-work update --bundle DIR"; exit 0; fi',
+      'if [ "$1" = "--version" ]; then echo "$INSTALLED"; exit 0; fi',
       'echo "ARGS:$*"; exit 0',
       `exec '${process.execPath}' '/release/scripts/cli.mjs' --home '${home}' "$@"`,
       "",
@@ -73,16 +74,58 @@ test("the remote half hands the bundle to an installed launcher that understands
   const script = join(home, "deploy.sh");
   await writeFile(script, remoteScript);
   const dir = await temporary("alliance-bundle-run-");
-  const run = (wait: string, target = home) =>
-    spawnSync("sh", [script, dir, "v9.8.7", wait, target], {
+  const run = (wait: string, target = home, installed = "0.1.19", hold = "") =>
+    spawnSync("sh", [script, dir, "v9.8.7", wait, target, hold], {
       encoding: "utf8",
-      env: { PATH: "/usr/bin:/bin", HOME: home },
+      env: { PATH: "/usr/bin:/bin", HOME: home, INSTALLED: installed },
     });
   const waited = run("90");
   assert.equal(waited.status, 0, waited.stderr);
   assert.ok(waited.stdout.includes(`ARGS:update --bundle ${dir} --wait-idle 90`), waited.stdout);
   assert.equal((await readFile(join(dir, "rc"), "utf8")).trim(), "0", "the controller reads the outcome");
   assert.ok(run("0").stdout.trimEnd().endsWith(`ARGS:update --bundle ${dir}`));
+  // deploy --hold keeps scheduled prompts paused from the end of staging, so agents the operator
+  // stops on a busy host are not woken before activation.
+  const held = run("90", home, "0.1.19", "hold");
+  assert.ok(held.stdout.includes(`ARGS:update --bundle ${dir} --wait-idle 90 --hold`), held.stdout);
+  // Before 0.1.19 a waiting update paused every scheduled prompt for the whole wait, so such a host
+  // waits with the candidate's own CLI, set up from the verified bundle. Without a wait the
+  // installed CLI still updates.
+  const olderHost = async (...hold: string[]) => {
+    const release = await temporary("alliance-candidate-");
+    const candidate = join(release, "alliance-work");
+    await mkdir(join(candidate, "scripts"), { recursive: true });
+    const manifest = { name: "alliance-work", version: "9.8.7" };
+    await writeFile(join(candidate, "package.json"), JSON.stringify(manifest));
+    await writeFile(
+      join(candidate, "package-lock.json"),
+      JSON.stringify({ ...manifest, lockfileVersion: 3, packages: { "": manifest } }),
+    );
+    await writeFile(
+      join(candidate, "scripts/cli.mjs"),
+      'import { writeFileSync } from "node:fs";\nimport { join } from "node:path";\nwriteFileSync(join(process.env.HOME, "candidate-args"), process.argv.slice(2).join(" "));\n',
+    );
+    const bundled = await temporary("alliance-bundle-old-");
+    const archive = join(bundled, "alliance-work-v9.8.7.tar.gz");
+    spawnSync("tar", ["-czf", archive, "-C", release, "alliance-work"], { env: { COPYFILE_DISABLE: "1" } });
+    const sum = createHash("sha256")
+      .update(await readFile(archive))
+      .digest("hex");
+    await writeFile(join(bundled, "checksums.txt"), `${sum}  alliance-work-v9.8.7.tar.gz\n`);
+    const older = spawnSync("sh", [script, bundled, "v9.8.7", "90", home, ...hold], {
+      encoding: "utf8",
+      env: { PATH: "/usr/bin:/bin", HOME: home, INSTALLED: "0.1.18-ryzen.1" },
+    });
+    assert.equal(older.status, 0, older.stderr);
+    assert.ok(!older.stdout.includes("ARGS:"), older.stdout);
+    assert.equal((await readFile(join(bundled, "rc"), "utf8")).trim(), "0");
+    return { bundled, args: await readFile(join(home, "candidate-args"), "utf8") };
+  };
+  const older = await olderHost();
+  assert.equal(older.args, `update --bundle ${older.bundled} --home ${home} --wait-idle 90`);
+  const olderHeld = await olderHost("hold");
+  assert.equal(olderHeld.args, `update --bundle ${olderHeld.bundled} --home ${home} --wait-idle 90 --hold`);
+  assert.ok(run("0", home, "0.1.18").stdout.trimEnd().endsWith(`ARGS:update --bundle ${dir}`));
   const missing = run("0", join(home, "absent"));
   assert.equal(missing.status, 2);
   assert.match(missing.stderr, /No Alliance installation/);
@@ -93,6 +136,18 @@ test("deploy refuses unsafe host names and negative waits before contacting anyt
   await assert.rejects(deploy({ hosts: ["ryzen; rm -rf /"] }), /Unsupported host/);
   await assert.rejects(deploy({ hosts: [] }), /at least one --host/);
   await assert.rejects(deploy({ hosts: ["ryzen"], waitIdle: -1 }), /wait-idle/);
+  // --hold without a wait is refused, not ignored. Failing stubs stand in for gh and ssh in case
+  // the refusal ever stops happening first.
+  const stubs = await temporary("alliance-offline-");
+  for (const name of ["gh", "ssh", "scp"])
+    await writeFile(join(stubs, name), "#!/bin/sh\nexit 97\n", { mode: 0o755 });
+  const path = process.env.PATH;
+  process.env.PATH = `${stubs}:${path}`;
+  try {
+    await assert.rejects(deploy({ hosts: ["deploy-test.invalid"], hold: true }), /--hold needs --wait-idle/);
+  } finally {
+    process.env.PATH = path;
+  }
   const saved = process.env.PASEO_AGENT_ID;
   process.env.PASEO_AGENT_ID = "an-agent";
   try {

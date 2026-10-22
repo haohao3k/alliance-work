@@ -12,12 +12,29 @@ import { runFeatureVerification } from "../server/feature-verification.mjs";
 import { projectSkills, registerSkill } from "../server/project-skills.mjs";
 import { setAgyAuthSource } from "./agy-auth.mjs";
 import { authStatus, setAuthSource } from "./auth.mjs";
-import { BUSY_EXIT, bundleRelease, deploy, harnessPath, waitForIdle } from "./deploy.mjs";
+import {
+  BUSY_EXIT,
+  bundleRelease,
+  deploy,
+  harnessPath,
+  holdNeedsWait,
+  sleep,
+  waitForIdle,
+} from "./deploy.mjs";
 import { downloadRelease, isNewerRelease, releaseInfo, run } from "./distribution.mjs";
-import { activate, doctor, installation, onInterrupt, withMaintenance } from "./maintenance.mjs";
-import { roomsUnreadableBefore0118 } from "./model-compat.mjs";
+import {
+  activate,
+  doctor,
+  installation,
+  onInterrupt,
+  pauseScheduler,
+  resumeScheduler,
+  withMaintenance,
+} from "./maintenance.mjs";
+import { schedulerPausedAt } from "./paseo.mjs";
 import { projectRoot } from "./profiles.mjs";
 import { enableMobbin, userMcpSettings } from "./user-mcp.mjs";
+import { registerWait } from "./wait.mjs";
 
 const args = process.argv.slice(2);
 /** The deciding agent is the caller's Paseo identity. Outside any agent session it is the Human. */
@@ -72,6 +89,7 @@ const values = new Set([
   "--every-ms",
   "--max-runs",
   "--expires",
+  "--minutes",
   "--next-owner",
   "--paseo-home",
   "--port",
@@ -103,6 +121,7 @@ const switches = new Set([
   "--check",
   "--refresh",
   "--detach",
+  "--hold",
   "--remember",
   "--off",
   "--separate",
@@ -139,8 +158,12 @@ const help = `Alliance Work — isolated agent rooms on native Paseo
   alliance-work obligations add --file OBLIGATION.json
   alliance-work obligations action --file ACTION.json
   alliance-work obligations history --key KEY
-  alliance-work jobs track --room ID --owner AGENT --pid PID --key RUN_ID --title TITLE
+  alliance-work jobs track --pid PID --key RUN_ID --title TITLE [--room ID] [--owner AGENT]
+                                      Room and owner default to the agent session's own
   alliance-work jobs owner --key RUN_ID --owner AGENT --revision N
+  alliance-work wait --job RUN_ID|--pid PID [--title T]|--agent CHILD|--at ISO_TIME|--minutes N --reason TEXT
+                                      Register what wakes you and record waiting (a handback, blocker
+                                      or pause stands); then end your turn
   alliance-work autonomy start [--agent ID] [--max-retries 2] [--max-continuations 20] [--auto-archive true|false]
   alliance-work autonomy checkpoint [--agent ID] --phase active|waiting|review|blocked|paused --reason TEXT [--turn ID]
   alliance-work autonomy list
@@ -148,14 +171,21 @@ const help = `Alliance Work — isolated agent rooms on native Paseo
   alliance-work wakeups add --room ID --owner AGENT --key KEY --reason TEXT --at ISO_TIME
   alliance-work wakeups add --room ID --owner AGENT --key KEY --reason TEXT --job RUN_ID
   alliance-work wakeups add --room ID --owner AGENT --key KEY --reason TEXT --agent CHILD --turn TURN_ID
+                                      Wakes the owner when idle; --delivery pull only lists it for take
   alliance-work wakeups take --owner AGENT
   alliance-work wakeups ack|cancel --key KEY --owner AGENT --revision N
+                                      A child's review closes when you accept, reject or rework it; no ack needed
+  alliance-work wakeups defer --key KEY --owner AGENT --revision N --minutes M
+                                      Due again in M minutes; at most 3 times, then decide or cancel
   alliance-work wakeups owner --key KEY --owner OLD --next-owner NEW --revision N
   alliance-work update --check        Read latest private GitHub release; change nothing
   alliance-work update                Verify, stage, check and activate the latest release
   alliance-work update --wait-idle 120  Stage now; activate once no agent runs (max 120 minutes)
+  alliance-work update --wait-idle 120 --hold
+                                      Also pause scheduled prompts from the end of staging until
+                                      activation, so agents you stop meanwhile are not woken
   alliance-work update --bundle DIR   Activate a release copied here by deploy; no GitHub access
-  alliance-work deploy --host H [--host H2] [--wait-idle MIN] [--detach] [--remember]
+  alliance-work deploy --host H [--host H2] [--wait-idle MIN [--hold]] [--detach] [--remember]
                                       Push the latest release over SSH and update each host
   alliance-work rollback              Activate the previous installation when idle
   alliance-work skills list [--project PATH]
@@ -165,8 +195,10 @@ const help = `Alliance Work — isolated agent rooms on native Paseo
   alliance-work eval --suite .alliance/evals/failure.json [--project PATH]
   alliance-work eval inspect --report /absolute/eval.json [--project PATH]
   alliance-work accept --agent ID --report /absolute/report.json [--product /absolute/journey.json]
+      --report is the report verify writes for the candidate, not a turn file.
       Only the responsible owner chain or the Human may accept. An accepted idle Peer/Lens with no
       open work is archived; HQ/Supervisor/Lead need --product from an owner, or the Human.
+  alliance-work reject --agent ID --reason TEXT   Record that the latest handback is not accepted
 
 Verification options: --kind test|runtime|analysis (default test), --target LABEL,
   --input FILE (repeat for ignored runtime inputs), --artifact FILE (repeat),
@@ -363,12 +395,16 @@ try {
       } else throw new Error("Usage: policy read|ack --agent ID [--digest SHA256]");
     }
     if (command === "jobs" && positional[1] === "track") {
-      for (const flag of ["--room", "--owner", "--pid", "--key", "--title"])
-        if (!flags[flag]) throw new Error(`Missing ${flag}`);
+      // Inside an agent session the job belongs to the caller, in its room.
+      const roomId = flags["--room"] ?? process.env.ALLIANCE_BOUND_ROOM;
+      const ownerId = flags["--owner"] ?? process.env.PASEO_AGENT_ID;
+      if (!roomId) throw new Error("Missing --room");
+      if (!ownerId) throw new Error("Missing --owner");
+      for (const flag of ["--pid", "--key", "--title"]) if (!flags[flag]) throw new Error(`Missing ${flag}`);
       method = "jobs.track";
       input = {
-        roomId: flags["--room"],
-        ownerId: flags["--owner"],
+        roomId,
+        ownerId,
         pid: Number(flags["--pid"]),
         key: flags["--key"],
         title: flags["--title"],
@@ -402,7 +438,8 @@ try {
             : flags["--job"]
               ? { kind: "job", key: flags["--job"] }
               : { kind: "turn", agentId: flags["--agent"], turnId: flags["--turn"] },
-          delivery: flags["--delivery"] ?? "pull",
+          // Omitted: the plugin wakes the idle owner, or keeps an obligation reminder pull-only.
+          ...(flags["--delivery"] ? { delivery: flags["--delivery"] } : {}),
           ...(flags["--every-ms"] ? { everyMs: Number(flags["--every-ms"]) } : {}),
           ...(flags["--max-runs"] ? { maxRuns: Number(flags["--max-runs"]) } : {}),
           ...(flags["--expires"] ? { expiresAt: Date.parse(flags["--expires"]) } : {}),
@@ -411,9 +448,10 @@ try {
         if (!ownerId) throw new Error("Missing --owner");
         method = "wakeups.take";
         input = { ownerId };
-      } else if (["ack", "cancel", "owner"].includes(action)) {
+      } else if (["ack", "cancel", "owner", "defer"].includes(action)) {
         if (!ownerId || !flags["--key"] || !flags["--revision"])
           throw new Error("Requires --key, --owner and --revision");
+        if (action === "defer" && !flags["--minutes"]) throw new Error("defer requires --minutes (1-1440)");
         method = "wakeups.action";
         input = {
           key: flags["--key"],
@@ -421,8 +459,9 @@ try {
           revision: Number(flags["--revision"]),
           action,
           nextOwnerId: flags["--next-owner"],
+          ...(action === "defer" ? { minutes: Number(flags["--minutes"]) } : {}),
         };
-      } else throw new Error("Usage: wakeups list|add|take|ack|cancel|owner");
+      } else throw new Error("Usage: wakeups list|add|take|ack|cancel|defer|owner");
     }
     const client = new DaemonClient({
       url: `ws://${config.daemon.listen}/ws`,
@@ -451,9 +490,10 @@ try {
       if (flags["--room"] && !targets.length) throw new Error(`Unknown room: ${flags["--room"]}`);
       const result = [];
       for (const room of targets) {
-        const { policy, revision, saved } = await rpc(action === "reset" ? "models.reset" : "models.read", {
-          roomId: room.id,
-        });
+        const { policy, revision, saved, removed } = await rpc(
+          action === "reset" ? "models.reset" : "models.read",
+          { roomId: room.id },
+        );
         const routes = (role) =>
           policy.routes
             .filter((route) => route.role === role)
@@ -469,6 +509,11 @@ try {
           ownerEffort: policy.leadEffort,
           peer: routes("peer"),
           lens: routes("lens"),
+          ...(removed
+            ? {
+                removed: `Saved revision ${removed.revision} kept in ${join(home, "rooms.sqlite")}, table room_model_policy_removed, id ${removed.id}`,
+              }
+            : {}),
         });
       }
       output(result);
@@ -480,7 +525,14 @@ try {
       throw new Error("Usage: alliance-work accept --agent ID --report /absolute/report.json");
     const actorId = caller();
     const reportPath = resolve(flags["--report"]);
-    const report = Evidence.parse(JSON.parse(await readFile(reportPath, "utf8")));
+    // Owners passed the turn file their review names, or notes of their own, and got a raw parse error.
+    const report = await readFile(reportPath, "utf8")
+      .then((text) => Evidence.parse(JSON.parse(text)))
+      .catch((error) => {
+        throw new Error(
+          `--report takes the report that alliance-work verify writes: run verify on the candidate (verify --scenario NAME -- COMMAND), then pass the "report" path it prints. ${reportPath} is ${error.code === "ENOENT" ? "missing" : "not such a report (a turn file or notes are not)"}.`,
+        );
+      });
     const current = await installation(home);
     if (!current) throw new Error("No Alliance installation exists for this home");
     const config = JSON.parse(await readFile(join(current.paseoHome, "config.json"), "utf8"));
@@ -502,6 +554,61 @@ try {
           ...(flags["--product"]
             ? { product: JSON.parse(await readFile(resolve(flags["--product"]), "utf8")) }
             : {}),
+        }),
+      );
+    } finally {
+      await client.close();
+    }
+  } else if (command === "wait") {
+    const self = process.env.PASEO_AGENT_ID || null;
+    const ownerId = flags["--owner"] ?? self;
+    const roomId = flags["--room"] ?? process.env.ALLIANCE_BOUND_ROOM;
+    const reason = flags["--reason"]?.trim();
+    if (!reason) throw new Error("wait requires --reason TEXT");
+    if (!ownerId) throw new Error("Missing --owner");
+    if (!roomId) throw new Error("Missing --room");
+    let client;
+    try {
+      const key = await registerWait(
+        async (method, input) => {
+          client ??= await daemonClient(home, "alliance-operations");
+          return client.invokePluginRpc("alliance-work", method, input);
+        },
+        {
+          roomId,
+          ownerId,
+          self,
+          reason,
+          job: flags["--job"],
+          pid: flags["--pid"],
+          title: flags["--title"],
+          agent: flags["--agent"],
+          at: flags["--at"],
+          minutes: flags["--minutes"],
+        },
+      );
+      output(
+        ownerId === self
+          ? `Registered ${key}. End your turn now; Alliance wakes you.`
+          : `Registered ${key}; Alliance wakes ${ownerId} when it is due.`,
+      );
+    } finally {
+      await client?.close();
+    }
+  } else if (command === "reject") {
+    if (!flags["--agent"] || !flags["--reason"])
+      throw new Error("Usage: alliance-work reject --agent ID --reason TEXT");
+    const actorId = caller();
+    const client = await daemonClient(home, "alliance-acceptance");
+    try {
+      // The plugin binds the decision to the agent's latest turn; the reason is the evidence.
+      output(
+        await client.invokePluginRpc("alliance-work", "members.disposition", {
+          agentId: flags["--agent"],
+          decision: "rejected",
+          candidate: "handback",
+          evidence: flags["--reason"],
+          actorId,
         }),
       );
     } finally {
@@ -555,6 +662,8 @@ try {
   } else if (command === "update") {
     const waitMs = flags["--wait-idle"] === undefined ? 0 : Number(flags["--wait-idle"]) * 60000;
     if (!Number.isFinite(waitMs) || waitMs < 0) throw new Error("--wait-idle takes minutes (0 or more).");
+    const hold = !!flags["--hold"];
+    if (hold && !waitMs) throw new Error(holdNeedsWait);
     const release = flags["--bundle"]
       ? await bundleRelease(resolve(flags["--bundle"]))
       : releaseInfo(flags["--version-tag"]);
@@ -579,62 +688,132 @@ try {
         throw new Error(
           "An agent waiting for idleness would wait for itself. Run this from a terminal, or use deploy --detach.",
         );
+      const report = (line) => console.error(`[alliance-work] ${line}`);
       output(
-        await withMaintenance(home, async () => {
-          // SSH and service shells may lack nvm; the installed profiles name the harnesses in use.
-          process.env.PATH = await harnessPath(home);
-          const deadline = Date.now() + waitMs;
-          const idle = () =>
-            waitForIdle(current.paseoHome, Math.max(0, deadline - Date.now()), {
-              report: (line) => console.error(`[alliance-work] ${line}`),
-              // A remote shell must not become the environment of a freshly started daemon.
-              refuseStopped: !!flags["--bundle"],
-            });
-          // Without a wait, refuse busy runtimes before any download. With one, stage first.
-          if (!waitMs) await idle();
-          const root = await downloadRelease(home, release);
-          const removeStaged = () => rmSync(root, { recursive: true, force: true });
-          onInterrupt.add(removeStaged);
-          let activated = false,
-            keep = false;
-          try {
-            for (;;) {
-              await idle();
-              // From here the candidate may point the daemon at this root; never delete it then.
-              onInterrupt.delete(removeStaged);
-              // Execute the candidate's installer so migrations match the candidate version.
-              const child = spawnSync(
-                process.execPath,
-                [join(root, "scripts/cli.mjs"), "install", "--home", home, "--paseo-home", current.paseoHome],
-                {
-                  stdio: "inherit",
-                  env: { ...process.env, ALLIANCE_PARENT_MAINTENANCE: String(process.pid) },
-                },
-              );
-              if (child.status === 0) {
-                activated = true;
-                break;
+        await withMaintenance(
+          home,
+          async () => {
+            // SSH and service shells may lack nvm; the installed profiles name the harnesses in use.
+            process.env.PATH = await harnessPath(home);
+            const deadline = Date.now() + waitMs;
+            const idle = () =>
+              waitForIdle(current.paseoHome, Math.max(0, deadline - Date.now()), {
+                report,
+                // A remote shell must not become the environment of a freshly started daemon.
+                refuseStopped: !!flags["--bundle"],
+              });
+            // A waiting update leaves scheduled prompts running, so handbacks reach owners while it
+            // waits, and pauses them for each activation attempt only. With --hold it keeps the
+            // pause from the end of staging through activation, so agents an operator stops meanwhile
+            // are not woken. A round that began before the pause may still send, so an attempt
+            // waits for a later round. idle() reports `daemon` only when the daemon is not running;
+            // then no scheduler runs.
+            let since = null;
+            const take = async () => {
+              try {
+                since ??= await pauseScheduler(home);
+                return null;
+              } catch (error) {
+                if (/^Another maintenance operation/.test(error.message))
+                  return "another maintenance command holds the scheduler pause";
+                throw error;
               }
-              if (child.status === BUSY_EXIT) {
-                // Busy at activation, managed files restored: wait again while time remains.
-                onInterrupt.add(removeStaged);
-                if (Date.now() < deadline) continue;
-                throw new Error(
-                  "Update blocked at activation; wait deadline reached. Installation unchanged.",
+            };
+            const unpause = async () => {
+              await resumeScheduler(home);
+              since = null;
+            };
+            const pause = async (state) => {
+              const busy = await take();
+              if (busy) return busy;
+              if (state.daemon || (await schedulerPausedAt(current.paseoHome, since))) return null;
+              if (!hold) await unpause();
+              return "no scheduler round confirmed the pause";
+            };
+            // Without a wait, refuse busy runtimes before any download. With one, stage first.
+            if (!waitMs) await idle();
+            const root = await downloadRelease(home, release);
+            const removeStaged = () => rmSync(root, { recursive: true, force: true });
+            onInterrupt.add(removeStaged);
+            let activated = false,
+              keep = false;
+            try {
+              if (hold) {
+                for (let busy = await take(); busy; busy = await take()) {
+                  if (Date.now() >= deadline)
+                    throw new Error(
+                      `Update blocked before the wait (${busy}); wait deadline reached. Installation unchanged.`,
+                    );
+                  report(`Pause deferred: ${busy}. Waiting…`);
+                  await sleep(20000);
+                }
+                report(
+                  "Scheduled prompts paused until activation. Once alliance-work status shows the maintenance lock, stop the running agents; activation follows when none runs.",
                 );
               }
-              keep = true;
-              throw new Error(
-                `Candidate activation failed (${child.signal ? `interrupted by ${child.signal}` : `exit ${child.status}`}). Staged release kept at ${root}. Run alliance-work doctor; use rollback if it reports a mismatch.`,
-              );
+              for (;;) {
+                const state = await idle();
+                const held = waitMs ? await pause(state) : null;
+                if (held) {
+                  if (Date.now() >= deadline)
+                    throw new Error(
+                      `Update blocked at activation (${held}); wait deadline reached. Installation unchanged.`,
+                    );
+                  report(`Activation deferred: ${held}. Waiting…`);
+                  await sleep(20000);
+                  continue;
+                }
+                // Another installer may have activated this release or a newer one meanwhile.
+                const installed = await installation(home);
+                if (!installed) throw new Error("The installation record disappeared; nothing activated.");
+                if (!isNewerRelease(release.tagName, installed.version))
+                  return `v${installed.version} is installed now; ${release.tagName} was not activated.`;
+                // From here the candidate may point the daemon at this root; never delete it then.
+                onInterrupt.delete(removeStaged);
+                // Execute the candidate's installer so migrations match the candidate version. Its
+                // own idle checks run under the pause and decide.
+                const child = spawnSync(
+                  process.execPath,
+                  [
+                    join(root, "scripts/cli.mjs"),
+                    "install",
+                    "--home",
+                    home,
+                    "--paseo-home",
+                    current.paseoHome,
+                  ],
+                  {
+                    stdio: "inherit",
+                    env: { ...process.env, ALLIANCE_PARENT_MAINTENANCE: String(process.pid) },
+                  },
+                );
+                if (child.status === 0) {
+                  activated = true;
+                  break;
+                }
+                if (child.status === BUSY_EXIT) {
+                  // Busy at activation, managed files restored: wait again while time remains.
+                  onInterrupt.add(removeStaged);
+                  if (waitMs && !hold) await unpause();
+                  if (Date.now() < deadline) continue;
+                  throw new Error(
+                    "Update blocked at activation; wait deadline reached. Installation unchanged.",
+                  );
+                }
+                keep = true;
+                throw new Error(
+                  `Candidate activation failed (${child.signal ? `interrupted by ${child.signal}` : `exit ${child.status}`}). Staged release kept at ${root}. Run alliance-work doctor; use rollback if it reports a mismatch.`,
+                );
+              }
+            } finally {
+              onInterrupt.delete(removeStaged);
+              // A staged copy that never became active and was never switched to is removed.
+              if (!activated && !keep) await rm(root, { recursive: true, force: true });
             }
-          } finally {
-            onInterrupt.delete(removeStaged);
-            // A staged copy that never became active and was never switched to is removed.
-            if (!activated && !keep) await rm(root, { recursive: true, force: true });
-          }
-          return { updated: release.tagName, root };
-        }),
+            return { updated: release.tagName, root };
+          },
+          { pause: !waitMs },
+        ),
       );
     }
   } else if (command === "deploy") {
@@ -648,6 +827,7 @@ try {
       hosts,
       tag: flags["--version-tag"],
       waitIdle: flags["--wait-idle"] === undefined ? 0 : Number(flags["--wait-idle"]),
+      hold: !!flags["--hold"],
       detach: !!flags["--detach"],
       remoteHome: flags["--remote-home"],
     });
@@ -663,6 +843,8 @@ try {
     if (current.previous.version && isNewerRelease("0.1.18", current.previous.version)) {
       let blocked = [];
       try {
+        // Loaded here so other commands don't load node:sqlite and print its experimental warning.
+        const { roomsUnreadableBefore0118 } = await import("./model-compat.mjs");
         blocked = roomsUnreadableBefore0118(home);
       } catch (error) {
         console.error(
@@ -675,9 +857,24 @@ try {
         );
     }
     output(
-      await withMaintenance(home, () =>
-        activate({ ...installOptions, root: current.previous.root, paseoHome: current.paseoHome }),
-      ),
+      await withMaintenance(home, async () => {
+        const result = await activate({
+          ...installOptions,
+          root: current.previous.root,
+          paseoHome: current.paseoHome,
+        });
+        // Still under the scheduler pause, so the older plugin never acts on these records.
+        if (!current.previous.version || isNewerRelease("0.1.19", current.previous.version))
+          try {
+            const { dropHandbackRecords } = await import("./rollback-compat.mjs");
+            result.handbackRecordsRemoved = dropHandbackRecords(home);
+          } catch (error) {
+            console.error(
+              `Warning: could not remove 0.1.19 handback-only assignment records (${error.message}). The older release may retry or continue those members; pause them with alliance-work autonomy checkpoint --phase paused.`,
+            );
+          }
+        return result;
+      }),
     );
   } else throw new Error(`Unknown command ${command}. Run alliance-work --help.`);
 } catch (error) {

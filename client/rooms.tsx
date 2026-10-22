@@ -587,6 +587,18 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
                         {member.error}
                       </Text>
                     )}
+                    {member.silence && (
+                      <Text numberOfLines={1} style={{ color: c.statusWarning, fontSize: 11 }}>
+                        No activity for {relativeTime(member.silence.since, now)} in its running turn
+                        {member.silence.key ? " · owner notified" : ""}
+                      </Text>
+                    )}
+                    {member.denied && (
+                      <Text numberOfLines={1} style={muted}>
+                        Alliance denied its {member.denied.tool} approval request{" "}
+                        {relativeTime(member.denied.at, now)} ago
+                      </Text>
+                    )}
                   </View>
                   {!compact && (
                     <Text numberOfLines={1} style={{ ...muted, width: 84 }}>

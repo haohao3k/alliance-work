@@ -114,8 +114,9 @@ function Editor({
         HQ / Supervisor / Lead · defaults
       </Text>
       <Text style={hint}>
-        Default to GPT-6.1 Sol or Claude Sonnet 5.5. Select Astra/Opus explicitly when the task warrants it.
-        Owners can choose any live-catalog model. This effort is preferred when omitted.
+        Default to GPT-6.1 Sol, Claude Sonnet 5.5 or AGY Gemini 4 Argon medium. Select Astra/Opus explicitly
+        when the task warrants it. Owners can choose any live-catalog model, but AGY runs only Gemini models
+        for every role. This effort is preferred when omitted.
       </Text>
       <View style={row}>
         {Effort.options.map((effort) => (

@@ -84,3 +84,6 @@ Use the exact Alliance CLI from your room context, including --home.
 - Alliance retries a failed turn twice by default; a provider quota waits for its reset. A
   cancellation or `paused` stops continuation. In a root chat with a substantive task, run
   `alliance-work autonomy start` once, not each turn.
+
+
+Apply contextual naming guidance in `$ALLIANCE_CONTEXT` during normal work.

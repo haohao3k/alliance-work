@@ -289,3 +289,25 @@ restrict exact tool names. CLI: `alliance-work mcp projects`, `mcp save --file P
 --revision HASH`, and `mcp preview --project PATH --harness codex`. See
 [project MCP settings](docs/operations.md#project-mcp-settings) for the schema, inherited scopes,
 authentication and session refresh behavior. Existing Mac mini v1 scoped settings remain compatible.
+
+### Contextual session and workspace names
+
+Agents maintain names as part of normal work: `[role] [project] short purpose`, with `hq`,
+`sup`, `lead`, `peer` and `lens` derived from the profile. For example,
+`[peer] [ExampleApp] Review permissions`. Creation supplies a structural starting title;
+the working agent identifies the real project and purpose from the conversation and updates
+its own session when that title is generic, stale or misleading. A meaningful change of
+objective can justify another rename; routine turns and status changes do not.
+
+The responsible agent also updates its dedicated workspace title from context. A shared
+workspace belongs to its accountable owner and uses `[team] [project] shared purpose` when
+multiple roles share it. Children do not rename a parent's shared workspace. Agents preserve
+explicit Human-fixed names and concurrent edits, avoid sensitive text, and never change paths,
+models, ownership or assignments to rename something. No batch operator summaries, periodic
+renaming or separate model calls are needed. Existing sessions adopt this policy on their next
+managed context refresh; this does not claim an idle agent has already chosen a new name.
+
+Opt-in real-agent check (Codex `gpt-6-astra`, medium):
+`node scripts/acceptance-naming.mjs /absolute/fresh-output "$HOME/.codex"`.
+It uses an isolated Paseo and workspace, two small coding tasks with no rename commands,
+and verifies both the code and agent-driven session/workspace names before cleanup.

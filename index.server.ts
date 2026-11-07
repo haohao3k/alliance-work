@@ -196,9 +196,12 @@ export default function contribute(server: PluginServerContext) {
       ...request,
       config: {
         ...request.config,
-        title: request.config.title?.trim()
-          ? request.config.title
-          : agentTitle(room.title, allianceProvider(request.config.provider)!.role),
+        title: agentTitle(
+          room.title,
+          allianceProvider(request.config.provider)!.role,
+          request.config.title ?? "",
+          instance.store.rooms().map((entry) => entry.title),
+        ),
         ...selected,
         mcpServers: await instance.sessionMcpServers(request.config.provider, request.config.cwd),
         systemPrompt: composeInstruction(instruction, request.config.systemPrompt),

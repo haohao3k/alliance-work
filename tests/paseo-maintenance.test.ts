@@ -150,9 +150,18 @@ test("native Paseo switches release roots and restores the previous plugin after
     const workspace = await api.workspaces.open(cwd);
     // Native create_agent and the native UI must hit the policy gate, not only the Alliance RPC.
     const flexibleLead = await workspace.agents.create({
+      title: "Docs review",
       config: { provider: "alliance-codex-lead/gpt-6.1-sol", thinkingOptionId: "xhigh" },
     });
     const flexibleSnapshot = (await flexibleLead.refresh())?.agent;
+    assert.match(flexibleSnapshot?.title ?? "", /^\[lead\] \[[^\]]+\] Docs review$/u);
+    const namedLead = await workspace.agents.create({
+      title: "[hq] [ExampleApp] C20 docs",
+      config: { provider: "alliance-codex-lead/gpt-6-astra", thinkingOptionId: "medium" },
+    });
+    assert.equal((await namedLead.refresh())?.agent.title, "[lead] [ExampleApp] C20 docs");
+    await namedLead.archive();
+
     assert.equal(flexibleSnapshot?.model, "gpt-6.1-sol");
     assert.equal(flexibleSnapshot?.thinkingOptionId, "xhigh");
     await flexibleLead.detach();

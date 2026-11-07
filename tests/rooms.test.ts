@@ -815,7 +815,7 @@ test("a linked Git worktree reuses its project's room; ambiguous roots never cre
     git("worktree", "add", "-b", "other", third);
     await assert.rejects(f.runtime.ensureRoom(third, f.paseo), /Several rooms/);
     assert.equal(f.runtime.store.rooms().length, 2);
-    assert.equal((await f.runtime.ensureRoom(worktree, f.paseo)).title, "Separate");
+    assert.equal((await f.runtime.ensureRoom(worktree, f.paseo)).title, "[team] [Separate]");
   } finally {
     f.runtime.close();
   }
@@ -2963,7 +2963,7 @@ test("new room names reach native workspace and later native rename reaches the 
     workspaces: { open: async () => native, ref: () => native },
   } as unknown as PaseoApi;
   const room = await f.runtime.createRoom({ cwd, title: "Sleek Radar", mission: "" }, api);
-  assert.equal(title, "Sleek Radar");
+  assert.equal(title, "[team] [Sleek Radar]");
   assert.equal(writes, 1);
   f.runtime.store.addRoom({
     ...room,

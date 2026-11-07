@@ -66,12 +66,12 @@ test("native agent creation retains approved Codex MCP in the per-thread config 
         },
       };
       const result = await hooks.get("agent.create.before")!({ request }, { paseo });
-      assert.match(result.config.title, / · (HQ|Supervisor|Lead|Peer|Lens)$/u);
+      assert.ok(result.config.title.startsWith(`[${role === "supervisor" ? "sup" : role}] [`));
       const manual = await hooks.get("agent.create.before")!(
-        { request: { config: { ...request.config, title: "Ryzen | HQ" } } },
+        { request: { config: { ...request.config, title: "[hq] [ExampleApp] Docs review" } } },
         { paseo },
       );
-      assert.equal(manual.config.title, "Ryzen | HQ");
+      assert.equal(manual.config.title, `[${role === "supervisor" ? "sup" : role}] [ExampleApp] Docs review`);
       assert.deepEqual(Object.keys(result.config.mcpServers), ["mobbin"]);
       assert.equal(result.config.mcpServers.mobbin.type, "stdio");
       assert.equal(result.config.mcpServers.mobbin.command, process.execPath);

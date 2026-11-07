@@ -38,7 +38,7 @@ changes in the existing obligation or handback. Continue unrelated authorized wo
 A new session already has current policy: read its assignment and start. After a resume or
 context compaction, recover current policy and open obligations once with `alliance-work policy
 read --agent "$PASEO_AGENT_ID"`, then read the linked assignment; the snapshot at
-`$ALLIANCE_CONTEXT` repeats that policy, so read only its obligations and pending items there.
+`$ALLIANCE_CONTEXT` repeats that policy, so read its current naming guidance, obligations and pending items.
 Reconcile open obligations before side effects (`policy ack` only records the read) and refresh
 them before a dependent action. There is no universal compaction callback: preserve this
 recovery instruction in handbacks.

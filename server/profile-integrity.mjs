@@ -10,9 +10,32 @@ export const codexTrust =
 export function nativeTrustFile(profile, path) {
   return profile.harness === "codex" && path === join(profile.home, "config.toml");
 }
+// Pi writes these preferences during normal use, including its first startup. Loading and
+// isolation settings remain managed: packages, extensions, MCP and compaction cannot drift.
+const piPreferences = [
+  "lastChangelogVersion",
+  "defaultProvider",
+  "defaultModel",
+  "defaultThinkingLevel",
+  "theme",
+];
+export function nativePiSettingsFile(profile, path) {
+  return profile.harness === "pi" && path === join(profile.home, "settings.json");
+}
+export function preservePiPreferences(managed, current) {
+  const settings = JSON.parse(managed.toString());
+  const previous = JSON.parse(current.toString());
+  for (const key of piPreferences) if (key in previous) settings[key] = previous[key];
+  return JSON.stringify(settings, null, 2) + "\n";
+}
 export function managedDigest(profile, path, bytes) {
   if (nativeTrustFile(profile, path))
     return digest(bytes.toString().replace(codexTrust, "\n").trimEnd() + "\n");
+  if (nativePiSettingsFile(profile, path)) {
+    const settings = JSON.parse(bytes.toString());
+    for (const key of piPreferences) delete settings[key];
+    return digest(JSON.stringify(settings, null, 2) + "\n");
+  }
   return digest(bytes);
 }
 export async function assertNoLinks(path) {

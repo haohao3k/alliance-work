@@ -34,5 +34,22 @@ modified managed files and unverified releases. Keep the previous installation u
 any recovery that cannot be verified. Do not silently fall back to another auth source or repo.
 
 Document commands where users operate them: README for first use, docs/operations.md for lifecycle
-and auth, docs/quickstart.vi.md for the room workflow. Keep facts in one place. The repository and
-release assets remain private. No source/test-only result proves an end-to-end model handback.
+and auth, docs/quickstart.vi.md for the room workflow. Keep facts in one place. No source/test-only
+result proves an end-to-end model handback.
+
+## Public edition
+
+This checkout publishes selected, reviewed changes to `haohao3k/alliance-work`.
+Verify the destination and public visibility before pushing. Never merge private history,
+copy local credentials, or publish personal host configuration. New third-party assets need
+explicit redistribution rights and retained notices. Existing tags are immutable.
+Keep the private source checkout independent; no force push or mirror operation.
+
+## Required secret scan before push
+
+Run `npm run hooks:install` in a source checkout. Every push must pass the tracked
+pre-push gate with both Gitleaks and TruffleHog. Do not use `--no-verify`, override
+`core.hooksPath`, disable detectors, or broaden allowlists to bypass a finding.
+Investigate findings locally without printing credential values. Only exact, verified
+synthetic fixtures may be allowlisted with a documented reason. Missing tools or scan
+errors block pushing. This requirement applies to branches and tags, not just main.

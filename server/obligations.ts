@@ -34,7 +34,7 @@ export class Obligations {
     const input = ObligationInput.parse(raw);
     this.store.room(input.roomId);
     const inputHash = createHash("sha256").update(JSON.stringify(input)).digest("hex");
-    const old = this.store.obligations().find((o) => o.key === input.key);
+    const old = this.store.obligation(input.key);
     if (old) {
       if (old.inputHash !== inputHash) throw new Error("Obligation key already names different work");
       return old;
@@ -56,7 +56,7 @@ export class Obligations {
   }
   async action(raw: unknown, api: PaseoApi) {
     const input = ObligationAction.parse(raw);
-    const old = this.store.obligations().find((o) => o.key === input.key);
+    const old = this.store.obligation(input.key);
     if (!old || old.ownerId !== input.ownerId || old.revision !== input.revision)
       throw new Error("Obligation changed; refresh owner and revision");
     if (old.state !== "open") throw new Error("Obligation is terminal; retain its history");
@@ -74,7 +74,9 @@ export class Obligations {
         if (input.nextOwnerId === old.ownerId) throw new Error("Managed handoff needs a different owner");
         if (managed.delivery !== "none")
           throw new Error("Reconcile in-flight or ambiguous autonomy delivery before handoff");
-        if (target) throw new Error("Successor already has a managed assignment; choose a free successor");
+        // A handback-only record (an owned member that never started an assignment) is replaced.
+        if (target && !target.handbackOnly)
+          throw new Error("Successor already has a managed assignment; choose a free successor");
         for (const id of [old.ownerId, input.nextOwnerId]) {
           if (!id) continue;
           const live = await api.agents.ref(id).refresh();
@@ -158,21 +160,34 @@ export class Obligations {
         if (next.ownerId) {
           const successor = this.store.member(next.ownerId);
           if (!successor) throw new Error("Successor disappeared during handoff");
-          this.store.saveAutonomy({
-            ...managed,
-            agentId: next.ownerId,
-            revision: 1,
-            phase: managed.phase === "paused" ? "paused" : "active",
-            pausedBy: managed.phase === "paused" ? "handoff" : undefined,
-            pausedAt: managed.phase === "paused" ? now : undefined,
-            reason: `Continue obligation ${old.key} under recorded handoff; ${next.nextAction}`,
-            turnId: successor.lastTurnId ?? null,
-            outcome: successor.lastOutcome ?? "completed",
-            delivery: "none",
-            messageId: null,
-            dueAt: now + 15000,
-            updatedAt: now,
-          });
+          this.store.saveAutonomy(
+            {
+              ...managed,
+              agentId: next.ownerId,
+              revision: (target?.revision ?? 0) + 1,
+              phase: managed.phase === "paused" ? "paused" : "active",
+              pausedBy: managed.phase === "paused" ? "handoff" : undefined,
+              pausedAt: managed.phase === "paused" ? now : undefined,
+              reason: `Continue obligation ${old.key} under recorded handoff; ${next.nextAction}`,
+              turnId: successor.lastTurnId ?? null,
+              outcome: successor.lastOutcome ?? "completed",
+              delivery: "none",
+              messageId: null,
+              dueAt: now + 15000,
+              updatedAt: now,
+              // The old owner's quota wait, checkpoint, wake batch, charged and unchecked
+              // continuations and asked blocker describe its own turns.
+              quotaRetry: undefined,
+              quotaWaits: undefined,
+              checkpointTurnId: undefined,
+              wakeBatch: undefined,
+              wakeTurnId: undefined,
+              charged: undefined,
+              unchecked: undefined,
+              blocker: undefined,
+            },
+            target?.revision,
+          );
         }
       }
       const related = this.store.wakeups().filter((w) => w.obligationKey === old.key);
@@ -185,7 +200,7 @@ export class Obligations {
         for (const w of related) {
           if (w.trigger.kind !== "job") continue;
           const key = w.trigger.key;
-          const job = this.store.jobs().find((j) => j.key === key);
+          const job = this.store.job(key);
           if (
             !job ||
             (old.ownerId !== null && job.ownerId !== old.ownerId) ||
@@ -208,7 +223,7 @@ export class Obligations {
           jobs.set(key, job.revision + 1);
         }
         for (const [key, revision] of jobs) {
-          const job = this.store.jobs().find((j) => j.key === key);
+          const job = this.store.job(key);
           if (!job) throw new Error("Tracked job disappeared during handoff");
           this.store.saveJob({ ...job, ownerId: next.ownerId, revision }, job.revision);
         }

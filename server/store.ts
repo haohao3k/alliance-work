@@ -1,16 +1,46 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { PluginHookAgent, PluginTurnOutcome } from "@getpaseo/plugin/server";
+import type { z } from "zod";
 import type { AutonomyState } from "../shared/autonomy";
 import type { RoleName, RoomRecord } from "../shared/contracts";
+import type { Contributor } from "../shared/integration.mjs";
 import {
+  allowedModel,
   defaultModelPolicy,
   ModelPolicy,
   type ModelPolicyValue,
+  refusedModel,
   upgradeModelPolicy,
 } from "../shared/model-policy";
 import type { Obligation } from "../shared/obligations";
+import { harnessOf } from "../shared/operations";
 import type { WakeRecordValue } from "../shared/wakeups";
+
+export interface TurnInputReceipt {
+  turnId: string;
+  startedAt: number;
+  outcome: string;
+  error?: string;
+  path: string;
+  endedAt: number;
+  promptId?: string;
+  maintenance: string[];
+  handbackTurnId: string | null;
+  handbackPath: string | null;
+}
+export interface TurnReadbackReceipt {
+  id: string;
+  agent: PluginHookAgent;
+  turnId: string | null;
+  startedAt?: number;
+  endedAt: number;
+  outcome: PluginTurnOutcome;
+  error: string;
+  /** An end event observed while that native turn is active needs a fresh end event. */
+  awaitEndEvent?: boolean;
+}
 
 export interface MemberRecord {
   id: string;
@@ -30,21 +60,57 @@ export interface MemberRecord {
   launchEffort?: string;
   ownership?: { ownerId: string | null; revision: number; evidence: string; at: string };
   policyAck?: { digest: string; at: string };
+  /**
+   * Its latest turn, with lastOutcome, resultPath and lastTurnEndedAt. A turn that keeps the phase
+   * it found (Autonomy.carrying) leaves them, and the decision on them, as they were.
+   */
   lastTurnId?: string | null;
   /** Epoch ms when the latest turn ended; drives the stale-decision reminder. */
   lastTurnEndedAt?: number;
+  /** When Alliance received the latest start hook; bounds native notice attribution across reused turn IDs. */
+  turnStartedAt?: number;
+  /** Native input rows already inspected in this turn/generation; a new start clears the cursor. */
+  turnInputCursor?: { epoch: string; seq: number };
+  /** At most 16 unread native terminal receipts. Overflow remains held until explicit new work. */
+  turnInputPending?: TurnInputReceipt & { following?: TurnInputReceipt[]; overflow?: true };
+  turnReadbackPending?: TurnReadbackReceipt;
   /** Baseline for members recorded before turn end times existed. */
   staleSince?: number;
   /** Who recorded the decision: an agent ID, null for the Human, absent for legacy records. */
   decisionBy?: string | null;
   decisionAt?: string;
   decisionScope?: "technical" | "product";
+  /** Frozen dependencies of a newly recorded integrated product decision (including an empty set). */
+  decisionIntegration?: {
+    contributorsStamp: string;
+    contributors: z.infer<typeof Contributor>[];
+    dispositionDigest: string;
+  };
   /** The turn the decision reviewed; a later turn needs its own decision. */
   decisionTurnId?: string | null;
   /** Explicitly kept open by its owner chain or the Human; never auto-archived. */
   keep?: { by: string; at: string };
   /** Set once Paseo reports the agent archived; a reopened agent clears it on its next turn. */
   archivedAt?: string;
+  /**
+   * Its latest turn ended on a provider limit that lifts at `until` (the reset plus a minute).
+   * `messageId` is the plugin message that started that turn, if any. Cleared when a turn ends otherwise.
+   */
+  limited?: { until: number; messageId: string | null };
+  /**
+   * Its running turn has shown no activity since `since` (ISO). `key` names the owner's notice,
+   * null when no member owner is notified; cleared once the member works again or stops.
+   */
+  silence?: {
+    turnId: string | null;
+    since: string;
+    key: string | null;
+    notifiedAt: string | null;
+  };
+  /** Approval requests of its running turn and when Alliance first saw each (epoch ms). */
+  approvals?: { id: string; since: number }[];
+  /** The last approval request Alliance denied for it. */
+  denied?: { requestId: string; tool: string; command: string | null; at: string };
   lastAcceptance?: {
     decision: "accepted" | "rejected";
     kind: string | null;
@@ -55,6 +121,24 @@ export interface MemberRecord {
     product?: { outcome: string; journey: string; reviewer: string; remaining: string[] };
   };
 }
+/** A turn that is new work: its result is still to come and an earlier decision no longer applies. */
+export const newTurn = (turnId: string | null): Partial<MemberRecord> => ({
+  lastTurnId: turnId,
+  lastOutcome: null,
+  resultPath: null,
+  decision: "open",
+  decisionEvidence: null,
+  decisionBy: undefined,
+  decisionAt: undefined,
+  decisionScope: undefined,
+  decisionIntegration: undefined,
+  decisionTurnId: undefined,
+  staleSince: undefined,
+  // A running turn means Paseo reopened an agent it had archived.
+  archivedAt: undefined,
+  turnInputPending: undefined,
+  turnReadbackPending: undefined,
+});
 export interface JobRecord {
   key: string;
   roomId: string;
@@ -65,6 +149,8 @@ export interface JobRecord {
   recordedAt: string;
   revision: number;
 }
+/** A saved model list a reset removed, kept raw in room_model_policy_removed under this id. */
+export type RemovedModelPolicy = { id: number; revision: number; at: string };
 export class RoomStore {
   private db: DatabaseSync;
   constructor(home: string) {
@@ -79,12 +165,19 @@ export class RoomStore {
       CREATE TABLE IF NOT EXISTS obligations(key TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS obligation_history(key TEXT NOT NULL, revision INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(key,revision));
       CREATE TABLE IF NOT EXISTS room_model_policies(roomId TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS room_model_policy_resets(roomId TEXT PRIMARY KEY, revision INTEGER NOT NULL);`);
+      CREATE TABLE IF NOT EXISTS room_model_policy_resets(roomId TEXT PRIMARY KEY, revision INTEGER NOT NULL);
+      CREATE TABLE IF NOT EXISTS room_model_policy_removed(id INTEGER PRIMARY KEY AUTOINCREMENT, roomId TEXT NOT NULL, revision INTEGER NOT NULL, data TEXT NOT NULL, removedAt TEXT NOT NULL);`);
   }
   obligations(): Obligation[] {
     return (this.db.prepare("SELECT data FROM obligations ORDER BY rowid").all() as { data: string }[]).map(
       (r) => JSON.parse(r.data),
     );
+  }
+  obligation(key: string): Obligation | undefined {
+    const row = this.db.prepare("SELECT data FROM obligations WHERE key=?").get(key) as
+      | { data: string }
+      | undefined;
+    return row ? JSON.parse(row.data) : undefined;
   }
   obligationHistory(key: string): Obligation[] {
     return (
@@ -125,6 +218,12 @@ export class RoomStore {
       (r) => JSON.parse(r.data),
     );
   }
+  autonomyOf(agentId: string): AutonomyState | undefined {
+    const row = this.db.prepare("SELECT data FROM autonomy WHERE agentId=?").get(agentId) as
+      | { data: string }
+      | undefined;
+    return row ? JSON.parse(row.data) : undefined;
+  }
   saveAutonomy(record: AutonomyState, revision?: number) {
     const result =
       revision === undefined
@@ -136,10 +235,24 @@ export class RoomStore {
             .run(record.revision, JSON.stringify(record), record.agentId, revision);
     if (!result.changes) throw new Error("Autonomy changed; refresh before retrying");
   }
+  /** The last one-time data migration this home ran (SQLite user_version; releases before 0.1.19 leave 0). */
+  migration(): number {
+    return (this.db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+  }
+  /** Records that migration `step` ran; call it in that migration's transaction. */
+  setMigration(step: number) {
+    this.db.exec(`PRAGMA user_version=${Math.trunc(step)}`);
+  }
   wakeups(): WakeRecordValue[] {
     return (this.db.prepare("SELECT data FROM wakeups ORDER BY rowid").all() as { data: string }[]).map((r) =>
       JSON.parse(r.data),
     );
+  }
+  wakeup(key: string): WakeRecordValue | undefined {
+    const row = this.db.prepare("SELECT data FROM wakeups WHERE key=?").get(key) as
+      | { data: string }
+      | undefined;
+    return row ? JSON.parse(row.data) : undefined;
   }
   saveWakeup(w: WakeRecordValue, revision?: number) {
     const result =
@@ -181,6 +294,10 @@ export class RoomStore {
       JSON.parse(r.data),
     );
   }
+  job(key: string): JobRecord | undefined {
+    const row = this.db.prepare("SELECT data FROM jobs WHERE key=?").get(key) as { data: string } | undefined;
+    return row ? JSON.parse(row.data) : undefined;
+  }
   saveJob(job: JobRecord, expectedRevision?: number) {
     const result =
       expectedRevision === undefined
@@ -213,14 +330,19 @@ export class RoomStore {
     return row?.revision ?? 0;
   }
   /** Drop the room's saved policy so it follows the release defaults again. The saved row is not
-   * parsed, so an unreadable list can still be cleared. With `expected`, refuse if it changed. */
-  resetModelPolicy(roomId: string, expected?: number) {
+   * parsed, so an unreadable list can still be cleared; its raw text is kept in
+   * room_model_policy_removed (id returned as `removed`). With `expected`, refuse if it changed. */
+  resetModelPolicy(
+    roomId: string,
+    expected?: number,
+  ): ReturnType<RoomStore["modelPolicy"]> & { removed?: RemovedModelPolicy } {
     this.room(roomId);
+    let removed: RemovedModelPolicy | undefined;
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const row = this.db.prepare("SELECT revision FROM room_model_policies WHERE roomId=?").get(roomId) as
-        | { revision: number }
-        | undefined;
+      const row = this.db
+        .prepare("SELECT revision,data FROM room_model_policies WHERE roomId=?")
+        .get(roomId) as { revision: number; data: string } | undefined;
       const counter = this.resetRevision(roomId);
       if (expected !== undefined && expected !== (row?.revision ?? counter))
         throw new Error("Model policy changed elsewhere. Reload settings before resetting.");
@@ -230,17 +352,27 @@ export class RoomStore {
           "INSERT INTO room_model_policy_resets(roomId,revision) VALUES(?,?) ON CONFLICT(roomId) DO UPDATE SET revision=excluded.revision",
         )
         .run(roomId, Math.max(row?.revision ?? 0, counter) + 1);
+      if (row) {
+        const at = new Date().toISOString();
+        const kept = this.db
+          .prepare("INSERT INTO room_model_policy_removed(roomId,revision,data,removedAt) VALUES(?,?,?,?)")
+          .run(roomId, row.revision, row.data, at);
+        removed = { id: Number(kept.lastInsertRowid), revision: row.revision, at };
+      }
       this.db.prepare("DELETE FROM room_model_policies WHERE roomId=?").run(roomId);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
     }
-    return this.modelPolicy(roomId);
+    return { ...this.modelPolicy(roomId), ...(removed ? { removed } : {}) };
   }
   saveModelPolicy(roomId: string, policy: ModelPolicyValue, revision: number) {
     const current = this.modelPolicy(roomId);
-    const data = JSON.stringify(ModelPolicy.parse(policy));
+    const parsed = ModelPolicy.parse(policy);
+    const refused = parsed.routes.find((route) => !allowedModel(route.harness, route.model));
+    if (refused) throw new Error(`${refusedModel(refused.model)} Remove that ${refused.role} route to save.`);
+    const data = JSON.stringify(parsed);
     const result = current.saved
       ? this.db
           .prepare("UPDATE room_model_policies SET revision=revision+1,data=? WHERE roomId=? AND revision=?")
@@ -270,6 +402,13 @@ export class RoomStore {
       .prepare("INSERT INTO rooms(id,cwd,data) VALUES(?,?,?)")
       .run(room.id, room.cwd, JSON.stringify(room));
   }
+  updateRoomTitle(id: string, expected: string, title: string) {
+    const room = this.room(id);
+    if (room.title !== expected || room.nativeTitle !== expected) return;
+    this.db
+      .prepare("UPDATE rooms SET data=? WHERE id=?")
+      .run(JSON.stringify({ ...room, title, nativeTitle: title }), id);
+  }
   members(roomId?: string): MemberRecord[] {
     const rows = roomId
       ? this.db.prepare("SELECT data FROM members WHERE roomId=?").all(roomId)
@@ -281,6 +420,21 @@ export class RoomStore {
       | { data: string }
       | undefined;
     return row ? JSON.parse(row.data) : null;
+  }
+  /**
+   * When the provider limit this agent shares lifts, or null: the latest reset reported by a member
+   * of the same harness on this host. The credential behind a role is not read, so every member of
+   * that harness counts as sharing it (all Claude roles of a host hit one limit on 2026-10-21).
+   */
+  heldUntil(agentId: string, now: number): number | null {
+    const harness = harnessOf(this.member(agentId)?.provider ?? "");
+    if (!harness) return null;
+    const { until } = this.db
+      .prepare(
+        "SELECT MAX(json_extract(data, '$.limited.until')) AS until FROM members WHERE json_extract(data, '$.provider') LIKE ?",
+      )
+      .get(`alliance-${harness}-%`) as { until: number | null };
+    return until !== null && until > now ? until : null;
   }
   byLaunch(roomId: string, key: string): MemberRecord | null {
     const row = this.db.prepare("SELECT data FROM members WHERE roomId=? AND launchKey=?").get(roomId, key) as

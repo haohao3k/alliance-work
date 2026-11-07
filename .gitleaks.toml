@@ -1,0 +1,11 @@
+title = "Alliance Work secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Synthetic obligation ID in the autonomy regression test; not an API credential"
+condition = "AND"
+paths = ['''^tests/autonomy\.test\.ts$''']
+regexTarget = "secret"
+regexes = ['''^proj-cycle1-20261021$''']

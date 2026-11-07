@@ -3,7 +3,14 @@ import { lstat, mkdir, readFile, rename, rm } from "node:fs/promises";
 import { hostname, uptime } from "node:os";
 import { join } from "node:path";
 
+/** The scheduler pause: running plugins (0.1.16+) start no scheduled prompt while it is held. */
 export const LOCK = ".maintenance-lock";
+/**
+ * One maintenance command per home holds this for its whole run (0.1.19+). Plugins never read it,
+ * so holding it pauses nothing; a waiting update takes LOCK only while it activates (with --hold,
+ * from the end of staging through activation).
+ */
+export const MUTEX = ".maintenance-mutex";
 /** Seconds since the epoch at which this host booted; changes after a reboot. */
 export const bootTime = () => Math.round(Date.now() / 1000 - uptime());
 
@@ -12,8 +19,8 @@ export const bootTime = () => Math.round(Date.now() / 1000 - uptime());
  * on this host is gone, the host rebooted since it was taken, or its owner record was never
  * written (the taker died between mkdir and write) and a grace period passed.
  */
-export async function lockState(home, now = Date.now()) {
-  const path = join(home, LOCK);
+export async function lockState(home, now = Date.now(), name = LOCK) {
+  const path = join(home, name);
   let stat;
   try {
     stat = await lstat(path);
@@ -37,15 +44,15 @@ export async function lockState(home, now = Date.now()) {
 }
 
 /** Take the lock, replacing a stale one atomically: only one taker can rename it away. */
-export async function takeLock(home) {
-  const path = join(home, LOCK);
+export async function takeLock(home, name = LOCK) {
+  const path = join(home, name);
   try {
     await mkdir(path);
     return path;
   } catch (error) {
     if (error.code !== "EEXIST") throw error;
   }
-  const state = await lockState(home);
+  const state = await lockState(home, Date.now(), name);
   if (!state.stale)
     throw new Error(
       `Another maintenance operation owns ${path}. If it crashed, verify its process has exited before removing this lock.`,

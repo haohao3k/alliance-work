@@ -1,6 +1,7 @@
 import { lstat, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { assertNoLinks } from "./profile-integrity.mjs";
+import { scopedMcpServers } from "./scoped-mcp.mjs";
 
 export const mobbinUrl = "https://api.mobbin.com/mcp";
 
@@ -26,9 +27,11 @@ export async function userMcpSettings(home) {
   return config;
 }
 
-export async function userMcpServers(home, harness, root) {
+/** @param {string | undefined} cwd */
+export async function userMcpServers(home, harness, root, cwd = undefined) {
   if (!["codex", "claude", "agy"].includes(harness)) return {};
   const config = await userMcpSettings(home);
-  if (!config.mobbin?.enabled || !config.mobbin.harnesses.includes(harness)) return {};
-  return { mobbin: { command: process.execPath, args: [join(root, "scripts/mobbin.mjs"), home] } };
+  const scoped = await scopedMcpServers(home, harness, root, cwd);
+  if (!config.mobbin?.enabled || !config.mobbin.harnesses.includes(harness)) return scoped;
+  return { ...scoped, mobbin: { command: process.execPath, args: [join(root, "scripts/mobbin.mjs"), home] } };
 }

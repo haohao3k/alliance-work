@@ -2,13 +2,30 @@ import { spawn } from "node:child_process";
 import { lstat, readFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { claudeSkillPlugin, projectSkills } from "../server/project-skills.mjs";
+import { effectiveSkills } from "../server/bundled-skills.mjs";
+import { selectedClaudeCredentials } from "../server/claude-accounts.mjs";
+import { claudeSkillPlugin } from "../server/project-skills.mjs";
+import { scopedMcpServers } from "../server/scoped-mcp.mjs";
 import { linkAgyAuth } from "./agy-auth.mjs";
 import { authSource, authStatus, bridgeCodexAuth } from "./auth.mjs";
 import { discoverCodex } from "./codex-discovery.mjs";
 import { contextPolicy } from "./context-policy.mjs";
 import { assertNoLinks, codexIsolationFeatures, loadManifest, verifyProfile } from "./profiles.mjs";
 import { userMcpServers } from "./user-mcp.mjs";
+
+/**
+ * Agent turns have no terminal to answer a prompt, so a tool that asks would hang the turn. These
+ * make common tools fail or proceed instead. Not CI, which changes how tools behave.
+ */
+const nonInteractive = {
+  COREPACK_ENABLE_DOWNLOAD_PROMPT: "0",
+  GIT_TERMINAL_PROMPT: "0",
+  GCM_INTERACTIVE: "never",
+  GH_PROMPT_DISABLED: "1",
+  PIP_NO_INPUT: "1",
+  DEBIAN_FRONTEND: "noninteractive",
+  npm_config_yes: "true",
+};
 
 export function profileEnvironment(profile, home, ambient = process.env, credentials = {}) {
   /** @type {Record<string,string>} */
@@ -63,6 +80,18 @@ function replaceFlag(args, flag, value) {
   }
   return [...result, flag, value];
 }
+
+function removeFlag(args, flag) {
+  const result = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === flag) {
+      i++;
+      continue;
+    }
+    if (!args[i].startsWith(`${flag}=`)) result.push(args[i]);
+  }
+  return result;
+}
 function toml(value) {
   if (Array.isArray(value)) return `[${value.map(toml).join(",")}]`;
   if (value && typeof value === "object")
@@ -85,15 +114,18 @@ export async function launchPlan(
   const profile = manifest.profiles[id];
   if (!profile) throw new Error(`Unknown Alliance profile: ${id}`);
   await verifyProfile(profile);
+  const selected = profile.harness === "claude" ? await selectedClaudeCredentials(home, profile.role) : null;
   const credentialPath = join(profile.home, "credentials.env.json");
   await assertNoLinks(credentialPath);
-  const info = await lstat(credentialPath).catch((error) => {
-    if (error.code === "ENOENT") return null;
-    throw error;
-  });
+  const info = selected
+    ? null
+    : await lstat(credentialPath).catch((error) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
   if (info && (!info.isFile() || info.mode & 0o077))
     throw new Error("Role credentials must be a regular owner-only file (chmod 600).");
-  let credentials = {};
+  let credentials = selected ?? {};
   if (info) {
     try {
       credentials = JSON.parse(await readFile(credentialPath, "utf8"));
@@ -113,10 +145,22 @@ export async function launchPlan(
     );
   if ((metadataCommand && profile.harness !== "pi") || accountCommand)
     return { executable: profile.executable, args, env, cwd, authSource: source };
-  const bundle = await projectSkills(cwd);
-  const userServers = await userMcpServers(home, profile.harness);
+  // Only agent sessions (Paseo sets PASEO_AGENT_ID); the Human's own launches keep their prompts.
+  if (ambient.PASEO_AGENT_ID) for (const [key, value] of Object.entries(nonInteractive)) env[key] ??= value;
+  const bundle = await effectiveSkills(cwd, profile);
+  const userServers = await userMcpServers(home, profile.harness, undefined, cwd);
   if (profile.harness === "claude") {
-    args = replaceFlag(args, "--setting-sources", "user");
+    // Resume paths can omit --model. Use the native session's selected model, never a
+    // role-wide default; an explicit native argument (including a later change) wins.
+    if (
+      ambient.PASEO_AGENT_ID &&
+      ambient.ALLIANCE_SESSION_MODEL &&
+      !args.some((arg) => arg === "--model" || arg.startsWith("--model="))
+    )
+      args = [...args, "--model", ambient.ALLIANCE_SESSION_MODEL];
+    // Disable implicit user/project skill discovery; explicitly load only this selection.
+    // Keep the original role HOME/config dir for credentials and native session history.
+    args = replaceFlag(removeFlag(args, "--plugin-dir"), "--setting-sources", "");
     args = replaceFlag(args, "--settings", join(profile.home, "settings.json"));
     if (!args.includes("--strict-mcp-config")) args.push("--strict-mcp-config");
     const plugin = await claudeSkillPlugin(home, bundle);
@@ -134,6 +178,7 @@ export async function launchPlan(
     }
     args = [...filtered, "--mcp-config", JSON.stringify({ mcpServers: servers })];
   } else if (profile.harness === "pi") {
+    args = removeFlag(args, "--skill");
     args = [
       ...args,
       "--no-approve",
@@ -149,9 +194,16 @@ export async function launchPlan(
       "-e",
       "builtin:tool-search",
     ];
+    if (
+      Object.keys(await scopedMcpServers(home, "pi", fileURLToPath(new URL("../", import.meta.url)), cwd))
+        .length
+    )
+      args.push("-e", fileURLToPath(new URL("./scoped-mcp-pi.mjs", import.meta.url)));
     for (const extension of profile.extensionPaths ?? []) args.push("-e", extension);
-    for (const skill of profile.skillEntries) args.push("--skill", skill);
-    for (const skill of bundle.skills) args.push("--skill", join(skill.directory, "SKILL.md"));
+    for (const skill of bundle.skills) {
+      const index = profile.skillEntries.find((entry) => basename(dirname(entry)) === skill.name);
+      args.push("--skill", index ?? join(skill.directory, "SKILL.md"));
+    }
     args = replaceFlag(args, "--session-dir", join(profile.home, "sessions"));
   } else if (profile.harness === "agy") {
     if (["models", "agent", "agents"].includes(args[0]) || args.length === 0)
@@ -173,16 +225,14 @@ export async function launchPlan(
       "-c",
       `features.${name}=${value}`,
     ]);
+    // Alliance delegates through Paseo; Codex's separate subagent pool must not govern room peers.
+    isolationArgs.push("-c", "agents.enabled=false");
     configArgs.push(...isolationArgs);
     // Skip project-native config, preserving repository task instructions and native capabilities.
     const trust = `projects=${toml({ [resolve(cwd)]: { trust_level: "untrusted" } })}`;
     configArgs.push("-c", trust);
     const discovered = await discoverCodex(profile.executable, env, cwd, configArgs);
-    const selected = new Set(
-      [...profile.skillDirectories, ...bundle.skills.map((skill) => skill.directory)].map((path) =>
-        resolve(path),
-      ),
-    );
+    const selected = new Set(bundle.skills.map((skill) => skill.directory).map((path) => resolve(path)));
     const skillConfig = discovered.skills
       .filter((skill) => !selected.has(resolve(dirname(skill.path))))
       .map((skill) => ({ path: skill.path, enabled: false }));

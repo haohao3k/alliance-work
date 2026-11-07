@@ -274,6 +274,7 @@ test("obligation reminders cannot enable idle sends or independently move their 
     await f.ledger.add(f.input, f.api);
     assert.throws(() => f.remind("interrupt", { delivery: "idle" }), /pull/);
     const w = f.remind();
+    assert.equal(w.delivery, "pull", "an obligation reminder defaults to pull");
     assert.throws(() => f.wake.action(w.key, w.ownerId, w.revision, "owner", "successor"), /obligation/);
     await f.wake.tick(f.api);
     assert.equal(f.sends(), 0);

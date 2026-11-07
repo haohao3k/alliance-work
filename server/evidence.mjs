@@ -7,8 +7,11 @@ import { finished } from "node:stream/promises";
 import { promisify } from "node:util";
 import { z } from "zod";
 import { assertNoLinks } from "../server/profile-integrity.mjs";
+import { Contribution } from "../shared/integration.mjs";
 import { AssertionResults, readAssertions } from "./coverage.mjs";
 import { inspectCoverage } from "./feature-verification.mjs";
+import { fileDigest } from "./file-digest.mjs";
+import { contributionFor } from "./integration.mjs";
 import { projectSkills } from "./project-skills.mjs";
 
 const execute = promisify(execFile);
@@ -38,6 +41,7 @@ export const Evidence = z.object({
   error: z.string().nullable(),
   artifacts: z.array(Artifact).min(1),
   unverified: z.array(z.string()),
+  contribution: Contribution.optional(),
   assertions: z.object({ run: z.string().uuid(), log: Artifact, results: AssertionResults }).optional(),
   coverage: z
     .object({
@@ -55,6 +59,11 @@ function within(root, path) {
 
 /** @param {string} cwd @param {string[]} inputs */
 export async function candidateSnapshot(cwd, inputs = []) {
+  return (await candidateCapture(cwd, inputs)).candidate;
+}
+
+/** The candidate and portable fingerprints from the same reads; Git inputs outside its file list remain proof inputs only. */
+export async function candidateCapture(cwd, inputs = []) {
   cwd = await realpath(cwd);
   const git = async (...args) => (await execute("git", args, { cwd, maxBuffer: 32 * 1024 * 1024 })).stdout;
   let root;
@@ -84,6 +93,8 @@ export async function candidateSnapshot(cwd, inputs = []) {
     if (!within(cwd, path)) throw new Error(`Verification input is outside the checkout: ${input}`);
     return relative(cwd, path);
   });
+  const objectFormat = root ? (await git("rev-parse", "--show-object-format")).trim() : "sha1";
+  const files = new Map();
   const digest = createHash("sha256").update(JSON.stringify({ cwd, head }));
   for (const name of [...new Set([...listed, ...extra])].sort()) {
     const path = join(cwd, name);
@@ -92,27 +103,53 @@ export async function candidateSnapshot(cwd, inputs = []) {
       throw error;
     });
     let content;
+    let fingerprint = null;
+    let oid = null;
+    let kind = "absent";
     if (!stat) content = "deleted";
-    else if (stat.isSymbolicLink()) content = `link:${await readlink(path)}`;
-    else if (stat.isFile()) content = `file:${stat.mode & 0o111}:${hash(await readFile(path))}`;
-    else
+    else if (stat.isSymbolicLink()) {
+      const bytes = Buffer.from(await readlink(path));
+      content = `link:${bytes.toString()}`;
+      fingerprint = hash(bytes);
+      oid = createHash(objectFormat).update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
+      kind = "symlink";
+    } else if (stat.isFile()) {
+      const file = await fileDigest(path, objectFormat);
+      fingerprint = file.digest;
+      oid = file.oid;
+      content = `file:${stat.mode & 0o111}:${fingerprint}`;
+      kind = "file";
+    } else
       throw new Error(
         `Candidate contains a directory/submodule entry: ${name}; verify that checkout separately.`,
       );
     digest.update(JSON.stringify([name, content]));
+    files.set(name, {
+      fingerprint: {
+        path: name,
+        kind,
+        digest: fingerprint,
+        executable: kind === "file" && !!(stat.mode & 0o111),
+      },
+      oid,
+    });
   }
-  return { cwd, head, digest: digest.digest("hex"), inputs: [...new Set(extra)].sort() };
+  return {
+    candidate: { cwd, head, digest: digest.digest("hex"), inputs: [...new Set(extra)].sort() },
+    files,
+    gitFiles: root ? new Set(listed) : null,
+  };
 }
 
 export async function artifact(path) {
   path = resolve(path);
   await assertNoLinks(path);
   if (!(await lstat(path)).isFile()) throw new Error(`Evidence artifact is not a file: ${path}`);
-  return { path, digest: hash(await readFile(path)) };
+  return { path, digest: (await fileDigest(path)).digest };
 }
 
 /** Run one owner-chosen check. Command success describes only that check's boundary.
- * @param {{cwd:string, output:string, command:string[], scenario:string, kind?:string, target?:string, inputs?:string[], artifacts?:string[], unverified?:string[], assignment?:string|null, agentId?:string|null, timeoutMs?:number, assertionIds?:string[], environment?:Record<string,string>, coverageFile?:string, signal?:AbortSignal}} options
+ * @param {{cwd:string, output:string, command:string[], scenario:string, kind?:string, target?:string, inputs?:string[], artifacts?:string[], unverified?:string[], assignment?:string|null, agentId?:string|null, timeoutMs?:number, assertionIds?:string[], environment?:Record<string,string>, coverageFile?:string, signal?:AbortSignal, base?:string}} options
  */
 export async function runVerification({
   cwd,
@@ -131,11 +168,14 @@ export async function runVerification({
   environment = {},
   coverageFile,
   signal,
+  base,
 }) {
   if (!command.length || !scenario?.trim()) throw new Error("A scenario and command are required");
   Evidence.shape.kind.parse(kind);
   const commandCwd = await realpath(cwd);
-  const before = await candidateSnapshot(cwd, inputs);
+  const captured = await candidateCapture(cwd, inputs);
+  const before = captured.candidate;
+  const contribution = await contributionFor(captured, base);
   cwd = before.cwd;
   output = resolve(output);
   if (within(cwd, output)) throw new Error("Evidence output must be outside the candidate checkout");
@@ -247,6 +287,7 @@ export async function runVerification({
     error,
     artifacts: await Promise.all([log, ...artifacts.map((path) => resolve(cwd, path))].map(artifact)),
     unverified,
+    contribution,
   });
   if (report.verdict === "PASS" && assertions?.results.verdict !== undefined)
     report.verdict = assertions.results.verdict;
@@ -255,6 +296,39 @@ export async function runVerification({
   const path = join(output, "report.json");
   await writeFile(path, `${JSON.stringify(report, null, 2)}\n`, { flag: "wx", mode: 0o600 });
   return { path, report };
+}
+
+/** Analysis can name an explicit file bundle within this room's artifacts, never a product checkout. */
+export async function validateAnalysisEvidence(path, root, roomArtifacts, candidate) {
+  if (!isAbsolute(root)) throw new Error("Analysis root must be absolute");
+  await assertNoLinks(root);
+  const actual = await realpath(root);
+  const artifacts = await realpath(roomArtifacts);
+  if (actual === artifacts || !within(artifacts, actual))
+    throw new Error("Analysis root must be a dedicated directory inside this room's artifacts");
+  await assertNoLinks(path);
+  const report = Evidence.parse(JSON.parse(await readFile(path, "utf8")));
+  if (
+    report.kind !== "analysis" ||
+    report.candidate.head !== null ||
+    !report.candidate.inputs.length ||
+    report.candidate.cwd !== actual
+  )
+    throw new Error(
+      "Analysis root requires an analysis report bound to explicit files in that non-Git bundle",
+    );
+  for (const input of report.candidate.inputs) {
+    const file = resolve(actual, input);
+    if (!within(actual, file)) throw new Error("Analysis input is outside the bundle");
+    await assertNoLinks(file);
+    if (!(await lstat(file)).isFile()) throw new Error("Analysis inputs must be regular files");
+  }
+  if ((await candidateCapture(actual, report.candidate.inputs)).gitFiles !== null)
+    throw new Error("Analysis root must be a non-Git file bundle");
+  const verified = await validateEvidence(path, actual, candidate);
+  if (JSON.stringify(verified) !== JSON.stringify(report))
+    throw new Error("Analysis verification report changed during review");
+  return verified;
 }
 
 export async function validateEvidence(path, cwd, candidate) {
@@ -266,13 +340,20 @@ export async function validateEvidence(path, cwd, candidate) {
     throw new Error(
       "Acceptance needs a PASS verification report; record a rejection or resolve the failed/blocked check",
     );
-  const current = await candidateSnapshot(cwd, report.candidate.inputs);
+  const captured = await candidateCapture(cwd, report.candidate.inputs);
+  const current = captured.candidate;
   if (
     report.candidate.cwd !== current.cwd ||
     report.candidate.digest !== candidate ||
     current.digest !== candidate
   )
     throw new Error("Candidate changed or evidence is stale/from another checkout; rerun the relevant check");
+  if (
+    report.contribution &&
+    JSON.stringify(await contributionFor(captured, report.contribution.base ?? undefined)) !==
+      JSON.stringify(report.contribution)
+  )
+    throw new Error("Contribution scope or output fingerprints changed; rerun verify with the reviewed base");
   if ((await projectSkills(cwd)).digest !== report.verifier.projectSkills)
     throw new Error("Project skills changed after verification; rerun the relevant check");
   for (const expected of report.artifacts) {

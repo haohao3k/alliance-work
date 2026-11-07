@@ -1,9 +1,16 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { createAllianceAgyProvider } from "./server/agy-provider";
+import { claudeAccountsState, selectClaudeAccount } from "./server/claude-accounts.mjs";
+import { claudeQuota } from "./server/claude-quota.mjs";
+import { createClaudeUsageSource } from "./server/claude-usage-source";
 import { directorySuggestions } from "./server/directories";
 import { composeInstruction } from "./server/instructions";
 import { AllianceRuntime, allianceProvider } from "./server/runtime";
+import { saveScopedProject, scopedMcpState } from "./server/scoped-mcp.mjs";
+import { installProjectSkills, previewSkillImport } from "./server/skill-imports.mjs";
+import { projectSkillSettings, saveProjectSkills } from "./server/skill-settings.mjs";
 import { autonomyCheckpoint, autonomyList, autonomyStart } from "./shared/autonomy";
+import { claudeAccountsRead, claudeAccountsSelect, claudeQuotaRead } from "./shared/claude-account-contracts";
 import {
   directoryList,
   jobOwner,
@@ -24,10 +31,15 @@ import {
   roomModelPolicySave,
   settings,
 } from "./shared/contracts";
+import { mcpPreview, mcpRead, mcpSave } from "./shared/mcp-contracts";
+import { allowedModel } from "./shared/model-policy";
+import { agentTitle } from "./shared/naming";
 import { obligationAction, obligationAdd, obligationHistory, obligationList } from "./shared/obligations";
+import { skillsInstall, skillsPreview, skillsRead, skillsSave } from "./shared/skill-contracts";
 import { wakeAction, wakeAdd, wakeList, wakeTake } from "./shared/wakeups";
 
 export default function contribute(server: PluginServerContext) {
+  server.registerUsageSource(createClaudeUsageSource());
   for (const role of ["hq", "supervisor", "lead", "peer", "lens"])
     server.registerProvider(createAllianceAgyProvider(role));
   const configuration = server.registerSettings(settings);
@@ -56,6 +68,37 @@ export default function contribute(server: PluginServerContext) {
     void get().catch(() => undefined);
   });
   void get().catch(() => undefined);
+  server.handle(mcpRead, async () => scopedMcpState((await get()).home));
+  server.handle(claudeAccountsRead, async () => claudeAccountsState((await get()).home));
+  let quotaRequest: ReturnType<typeof claudeQuota> | undefined;
+  let quotaAt = 0;
+  server.handle(claudeQuotaRead, async () => {
+    if (!quotaRequest || Date.now() - quotaAt > 60000) {
+      quotaAt = Date.now();
+      quotaRequest = claudeQuota().catch((error) => {
+        quotaRequest = undefined;
+        throw error;
+      });
+    }
+    return quotaRequest;
+  });
+  server.handle(claudeAccountsSelect, async ({ role, account, revision }) =>
+    selectClaudeAccount((await get()).home, role, account, revision),
+  );
+  server.handle(skillsRead, async ({ cwd }) => projectSkillSettings(cwd));
+  server.handle(skillsSave, async ({ cwd, selected, revision, disabledBundled }) =>
+    saveProjectSkills(cwd, selected, revision, disabledBundled),
+  );
+  server.handle(skillsPreview, async ({ source }) => previewSkillImport(source));
+  server.handle(skillsInstall, async ({ cwd, source, commit, requested, revision }) =>
+    installProjectSkills(cwd, source, commit, requested, revision),
+  );
+  server.handle(mcpSave, async ({ root, project, revision }) =>
+    saveScopedProject((await get()).home, root, project, revision),
+  );
+  server.handle(mcpPreview, async ({ cwd, harness }) => ({
+    servers: await (await get()).previewMcp(harness, cwd),
+  }));
   server.handle(obligationList, async ({ ownerId }) => (await get()).obligations.list(ownerId));
   server.handle(obligationHistory, async ({ key }) => (await get()).store.obligationHistory(key));
   server.handle(obligationAdd, async (input, { paseo }) => (await get()).obligations.add(input, paseo));
@@ -75,7 +118,14 @@ export default function contribute(server: PluginServerContext) {
   server.handle(wakeAdd, async (input) => (await get()).wakeups.add(input));
   server.handle(wakeTake, async ({ ownerId }) => (await get()).wakeups.take(ownerId));
   server.handle(wakeAction, async (input) =>
-    (await get()).wakeups.action(input.key, input.ownerId, input.revision, input.action, input.nextOwnerId),
+    (await get()).wakeups.action(
+      input.key,
+      input.ownerId,
+      input.revision,
+      input.action,
+      input.nextOwnerId,
+      input.minutes,
+    ),
   );
   server.handle(jobTrack, async (input) => (await get()).trackJob(input));
   server.handle(jobOwner, async (input, { paseo }) =>
@@ -98,7 +148,7 @@ export default function contribute(server: PluginServerContext) {
   );
   server.handle(roomModelCatalog, async ({ roomId, harness, role }, { paseo }) => ({
     models: (await (await get()).modelCatalog(roomId, harness, role, paseo))
-      .filter((model) => model.isSelectable !== false)
+      .filter((model) => model.isSelectable !== false && allowedModel(harness, model.id))
       .map((model) => ({
         id: model.id,
         label: model.label,
@@ -126,9 +176,11 @@ export default function contribute(server: PluginServerContext) {
       input.product,
       input.actorId,
       paseo,
+      input.integration,
+      input.analysisRoot,
     ),
   );
-  server.before("agent.create", async ({ request }, { paseo }) => {
+  server.addHook("agent.create.before", async ({ request }, { paseo }) => {
     if (!allianceProvider(request.config.provider)) return;
     const instance = await get();
     const instruction = await instance.instruction(request.config.provider, request.config.cwd, paseo);
@@ -144,13 +196,16 @@ export default function contribute(server: PluginServerContext) {
       ...request,
       config: {
         ...request.config,
+        title: request.config.title?.trim()
+          ? request.config.title
+          : agentTitle(room.title, allianceProvider(request.config.provider)!.role),
         ...selected,
-        mcpServers: await instance.sessionMcpServers(request.config.provider),
+        mcpServers: await instance.sessionMcpServers(request.config.provider, request.config.cwd),
         systemPrompt: composeInstruction(instruction, request.config.systemPrompt),
       },
     };
   });
-  server.before("agent.session_open", async ({ request }, { paseo }) => {
+  server.addHook("agent.open.before", async ({ request }, { paseo }) => {
     if (!allianceProvider(request.provider)) return;
     const instance = await get();
     const profile = await instance.profile(request.provider);
@@ -164,10 +219,16 @@ export default function contribute(server: PluginServerContext) {
       title: null,
     });
     const recovery = await instance.recoveryContext(request.agentId);
+    const selectedModel =
+      profile.harness === "claude"
+        ? (await paseo.agents.ref(request.agentId).refresh())?.agent.model
+        : undefined;
     return {
       ...request,
       env: {
         ...request.env,
+        // Read the current native selection on every open, including resumed sessions.
+        ALLIANCE_SESSION_MODEL: selectedModel ?? "",
         ALLIANCE_BOUND_ROOM: room.id,
         ALLIANCE_WORKSPACE_CWD: request.cwd,
         HOME: profile.osHome,
@@ -185,20 +246,28 @@ export default function contribute(server: PluginServerContext) {
       },
     };
   });
-  server.on("agent.created", async ({ agent }) => {
+  server.addHook("agent.create.after", async ({ agent }) => {
     if (allianceProvider(agent.provider)) {
       const instance = await get();
       await instance.bind(agent);
       if (agent.parentAgentId && !instance.autonomy.get(agent.id)) instance.autonomy.start(agent.id);
     }
   });
-  server.on("agent.turn_started", async ({ agent, turnId }) => {
+  server.addHook("agent.turn.before", async ({ agent, turnId }, { paseo }) => {
     if (!allianceProvider(agent.provider)) return;
-    await (await get()).startTurn(agent, turnId);
+    await (await get()).startTurn(agent, turnId, paseo);
   });
-  server.on("agent.turn_ended", async (event) => {
+  server.addHook("agent.turn.after", async (event, { paseo }) => {
     if (allianceProvider(event.agent.provider))
-      await (await get()).endTurn(event.agent, event.turnId, event.outcome, event.timeline);
+      await (await get()).endTurn(event.agent, event.turnId, event.outcome, undefined, paseo);
+  });
+  // Nobody approves a member's commands: the plugin denies a request 5 minutes after this.
+  server.addHook("agent.permission.before", async ({ agent, request }) => {
+    if (allianceProvider(agent.provider)) (await get()).liveness.requested(agent.id, request.id);
+  });
+  // Without this the scheduler learns of an archive only when it next reads the agent.
+  server.addHook("agent.archive.after", async ({ agent }) => {
+    if (allianceProvider(agent.provider)) await (await get()).lifecycle.archived(agent.id);
   });
   return async () => {
     unsubscribe();

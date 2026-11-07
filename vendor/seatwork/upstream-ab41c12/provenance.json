@@ -1,0 +1,120 @@
+{
+  "version": 1,
+  "repository": "https://github.com/sting9k/seatwork.git",
+  "revision": "ab41c1200d3e13ec7d07068523f52e53607d9c0c",
+  "files": [
+    {
+      "path": "vendor/seatwork/upstream-ab41c12/skills/peer/test-audit/SKILL.md",
+      "source": "plugin/room/skills/peer/test-audit/SKILL.md",
+      "sha256": "8dfb184ffa6db11d5c96bb149bd3bbe624b1634fe8682134ed3c942885951b6b"
+    },
+    {
+      "path": "vendor/seatwork/upstream-ab41c12/skills/peer/test-audit/references/audit.md",
+      "source": "plugin/room/skills/peer/test-audit/references/audit.md",
+      "sha256": "892da31e92ccb6e14d09c4409867551012851d0ce1911583674e97df79361a7b"
+    },
+    {
+      "path": "vendor/seatwork/upstream-ab41c12/skills/peer/blast-radius/SKILL.md",
+      "source": "plugin/room/skills/peer/blast-radius/SKILL.md",
+      "sha256": "a56097bfeebd23cca63e88804fc2389ff9ff8cb705f39746b2fbfb113f64dcd8"
+    },
+    {
+      "path": "vendor/seatwork/upstream-ab41c12/skills/supervisor/friction/SKILL.md",
+      "source": "plugin/room/skills/supervisor/friction/SKILL.md",
+      "sha256": "8329c031131fb62cea6372763be95e46b3fb5fa5c3d6249489c6499ab9ad198d"
+    },
+    {
+      "path": "vendor/seatwork/upstream-ab41c12/skills/NOTICE.md",
+      "source": "plugin/room/skills/NOTICE.md",
+      "sha256": "99397580c588d19b11beeaad61374a674d1e39d9e52ad5dbd2fb6c839cdaf386"
+    },
+    {
+      "path": "vendor/seatwork/upstream-ab41c12/skills/LICENSE-APACHE-2.0.txt",
+      "source": "plugin/room/skills/LICENSE-APACHE-2.0.txt",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    }
+  ],
+  "adaptations": [
+    {
+      "name": "alliance-test-audit",
+      "directory": "room/skills/alliance-test-audit",
+      "changes": [
+        "Use assignment scope and native Alliance handback vocabulary.",
+        "Preserve repository-required checks; do not claim a Seatwork hand-in guard exists in Alliance.",
+        "Review-only scope stays read-only; already authorized fixes need no additional approval."
+      ],
+      "files": [
+        {
+          "path": "room/skills/alliance-test-audit/SKILL.md",
+          "sources": [
+            "vendor/seatwork/upstream-ab41c12/skills/peer/test-audit/SKILL.md"
+          ]
+        },
+        {
+          "path": "room/skills/alliance-test-audit/NOTICE.md",
+          "sources": [
+            "vendor/seatwork/upstream-ab41c12/skills/NOTICE.md"
+          ]
+        },
+        {
+          "path": "room/skills/alliance-test-audit/references/audit.md",
+          "sources": [
+            "vendor/seatwork/upstream-ab41c12/skills/peer/test-audit/references/audit.md"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "alliance-blast-radius",
+      "directory": "room/skills/alliance-blast-radius",
+      "changes": [
+        "Bound adjacent fixes by the actual assignment.",
+        "Run destructive controls or mutation in a disposable copy; preserve shared working changes.",
+        "Report through the Alliance handback and distinguish native runtime proof from component proof."
+      ],
+      "files": [
+        {
+          "path": "room/skills/alliance-blast-radius/SKILL.md",
+          "sources": [
+            "vendor/seatwork/upstream-ab41c12/skills/peer/blast-radius/SKILL.md"
+          ]
+        },
+        {
+          "path": "room/skills/alliance-blast-radius/NOTICE.md",
+          "sources": [
+            "vendor/seatwork/upstream-ab41c12/skills/NOTICE.md"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "alliance-friction",
+      "directory": "room/skills/alliance-friction",
+      "changes": [
+        "Read native Paseo state and Alliance assignments, obligations, jobs, wakeups and decision evidence.",
+        "Use the responsible owner and existing engineering laws, without compulsory hierarchy.",
+        "Treat repeated events as a pattern rather than requiring a second incident before correcting a real fault."
+      ],
+      "files": [
+        {
+          "path": "room/skills/alliance-friction/SKILL.md",
+          "sources": [
+            "vendor/seatwork/upstream-ab41c12/skills/supervisor/friction/SKILL.md"
+          ]
+        },
+        {
+          "path": "room/skills/alliance-friction/NOTICE.md",
+          "sources": [
+            "vendor/seatwork/upstream-ab41c12/skills/NOTICE.md"
+          ]
+        },
+        {
+          "path": "room/skills/alliance-friction/LICENSE-APACHE-2.0.txt",
+          "sources": [
+            "vendor/seatwork/upstream-ab41c12/skills/LICENSE-APACHE-2.0.txt"
+          ]
+        }
+      ]
+    }
+  ]
+}

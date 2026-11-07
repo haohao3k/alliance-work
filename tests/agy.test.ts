@@ -3,7 +3,9 @@ import { execFileSync } from "node:child_process";
 import { lstat, mkdir, readFile, readlink, rename, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
+import type { PluginServerContext } from "@getpaseo/plugin/server";
 import type { ProviderSessionConfig } from "@getpaseo/plugin/server/provider";
+import contribute from "../index.server";
 import { linkAgyAuth, setAgyAuthSource } from "../scripts/agy-auth.mjs";
 import { launchPlan, profileEnvironment } from "../scripts/launch.mjs";
 import { prepareProfiles } from "../scripts/profiles.mjs";
@@ -11,6 +13,7 @@ import { enableMobbin } from "../scripts/user-mcp.mjs";
 import { agyEffort, prepareAgySession } from "../server/agy-provider";
 import { chooseModel } from "../server/model-policy";
 import { allianceProvider } from "../server/runtime";
+import { projectSkillSettings, saveProjectSkills } from "../server/skill-settings.mjs";
 import { defaultModelPolicy } from "../shared/model-policy";
 import { temporary } from "./temp";
 
@@ -51,6 +54,42 @@ async function fixture() {
   return { home, cwd, manifest, profile, config };
 }
 
+test("AGY every role uses the saved skill toggles on fresh session configuration without importing project defaults", async () => {
+  const f = await fixture();
+  await mkdir(join(f.cwd, ".agents/skills/toggle-probe"), { recursive: true });
+  await writeFile(
+    join(f.cwd, ".agents/skills/toggle-probe/SKILL.md"),
+    "---\nname: toggle-probe\ndescription: Toggle sentinel.\n---\nFixture.\n",
+  );
+  let state = await projectSkillSettings(f.cwd);
+  const all = state.bundled.map((s) => s.name);
+  for (const enabled of [true, false, false, true]) {
+    state = await saveProjectSkills(
+      f.cwd,
+      enabled ? [".agents/skills/toggle-probe"] : [],
+      state.revision,
+      enabled ? [] : all,
+    );
+    for (const role of ["hq", "supervisor", "lead", "peer", "lens"]) {
+      const profile = f.manifest.profiles[`agy-${role}`];
+      const config = { ...f.config, env: { ...f.config.env, HOME: profile.osHome, ALLIANCE_ROLE: role } };
+      const session = await prepareAgySession(config);
+      try {
+        const body = await readFile(join(session.agentDirectory, "agent.md"), "utf8");
+        const front = JSON.parse(body.split("---\n")[1]);
+        assert.equal(front.inheritCustomizations, false);
+        assert.deepEqual(
+          front.skills,
+          enabled ? [...profile.skillDirectories, join(f.cwd, ".agents/skills/toggle-probe")] : [],
+          `${role} ${enabled}`,
+        );
+      } finally {
+        await session.dispose();
+      }
+    }
+  }
+});
+
 test("AGY roles isolate HOME and sessions without falling into Codex launch flags", async () => {
   const f = await fixture();
   assert.equal(Object.values(f.manifest.profiles).filter((p) => p.harness === "agy").length, 5);
@@ -72,6 +111,8 @@ test("AGY roles isolate HOME and sessions without falling into Codex launch flag
     assert(!plan.args.includes("-c"));
     assert(!plan.args.includes("--no-daemon"));
     assert.equal(plan.env.HOME, f.profile.osHome);
+    // AGY sessions launch through the same plan, so their commands do not wait for input either.
+    assert.equal(plan.env.COREPACK_ENABLE_DOWNLOAD_PROMPT, "0");
     const mcpPath = join(a.path, ".agents/mcp_config.json");
     assert.equal((await stat(mcpPath)).mode & 0o777, 0o600);
     const mcp = JSON.parse(await readFile(mcpPath, "utf8"));
@@ -170,18 +211,110 @@ test("AGY model IDs retain their actual effort and obey the room allowlist", () 
     return { id, provider: "alliance-agy-peer", label: id, thinkingOptions: [{ id: effort, label: effort }] };
   });
   assert.equal(agyEffort("gemini-4-argon-medium"), "medium");
-  const policy = defaultModelPolicy();
+  // Exercise explicitly saved AGY policies; new rooms select Gemini through Pi.
+  const defaults = defaultModelPolicy();
+  const policy = {
+    ...defaults,
+    routes: defaults.routes.map((route) =>
+      route.model === "antigravity/gemini-4-argon"
+        ? { ...route, harness: "agy" as const, model: `gemini-4-argon-${route.effort}` }
+        : route,
+    ),
+  };
   assert.equal(chooseModel(policy, "peer", "agy", catalog).model, "gemini-4-argon-medium");
   assert.equal(chooseModel(policy, "lens", "agy", catalog).model, "gemini-4-argon-high");
   assert.throws(
     () => chooseModel(policy, "peer", "agy", catalog, "gemini-4-argon-high", "high"),
     /No allowed/,
   );
-  // The AGY Sonnet detour of 0.1.17 is no longer a listed Peer route.
-  assert.throws(
-    () => chooseModel(policy, "peer", "agy", catalog, "claude-sonnet-5-5-high", "high"),
-    /No allowed/,
-  );
+});
+
+test("AGY runs only Gemini models: no role launches another, and the Models page neither offers nor saves one", async () => {
+  const f = await fixture();
+  const live = [
+    "gemini-4-argon-medium",
+    "gemini-4-argon-high",
+    "claude-sonnet-5-5-medium",
+    "claude-sonnet-5-5-high",
+  ];
+  const catalog = live.map((id) => {
+    const effort = agyEffort(id) ?? "";
+    return { id, provider: "alliance-agy-peer", label: id, thinkingOptions: [{ id: effort, label: effort }] };
+  });
+  // Exercise explicitly saved AGY policies; new rooms select Gemini through Pi.
+  const defaults = defaultModelPolicy();
+  const policy = {
+    ...defaults,
+    routes: defaults.routes.map((route) =>
+      route.model === "antigravity/gemini-4-argon"
+        ? { ...route, harness: "agy" as const, model: `gemini-4-argon-${route.effort}` }
+        : route,
+    ),
+  };
+  // Owners may otherwise pick any live model; here no role may.
+  for (const role of ["hq", "supervisor", "lead", "peer", "lens"] as const)
+    assert.throws(
+      () => chooseModel(policy, role, "agy", catalog, "claude-sonnet-5-5-high", "high"),
+      /AGY runs only Gemini models/,
+    );
+  // A room list saved earlier with an AGY Claude route: launches skip it for the next route.
+  const earlier = {
+    ...policy,
+    routes: [
+      {
+        ...policy.routes[0],
+        harness: "agy" as const,
+        model: "claude-sonnet-5-5-high",
+        effort: "high" as const,
+      },
+      ...policy.routes.map((route) =>
+        route.role === "peer" ? { ...route, priority: route.priority + 1 } : route,
+      ),
+    ],
+  };
+  assert.equal(chooseModel(earlier, "peer", "agy", catalog).model, "gemini-4-argon-medium");
+  const handlers = new Map<string, (input: unknown, context: unknown) => Promise<unknown>>();
+  const dispose = contribute({
+    registerProvider() {},
+    registerUsageSource() {},
+    registerSettings: () => ({
+      read: async () => ({ status: "ready", values: { home: f.home } }),
+      subscribe: () => () => {},
+    }),
+    // The daemon validates RPC input before the handler runs.
+    handle: (
+      rpc: { name: string; input: { parse(value: unknown): unknown } },
+      handler: (input: unknown, context: unknown) => Promise<unknown>,
+    ) => handlers.set(rpc.name, (input, context) => handler(rpc.input.parse(input), context)),
+    addHook() {},
+  } as unknown as PluginServerContext);
+  try {
+    const paseo = {
+      workspaces: {
+        open: async () => ({
+          id: "agy-workspace",
+          refresh: async () => ({ title: null }),
+          setTitle: async () => ({}),
+        }),
+      },
+      providers: { listModels: async () => ({ models: catalog }) },
+    };
+    const call = (method: string, input: unknown) => handlers.get(method)?.(input, { paseo });
+    const room = (await call("rooms.create", { cwd: f.cwd })) as { id: string };
+    const offered = (await call("models.catalog", { roomId: room.id, harness: "agy", role: "peer" })) as {
+      models: { id: string }[];
+    };
+    assert.deepEqual(
+      offered.models.map((model) => model.id),
+      ["gemini-4-argon-medium", "gemini-4-argon-high"],
+    );
+    await assert.rejects(
+      call("models.save", { roomId: room.id, policy: earlier, revision: 0 }) as Promise<unknown>,
+      /AGY runs only Gemini models/,
+    );
+  } finally {
+    await dispose();
+  }
 });
 
 test("dedicated AGY auth links follow native refresh without copying tokens or replacing another login", async () => {

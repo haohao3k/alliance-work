@@ -10,6 +10,8 @@ const archivePattern = /^alliance-work-(v\d+\.\d+\.\d+)\.tar\.gz$/;
 export const hostPattern = /^[A-Za-z0-9._@-]+$/;
 /** Exit status of an activation refused because the runtime was busy, with nothing changed. */
 export const BUSY_EXIT = 75;
+export const holdNeedsWait =
+  "--hold needs --wait-idle; without a wait the update pauses scheduled prompts for its whole run.";
 
 /**
  * A release copied from a verified GitHub release by `deploy`: exactly one archive plus the
@@ -79,10 +81,11 @@ export async function waitForIdle(
 
 /**
  * Remote half of deploy. Arguments: bundle directory, tag, wait minutes (or 0), home ("" means
- * default). Writes the exit status to $BUNDLE/rc; the caller keeps the log in $BUNDLE/deploy.log.
+ * default), and "hold" for update --hold. Writes the exit status to $BUNDLE/rc; the caller keeps
+ * the log in $BUNDLE/deploy.log.
  */
 export const remoteScript = `#!/bin/sh
-BUNDLE="$1"; TAG="$2"; WAIT="$3"; HOME_DIR="\${4:-}"
+BUNDLE="$1"; TAG="$2"; WAIT="$3"; HOME_DIR="\${4:-}"; HOLD="\${5:-}"
 finish() {
   rc=$?
   rm -rf "$BUNDLE/boot" "$BUNDLE/alliance-work-$TAG.tar.gz"
@@ -104,12 +107,23 @@ NODE=$(sed -n "s/^exec '\\([^']*\\)'.*/\\1/p" "$BIN" | head -n 1)
 PATH="$(dirname "$NODE"):$PATH"; export PATH
 WAIT_ARGS=""
 [ "$WAIT" = "0" ] || WAIT_ARGS="--wait-idle $WAIT"
-if "$BIN" --help 2>/dev/null | grep -q -- "--bundle"; then
+[ -z "$HOLD" ] || WAIT_ARGS="$WAIT_ARGS --hold"
+# Before 0.1.19 a waiting update paused every scheduled prompt for its whole wait; such a host
+# waits with the candidate's CLI below, which pauses them only while it activates, or from the
+# end of staging with --hold.
+OLD_WAIT=""
+if [ "$WAIT" != "0" ]; then
+  case "$("$BIN" --version 2>/dev/null || true)" in
+    ""|0.0.*|0.1.[0-9]|0.1.[0-9][-+]*|0.1.1[0-8]|0.1.1[0-8][-+]*) OLD_WAIT=1 ;;
+  esac
+fi
+if [ -z "$OLD_WAIT" ] && "$BIN" --help 2>/dev/null | grep -q -- "--bundle"; then
   "$BIN" update --bundle "$BUNDLE" $WAIT_ARGS
   exit 0
 fi
-# This installation predates bundles. Verify the archive, then run the candidate's own CLI once;
-# it stages a fresh copy, checks it and activates it exactly as a normal update does.
+# This installation predates bundles, or waits the old way. Verify the archive, then run the
+# candidate's own CLI once; it stages a fresh copy, checks it and activates it exactly as a
+# normal update does.
 "$NODE" -e '
 const { createHash } = require("node:crypto");
 const { readFileSync } = require("node:fs");
@@ -192,7 +206,7 @@ export function parseFollow(bytes) {
  * or a dropped connection neither cancels it nor loses its outcome. Without --detach the
  * controller follows the log until the remote side writes its exit status.
  */
-async function deployHost(host, files, release, { waitIdle, detach, remoteHome, poll = 10000 }) {
+async function deployHost(host, files, release, { waitIdle, hold, detach, remoteHome, poll = 10000 }) {
   // Staging and checks take minutes; waiting for idleness takes at most waitIdle minutes.
   const followUntil = Date.now() + ((waitIdle ?? 0) + 60) * 60000;
   // biome-ignore lint/suspicious/noTemplateCurlyInString: the remote shell expands TMPDIR.
@@ -201,7 +215,14 @@ async function deployHost(host, files, release, { waitIdle, detach, remoteHome, 
   if (!/^\/[A-Za-z0-9._/+-]+$/.test(made)) throw new Error(`Unexpected remote directory from ${host}`);
   await must("scp", ["-q", ...sshOptions, ...files, `${host}:${made}/`], "scp");
   const log = `${made}/deploy.log`;
-  const args = [`${made}/deploy.sh`, made, release.tagName, String(waitIdle ?? 0), remoteHome ?? ""]
+  const args = [
+    `${made}/deploy.sh`,
+    made,
+    release.tagName,
+    String(waitIdle ?? 0),
+    remoteHome ?? "",
+    hold ? "hold" : "",
+  ]
     .map((value) => `'${value}'`)
     .join(" ");
   await must("ssh", [...sshOptions, host, `nohup sh ${args} > '${log}' 2>&1 < /dev/null &`], "start");
@@ -244,11 +265,12 @@ async function deployHost(host, files, release, { waitIdle, detach, remoteHome, 
  * Push one verified GitHub release to other machines over SSH and activate it there with the
  * same staged update path. Only this controller needs GitHub access.
  */
-/** @param {{hosts: string[], tag?: string, waitIdle?: number, detach?: boolean, remoteHome?: string, poll?: number}} options */
-export async function deploy({ hosts, tag, waitIdle = 0, detach = false, remoteHome, poll }) {
+/** @param {{hosts: string[], tag?: string, waitIdle?: number, hold?: boolean, detach?: boolean, remoteHome?: string, poll?: number}} options */
+export async function deploy({ hosts, tag, waitIdle = 0, hold = false, detach = false, remoteHome, poll }) {
   if (!hosts.length) throw new Error("Name at least one --host, or save a fleet with --remember.");
   for (const host of hosts) if (!hostPattern.test(host)) throw new Error(`Unsupported host name: ${host}`);
   if (!Number.isFinite(waitIdle) || waitIdle < 0) throw new Error("--wait-idle takes minutes (0 or more).");
+  if (hold && !waitIdle) throw new Error(holdNeedsWait);
   if (remoteHome && !/^\/[A-Za-z0-9._/-]+$/.test(remoteHome))
     throw new Error("--remote-home must be absolute.");
   if (waitIdle && !detach && (process.env.PASEO_AGENT_ID || process.env.ALLIANCE_ROLE))
@@ -276,7 +298,7 @@ export async function deploy({ hosts, tag, waitIdle = 0, detach = false, remoteH
     const files = [join(local, name), join(local, "checksums.txt"), join(local, "deploy.sh")];
     const results = await Promise.all(
       hosts.map((host) =>
-        deployHost(host, files, release, { waitIdle, detach, remoteHome, poll }).catch((error) => ({
+        deployHost(host, files, release, { waitIdle, hold, detach, remoteHome, poll }).catch((error) => ({
           host,
           ok: false,
           error: error.message,

@@ -8,8 +8,8 @@ import type {
 } from "@getpaseo/plugin/server/provider";
 // Keep the pinned Paseo wire protocol, process supervision and transcript implementation.
 import { createAntigravityProvider } from "./agy-native/provider";
+import { effectiveSkills } from "./bundled-skills.mjs";
 import { assertNoLinks, verifyProfile } from "./profile-integrity.mjs";
-import { projectSkills } from "./project-skills.mjs";
 import { userMcpServers } from "./user-mcp.mjs";
 
 export function agyEffort(model: string) {
@@ -49,8 +49,8 @@ export async function prepareAgySession(config: ProviderSessionConfig) {
   const agentDirectory = join(profile.osHome, ".gemini/config/agents", name);
   try {
     await assertNoLinks(agentDirectory);
-    const selected = await projectSkills(config.cwd);
-    const skills = [...profile.skillDirectories, ...selected.skills.map((skill) => skill.directory)];
+    const selected = await effectiveSkills(config.cwd, profile);
+    const skills = selected.skills.map((skill) => skill.directory);
     const instructions =
       config.systemPrompt ?? (await readFile(join(profile.home, "root-instructions.md"), "utf8"));
     const agent = join(agentDirectory, "agent.md");
@@ -72,7 +72,7 @@ export async function prepareAgySession(config: ProviderSessionConfig) {
       join(path, ".agents/mcp_config.json"),
       JSON.stringify({
         mcpServers: {
-          ...(await userMcpServers(home, "agy", manifest.root)),
+          ...(await userMcpServers(home, "agy", manifest.root, config.cwd)),
           ...Object.fromEntries(
             servers.map(([name, server]) => {
               if (server.type !== "http") throw new Error("Expected HTTP MCP");

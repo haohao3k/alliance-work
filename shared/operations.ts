@@ -5,6 +5,31 @@ export function responsibleOwner(member: {
   return member.ownership ? member.ownership.ownerId : member.parentId;
 }
 
+/** The harness of an Alliance provider alias (alliance-claude-peer → claude), or null. */
+export const harnessOf = (provider: string) => /^alliance-(codex|claude|pi|agy)-/.exec(provider)?.[1] ?? null;
+
+/** Not working: a finished session is idle, and closed once Paseo unloads it (e.g. after a restart). */
+export const atRest = (status: string) => status === "idle" || status === "closed";
+
+/**
+ * Whether a plugin prompt may be sent now. Paseo loads a closed session when it receives a prompt,
+ * so idle and closed agents qualify; an archived one would be restored by the send, a pending
+ * permission must be answered first, and a provider that cannot load refuses the prompt.
+ */
+export function deliverable(agent: {
+  status: string;
+  archivedAt?: string | null;
+  pendingPermissions?: readonly unknown[] | null;
+  providerUnavailable?: boolean;
+}) {
+  return (
+    atRest(agent.status) &&
+    !agent.archivedAt &&
+    !agent.pendingPermissions?.length &&
+    !agent.providerUnavailable
+  );
+}
+
 export type OwnerAgent = { id: string; title: string; status: string; archived: boolean };
 export function ownerState(id: string | null, agents: readonly OwnerAgent[]) {
   if (!id) return { ownerId: null, ownerLabel: "Human", ownerStatus: "human" };

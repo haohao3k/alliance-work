@@ -44,6 +44,18 @@ It does not judge whether a weak check proves a strong claim. Use engineering ju
 the existing proof-debt audit when that specific question warrants it. If code or inputs
 change after verification, rerun the affected check rather than rewriting the report.
 
+When handing code to an integrating owner, add `--base BASE_SHA` for the reviewed starting commit.
+This captures the contribution's output scope; preserve the report and its artifacts after the
+worktree is removed. For non-Git work, explicit `--input` files define that scope. The owner verifies
+the final integrated runtime before product acceptance. Every currently accepted direct child's
+contribution is checked, including archived children: a merge needs reachable source HEAD and
+matching final output bytes. Squash/cherry-pick, copied output and non-code review use an explicit
+`accept --integration PLAN.json --product JOURNEY.json` mapping; later replacement of an output
+needs a pinned supersession. See `docs/verification.md` under the installation root for the schema.
+Do not relabel code as review or omit a contributor to bypass an inclusion mismatch. A new child
+decision or changed final evidence requires another parent review; technical acceptance stays
+available for a check that does not claim an integrated product.
+
 For a project with a feature map, run its declared scenarios and collect executed coverage:
 
     alliance-work verify --map .alliance/features.json --feature FEATURE_ID

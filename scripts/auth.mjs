@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, readFile, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { createInterface } from "node:readline";
+import { StringDecoder } from "node:string_decoder";
 import { assertNoLinks, atomicWrite } from "./profiles.mjs";
 
 export async function authSource(home) {
@@ -68,6 +68,35 @@ export async function authStatus(home) {
   }
 }
 
+// JSON leaves U+2028/U+2029 unescaped, but Node readline splits lines on them. Command output
+// from Office documents often contains them, so split on "\n" only and escape them on the way out
+// (Paseo reads this stdout with readline too).
+function jsonLine(message) {
+  return `${JSON.stringify(message).replace(/[\u2028\u2029]/g, (c) => (c === "\u2028" ? "\\u2028" : "\\u2029"))}\n`;
+}
+
+function lineReader(stream) {
+  const handlers = [];
+  const decoder = new StringDecoder("utf8");
+  let pending = "";
+  const onData = (chunk) => {
+    const text = typeof chunk === "string" ? chunk : decoder.write(chunk);
+    let start = 0;
+    for (let end = text.indexOf("\n"); end !== -1; end = text.indexOf("\n", start)) {
+      const line = (pending + text.slice(start, end)).replace(/\r$/, "");
+      pending = "";
+      start = end + 1;
+      if (line.trim()) for (const handler of handlers) handler(line);
+    }
+    pending += text.slice(start);
+  };
+  stream.on("data", onData);
+  return {
+    on: (_event, handler) => handlers.push(handler),
+    close: () => stream.off("data", onData),
+  };
+}
+
 // Only auth messages are handled here. Paseo owns every thread, turn, tool and permission.
 // Tokens stay on the child's private stdin; neither the parent protocol nor logs receive them.
 export function bridgeCodexAuth({
@@ -79,13 +108,13 @@ export function bridgeCodexAuth({
   const internalId = `alliance-auth-${randomUUID()}`;
   let closed = false;
   const toChild = (message) => {
-    if (!closed && !child.stdin.destroyed) child.stdin.write(JSON.stringify(message) + "\n");
+    if (!closed && !child.stdin.destroyed) child.stdin.write(jsonLine(message));
   };
   const toParent = (message) => {
-    if (!closed && !output.destroyed) output.write(JSON.stringify(message) + "\n");
+    if (!closed && !output.destroyed) output.write(jsonLine(message));
   };
-  const client = createInterface({ input });
-  const server = createInterface({ input: child.stdout });
+  const client = lineReader(input);
+  const server = lineReader(child.stdout);
   let initializeId,
     initializeResponse,
     lastCredentials,

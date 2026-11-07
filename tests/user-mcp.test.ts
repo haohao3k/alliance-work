@@ -25,16 +25,22 @@ test("native agent creation retains approved Codex MCP in the per-thread config 
   const hooks = new Map<string, (...args: any[]) => any>();
   const dispose = contribute({
     registerProvider() {},
+    registerUsageSource() {},
     registerSettings: () => ({
       read: async () => ({ status: "ready", values: { home } }),
       subscribe: () => () => {},
     }),
     handle() {},
-    on() {},
-    before: (name: string, handler: (...args: any[]) => any) => hooks.set(name, handler),
+    addHook: (name: string, handler: (...args: any[]) => any) => hooks.set(name, handler),
   } as unknown as PluginServerContext);
   const paseo = {
-    workspaces: { open: async () => ({ id: "mcp-fixture-workspace" }) },
+    workspaces: {
+      open: async () => ({
+        id: "mcp-fixture-workspace",
+        refresh: async () => ({ title: null }),
+        setTitle: async () => ({}),
+      }),
+    },
     providers: {
       listModels: async () => ({
         models: ["gpt-6.1-sol", "gpt-6-astra"].map((id) => ({
@@ -59,7 +65,13 @@ test("native agent creation retains approved Codex MCP in the per-thread config 
           },
         },
       };
-      const result = await hooks.get("agent.create")!({ request }, { paseo });
+      const result = await hooks.get("agent.create.before")!({ request }, { paseo });
+      assert.match(result.config.title, / · (HQ|Supervisor|Lead|Peer|Lens)$/u);
+      const manual = await hooks.get("agent.create.before")!(
+        { request: { config: { ...request.config, title: "Ryzen | HQ" } } },
+        { paseo },
+      );
+      assert.equal(manual.config.title, "Ryzen | HQ");
       assert.deepEqual(Object.keys(result.config.mcpServers), ["mobbin"]);
       assert.equal(result.config.mcpServers.mobbin.type, "stdio");
       assert.equal(result.config.mcpServers.mobbin.command, process.execPath);

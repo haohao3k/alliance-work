@@ -53,14 +53,16 @@ const PEER: Omit<ModelRouteValue, "role" | "priority" | "difficulties">[] = [
   { harness: "claude", model: "claude-sonnet-5-5", effort: "high" },
   { harness: "claude", model: "claude-sonnet-5-5", effort: "medium" },
   { harness: "codex", model: "gpt-6.1-sol", effort: "high" },
-  { harness: "agy", model: "gemini-4-argon-medium", effort: "medium" },
+  { harness: "pi", model: "antigravity/gemini-4-argon", effort: "medium" },
+  { harness: "pi", model: "antigravity/gemini-3.8-flash", effort: "medium" },
   { harness: "pi", model: "zai/glm-5.3", effort: "high" },
   { harness: "pi", model: "izno-vps/ds/deepseek-v4.1-flash", effort: "high" },
 ];
 const LENS: Omit<ModelRouteValue, "role" | "priority" | "difficulties">[] = [
   { harness: "claude", model: "claude-opus-5-5", effort: "medium" },
   { harness: "codex", model: "gpt-6-astra", effort: "medium" },
-  { harness: "agy", model: "gemini-4-argon-high", effort: "high" },
+  { harness: "pi", model: "antigravity/gemini-4-argon", effort: "high" },
+  { harness: "pi", model: "antigravity/gemini-3.8-flash", effort: "high" },
 ];
 
 export function defaultModelPolicy(): ModelPolicyValue {
@@ -69,14 +71,29 @@ export function defaultModelPolicy(): ModelPolicyValue {
   return { leadEffort: "medium", routes: [...ranked("peer", PEER), ...ranked("lens", LENS)] };
 }
 
+/**
+ * The Human's rule: AGY runs only Gemini models, for every role. Enforced when a model is chosen,
+ * offered or saved, never when stored lists are read, so older saved lists stay readable.
+ */
+export const allowedModel = (harness: string, model: string) =>
+  harness !== "agy" || model.startsWith("gemini-");
+export const refusedModel = (model: string) =>
+  `AGY runs only Gemini models; ${model} is refused for every role. Choose a gemini-* model.`;
+
 // Pi model IDs include the backend. Do not accept arbitrary aliases or suffix matches.
 export function isEconomicalOwnerModel(harness: string, model: string): boolean {
   if (harness === "codex") return model === "gpt-6.1-sol";
   if (harness === "claude") return model === "claude-sonnet-5-5";
-  if (harness === "agy") return model === "claude-sonnet-5-5-medium";
+  if (harness === "agy") return model === "gemini-4-argon-medium";
   return (
     harness === "pi" &&
-    ["openai/gpt-6.1-sol", "openai-codex/gpt-6.1-sol", "anthropic/claude-sonnet-5-5"].includes(model)
+    [
+      "antigravity/gemini-3.8-flash",
+      "antigravity/gemini-4-argon",
+      "openai/gpt-6.1-sol",
+      "openai-codex/gpt-6.1-sol",
+      "anthropic/claude-sonnet-5-5",
+    ].includes(model)
   );
 }
 
@@ -91,9 +108,8 @@ export function policyInstruction(policy: ModelPolicyValue, revision: number): s
       )
       .join("\n");
   return `# Room model policy (revision ${revision})
-HQ/Supervisor/Lead default to gpt-6.1-sol or claude-sonnet-5-5. Select Astra/Opus explicitly for a named hard decision, diagnosis or integration risk; record why the cheaper route is insufficient.
+HQ/Supervisor/Lead default to gpt-6.1-sol, claude-sonnet-5-5 or Pi antigravity/gemini-3.8-flash (antigravity/gemini-4-argon for demanding Gemini work); use Pi for Gemini. Select Astra/Opus explicitly for a named hard decision, diagnosis or integration risk; record why the cheaper route is insufficient.
 Preferred owner effort when omitted: ${policy.leadEffort}; otherwise use the selected model's supported default.
-Peer is the default implementation role. Add a Lead for integration, a Supervisor for multiple workstreams, or HQ for cross-project decisions only when that responsibility is needed. Do not create a hierarchy just to forward work.
 Peer and Lens each have their own allowlist below, in the Human's order of preference (1 is the first choice).
 Use the first route that is available and suits the work; move down the list when a route is unavailable, out of quota or unsuited, and record why. A route marked "only" applies to those difficulties.
 Lead chooses the difficulty and final route; Supervisor/HQ may intervene with reasons and evidence.

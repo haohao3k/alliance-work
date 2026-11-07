@@ -1,5 +1,16 @@
-node_modules/
+node_modules
 .runtime/
 *.log
 .DS_Store
 dist/
+# Local credentials must never enter source or release archives.
+.env
+.env.*
+!.env.example
+.npmrc
+.netrc
+auth.json
+credentials.json
+*.key
+*.p12
+*.pfx

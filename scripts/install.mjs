@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import { commandClient } from "./command-client.mjs";
 import { instanceState, paseo, reloadRegisteredPlugin, requireIdle, verifyRuntime } from "./paseo.mjs";
 import { atomicWrite, loadManifest, projectRoot } from "./profiles.mjs";
 
@@ -74,7 +74,7 @@ export async function install({ home, paseoHome, port = 6771, root = projectRoot
   paseo(["daemon", "reload"], paseoHome, root);
   if (installed) await reloadRegisteredPlugin(paseoHome, root);
   else paseo(["plugin", "install", root, "--id", "alliance-work"], paseoHome, root);
-  const client = new DaemonClient({
+  const client = commandClient({
     url: `ws://${config.daemon.listen}/ws`,
     clientId: "alliance-installer",
     password: process.env.ALLIANCE_PASEO_PASSWORD,

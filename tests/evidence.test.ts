@@ -1,10 +1,51 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { execFile, execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdir, open, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
+import { promisify } from "node:util";
 import { runVerification, validateEvidence } from "../server/evidence.mjs";
 import { temporary } from "./temp";
+
+test("large evidence and candidate files are hashed without retaining a file-sized buffer", async () => {
+  const cwd = await temporary("alliance-large-evidence-");
+  const path = join(cwd, "large.bin");
+  const size = 128 * 1024 * 1024;
+  const handle = await open(path, "wx");
+  await handle.truncate(size);
+  await handle.close();
+  const source = `
+    import {artifact, candidateCapture} from ${JSON.stringify(new URL("../server/evidence.mjs", import.meta.url).href)};
+    let peak = process.memoryUsage().arrayBuffers;
+    const sample = () => { peak = Math.max(peak, process.memoryUsage().arrayBuffers); };
+    const timer = setInterval(sample, 1);
+    try {
+      const proof = await artifact(process.argv[1]);
+      sample();
+      const captured = await candidateCapture(process.argv[2], ['large.bin']);
+      sample();
+      console.log(JSON.stringify({peak, proof, file: captured.files.get('large.bin')}));
+    } finally { clearInterval(timer); }
+  `;
+  const { stdout } = await promisify(execFile)(
+    process.execPath,
+    ["--max-old-space-size=32", "--input-type=module", "-e", source, path, cwd],
+    { timeout: 30000 },
+  );
+  const result = JSON.parse(stdout);
+  const sha = createHash("sha256");
+  const blob = createHash("sha1").update(`blob ${size}\0`);
+  const chunk = Buffer.alloc(1024 * 1024);
+  for (let i = 0; i < 128; i++) {
+    sha.update(chunk);
+    blob.update(chunk);
+  }
+  assert.equal(result.proof.digest, sha.digest("hex"));
+  assert.equal(result.file.fingerprint.digest, result.proof.digest);
+  assert.equal(result.file.oid, blob.digest("hex"));
+  assert.ok(result.peak < size / 2, `hashing retained ${result.peak} bytes in buffers`);
+});
 
 test("evidence binds the actual command, candidate, ignored inputs and artifacts; stale proof is refused", async () => {
   const root = await temporary("alliance-evidence-");

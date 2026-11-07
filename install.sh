@@ -10,7 +10,7 @@ command -v npm >/dev/null 2>&1 || { echo 'npm is required.' >&2; exit 1; }
 if [ -f "$ALLIANCE_SCRIPT_DIR/scripts/cli.mjs" ]; then
   ALLIANCE_CANDIDATE=$ALLIANCE_SCRIPT_DIR
 else
-  command -v gh >/dev/null 2>&1 || { echo 'Install GitHub CLI and run gh auth login; the repository is private.' >&2; exit 1; }
+  command -v gh >/dev/null 2>&1 || { echo 'Install GitHub CLI and run gh auth login; release downloads use GitHub CLI.' >&2; exit 1; }
   ALLIANCE_DEST="$HOME/.alliance-work"
   ALLIANCE_READ_HOME=0
   for ALLIANCE_ARG in "$@"; do

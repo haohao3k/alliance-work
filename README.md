@@ -6,11 +6,18 @@ reasoning and tools. Start with one Supervisor and let the work determine the te
 
 [Hướng dẫn sử dụng tiếng Việt](docs/quickstart.vi.md) · [Installation, auth and updates](docs/operations.md) · [Video demo](https://github.com/haohao3k/alliance-work/releases/download/v0.1.3/alliance-work-demo.mp4)
 
+## Public edition
+
+This public snapshot includes project accordions, automatic session naming, project MCP and
+skill settings, lifecycle recovery, account/quota management, and Paseo 0.15.3 compatibility.
+Personal setup helpers and additional same-name Seatwork adaptations are not included.
+The existing pinned Seatwork bundle is unchanged; new licensed playbooks retain their notices.
+
 ## Install
 
 Requires macOS or Linux, Node 24+, npm, Codex 0.160.0+ and Claude Code 2.1.289+.
-Paseo **0.11.2** and Pi **1.0.0** are pinned and installed locally with the package. The repository is private;
-GitHub downloads require `gh auth login` with access to `haohao3k/alliance-work`.
+Paseo CLI/client/plugin **0.15.3** and Pi **1.5.0** are pinned and installed locally with the package.
+This release requires a qualified **0.15.3** daemon; see the [upgrade procedure](docs/operations.md#paseo-0153-upgrade). Source is public; GitHub release downloads use the GitHub CLI.
 
 From this checkout:
 
@@ -56,6 +63,12 @@ Codex to refresh its login, or run `codex login` there, then resume. This integr
 experimental native external-token API and is tested against Codex 0.160.0. Shared auth applies
 to Paseo app-server sessions. See [auth and separate logins](docs/operations.md#authentication)
 for standalone Codex, Claude and Pi.
+
+For two Claude subscriptions, open **Alliance Work → Claude accounts** to select the host default
+and per-role overrides. Provision tokens through the hidden `alliance-work accounts import 5x`
+or `20x` prompt on each host; existing jobs keep their credentials. See
+[Claude accounts and quota](docs/operations.md#claude-accounts-and-quota) for OS secret storage
+and separate OAuth profiles for quota tracking.
 
 ## Maintain
 
@@ -125,12 +138,22 @@ into an accepted result; older disposition artifacts and RPCs remain available.
 
 Register project-owned skills explicitly; every role can use them when relevant:
 
+Open **Alliance Work → project → Skills** to enable/disable installed skills or add them from
+GitHub. Paste a repository/tree URL, `owner/repo`, or `npx skills add owner/repo --skill NAME`,
+preview the instructions, select skills and choose **Install & enable**. The installer records
+the previewed commit and preserves existing files. See [project skill management](docs/operations.md#managing-project-skills)
+for supported sources, recovery and CLI operations.
+
+The same screen lists all 23 bundled skills (18 Seatwork, 5 Alliance), with their descriptions
+and eligible roles. Expand **Bundled skills** to disable individual skills for this project,
+disable all, or restore defaults. This includes the Peer UI skill `slp-frontend-design`.
+
 ```sh
 alliance-work skills add .agents/skills/verify-app --project /path/to/project
 alliance-work skills list --project /path/to/project
 ```
 
-The versioned `.alliance/skills.json` selection loads on fresh Codex, Claude and Pi sessions.
+The versioned `.alliance/skills.json` selection loads on fresh Codex, Claude, Pi and AGY sessions.
 References/scripts remain beside their skill. Daily profiles and unrelated project settings,
 hooks and MCPs stay excluded. Lead chooses the approach; registration adds no mandatory ceremony.
 
@@ -158,6 +181,35 @@ regressions and blocked cases; Lead decides whether to keep the lesson. See the
 
 ## Development
 
+Install Gitleaks and TruffleHog before pushing (macOS: `brew install gitleaks trufflehog`).
+`npm ci` installs the tracked `.githooks/pre-push` via the `prepare` script; existing checkouts
+can run `npm run hooks:install`. Other operating systems should use the official
+[Gitleaks](https://github.com/gitleaks/gitleaks#installing) and
+[TruffleHog](https://github.com/trufflesecurity/trufflehog#installation) distributions.
+Validated locally with Gitleaks 8.30.1 and TruffleHog 3.99.8.
+
+Every push scans the full reachable history of **each outgoing commit**, including branches
+other than HEAD and annotated tags. Both scanners must pass; missing tools, timeouts, scan
+errors and unapproved findings block the push. Run `npm run secrets:scan` to audit HEAD.
+TruffleHog uses offline detection (`--no-verification`) and blocks unverified findings too;
+it does not send candidate credentials to providers. Raw scanner output stays in a private
+temporary directory that is removed on exit. The local `.git/alliance-secret-scan.json`
+receipt contains counts and source locations only, never credential values.
+
+Two narrowly reviewed synthetic fixtures are documented in `.gitleaks.toml` and
+`scripts/secret-scan-allowlist.json`. No directory or detector is excluded. TruffleHog's
+historical fixture is matched by detector, path, introducing commit and raw-value SHA-256;
+its finding exit code is accepted only when every finding matches that reviewed fixture
+and there are no scan errors. Review new findings individually; never weaken the gate
+just to make a push pass. Local Git hooks can be bypassed by Git options, so they are a
+local safeguard, not a GitHub server-side policy. Do not use `--no-verify` or override
+`core.hooksPath` to bypass this repository's required checks.
+
+To test the actual installed tools against an isolated, synthetic non-live credential:
+`ALLIANCE_SECRET_SCAN_TESTS=1 node --import tsx --test tests/secret-scan.test.ts`.
+No production remotes are used by these tests.
+
+
 ```sh
 npm ci
 npm run check
@@ -173,9 +225,17 @@ credentials and is a separate acceptance check.
 
 `vendor/seatwork/provenance.json` pins 18 selected skills / 22 files to commit
 `fa540f47efb4344396a1eb532d3d6164a7056b9c`; their playbook bytes remain unchanged. Pi uses generated
-valid metadata pointing to those originals. This private project's provenance does not grant
-redistribution rights. Release packaging and contributor guidance are in [AGENTS.md](AGENTS.md)
-and [operations](docs/operations.md#releasing).
+valid metadata pointing to the installed effective playbook. This public candidate keeps the
+existing pinned bundle unchanged and does not add the private same-name adaptations.
+Provenance alone does not grant redistribution rights. See [AGENTS.md](AGENTS.md) and
+[operations](docs/operations.md#releasing) for publication requirements.
+
+Three additional playbooks retain raw upstream sources pinned to Seatwork `ab41c12` with a separate
+provenance manifest: `alliance-test-audit`, `alliance-blast-radius` and `alliance-friction`.
+Their Alliance adaptations use the actual native tools, evidence and wakeup workflow. Audit/blast
+are discovered by all roles; friction by HQ/Supervisor/Lead. `room/skills.json` controls discovery,
+not capability. Original sources and hashes ship with the release; generated profiles receive
+the selected playbook resources and attribution.
 
 See [operations and ownership](docs/operations.md#ownership-and-background-jobs) for registering
 existing background jobs without restarting them. The monitor separates current turn state from
@@ -189,8 +249,9 @@ in the [durable obligation ledger](docs/operations.md#durable-obligations-0111).
 current policy and open obligations together; no compulsory review or acknowledgement loop.
 
 Durable wakeups can track a deadline, a registered process exit or an exact child turn.
-They preserve owner/revision and restart state without accepting results. Pull delivery is the
-safe default; idle auto-delivery is opt-in. See [commands and delivery limits](docs/operations.md#durable-wakeups-019).
+They preserve owner/revision and restart state without accepting results, and wake their owner
+when it is idle; pull delivery is opt-in. Agents wait with `alliance-work wait` and end their turn
+instead of polling. See [commands and delivery limits](docs/operations.md#durable-wakeups-019).
 
 Current sessions adopt updated operating policy at their next natural work boundary with
 `alliance-work policy read` / `policy ack`; the monitor shows unacknowledged policy. Explicit
@@ -202,16 +263,29 @@ New delegated Alliance agents can now continue unfinished assignments across idl
 failed turns with bounded backoff, wake their owner for review and archive after evidence-bound
 acceptance. Existing chats opt in with `alliance-work autonomy start --agent ID`; inspect with
 `alliance-work autonomy list`, pause with `autonomy checkpoint --agent ID --phase paused --reason TEXT`.
-See [autonomous assignment operation and real-model acceptance](docs/operations.md#autonomous-assignments-0111).
+See [autonomous assignment operation and real-model acceptance](docs/operations.md#autonomous-assignments-0112).
 From 0.1.16 acceptance is the closing decision for every Alliance agent: only the owner chain or
 the Human may accept, Leads/Supervisors/HQ need product acceptance, and `status` explains what
 holds each agent open. See [closing work by decision](docs/operations.md#closing-work-by-decision-0116).
+From 0.1.19 a review ends with a decision that closes it without an ack (`accept`, a rework
+prompt, or `reject --reason`, which tells the child nothing: follow it with rework or archive) or
+with `wakeups defer`; see [handback, waiting and reminders](docs/operations.md#handback-waiting-and-reminders-0119).
+Alliance denies a member's approval request left pending for 5 minutes ([stuck members](docs/operations.md#stuck-members-0119)),
+and a provider limit (Claude's included, which Paseo reports as a completed turn) pauses every prompt
+to that harness's members on the host until it resets ([autonomous assignments](docs/operations.md#autonomous-assignments-0112)).
 
 With `agy` installed, setup adds isolated AGY HQ, Supervisor, Lead, Peer and Lens
-profiles. Use a dedicated Alliance login shared only within that role set. See
+profiles; they run only Gemini models. Use a dedicated Alliance login shared only within that
+role set. See
 [AGY setup and supported behavior](docs/operations.md#agy-role-profiles)
 for authentication and native coordination qualification.
 
 Mobbin can be enabled once for every Claude/Codex/AGY Alliance role and project:
 `alliance-work mcp add mobbin`, then `alliance-work mcp login mobbin`.
 See [user MCP setup](docs/operations.md#user-mcp-mobbin) for authentication and existing sessions.
+
+Choose **MCP** on an Alliance project to add/edit/remove stdio servers, select harnesses, and
+restrict exact tool names. CLI: `alliance-work mcp projects`, `mcp save --file PROJECT.json
+--revision HASH`, and `mcp preview --project PATH --harness codex`. See
+[project MCP settings](docs/operations.md#project-mcp-settings) for the schema, inherited scopes,
+authentication and session refresh behavior. Existing Mac mini v1 scoped settings remain compatible.

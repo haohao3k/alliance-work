@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import {
   createAgentSession,
   DefaultResourceLoader,
@@ -8,7 +9,6 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { createAssistantMessageEventStream } from "../node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai/dist/utils/event-stream.js";
 import { contextPolicy } from "../scripts/context-policy.mjs";
 import contextLimit from "../scripts/pi-context-limit.mjs";
 import { temporary } from "./temp";

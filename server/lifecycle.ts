@@ -2,8 +2,15 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import type { PaseoApi } from "@getpaseo/client";
 import { type AutonomyState, pauseKind } from "../shared/autonomy";
-import { responsibleOwner } from "../shared/operations";
+import { atRest, responsibleOwner } from "../shared/operations";
+import { asking } from "../shared/wakeups";
 import type { Autonomy } from "./autonomy";
+import { validateEvidence } from "./evidence.mjs";
+import {
+  integrationStamp,
+  validateIntegrationCurrentSync,
+  validateIntegrationProof,
+} from "./integration.mjs";
 import { observeJob } from "./jobs.mjs";
 import type { MemberRecord, RoomStore } from "./store";
 import type { Wakeups } from "./wakeups";
@@ -42,6 +49,37 @@ export function decisionChain(store: RoomStore, id: string) {
     current = parent ? responsibleOwner(parent) : null;
   }
   return chain;
+}
+
+/** The nearest owner up the decision chain that is an Alliance member not archived; null when none. */
+export function availableOwner(store: RoomStore, id: string) {
+  return (
+    decisionChain(store, id).find((owner) => {
+      const member = store.member(owner);
+      return member && !member.archivedAt;
+    }) ?? null
+  );
+}
+
+/** Accepted direct contributors remain dependencies after their native sessions are archived. */
+export function acceptedContributors(store: RoomStore, id: string) {
+  return store
+    .members()
+    .filter(
+      (member) =>
+        member.id !== id &&
+        member.decision === "accepted" &&
+        (responsibleOwner(member) === id || member.parentId === id),
+    )
+    .map((member) => ({
+      agentId: member.id,
+      decisionEvidence: member.decisionEvidence,
+      decisionAt: member.decisionAt ?? null,
+      decisionTurnId: member.decisionTurnId ?? null,
+      lastTurnId: member.lastTurnId ?? null,
+      parentId: member.parentId,
+      ownerId: responsibleOwner(member),
+    }));
 }
 
 /**
@@ -86,6 +124,7 @@ export class Lifecycle {
     private wakes: Wakeups,
     private autonomy: Autonomy,
     private now: () => number = Date.now,
+    private sourceRoot?: string,
   ) {}
 
   /** Decision scope of an acceptance. Legacy records are read once from their disposition file. */
@@ -109,6 +148,26 @@ export class Lifecycle {
   private durableBlockers(member: MemberRecord, a: AutonomyState | undefined) {
     const blockers: string[] = [];
     if (!member.decisionEvidence) blockers.push("acceptance has no recorded evidence");
+    if (member.turnInputPending) blockers.push("native turn input awaits reconciliation");
+    if (member.turnReadbackPending)
+      blockers.push(`native turn handback awaits readback: ${member.turnReadbackPending.error}`);
+    if (member.decisionIntegration) {
+      const contributors = acceptedContributors(this.store, member.id);
+      if (
+        contributors.length > 128 ||
+        integrationStamp(contributors) !== member.decisionIntegration.contributorsStamp
+      )
+        blockers.push(
+          "accepted contributions changed after product acceptance; verify and review the integrated candidate again",
+        );
+      if (
+        contributors.some((child) => {
+          const member = this.store.member(child.agentId);
+          return member?.turnInputPending || member?.turnReadbackPending;
+        })
+      )
+        blockers.push("a contributor's native turn awaits reconciliation");
+    }
     if (member.keep) blockers.push("kept open (members keep)");
     // A decision binds to the turn it reviewed; a newer turn needs its own decision.
     if (member.decisionTurnId !== undefined && member.decisionTurnId !== (member.lastTurnId ?? null))
@@ -149,7 +208,7 @@ export class Lifecycle {
           `${member.role} needs product acceptance (accept --product) by its owner, or the Human's decision`,
         );
     }
-    if (live.status !== "idle") blockers.push(`agent is ${live.status}`);
+    if (!atRest(live.status)) blockers.push(`agent is ${live.status}`);
     // A turn whose start hook was lost still shows up as a newer message in Paseo.
     if (
       live.lastMessageAt &&
@@ -168,7 +227,7 @@ export class Lifecycle {
       if (!state) blockers.push(`child ${child.id} state unknown`);
       else if (state.archived) continue;
       else if (child.decision !== "accepted") blockers.push(`child ${child.id} not accepted`);
-      else if (state.status !== "idle" || state.permissions)
+      else if (!atRest(state.status) || state.permissions)
         blockers.push(`child ${child.id} still ${state.status}`);
     }
     for (const job of this.store.jobs().filter((j) => j.ownerId === member.id))
@@ -181,7 +240,18 @@ export class Lifecycle {
     live: LiveState,
     others: Map<string, LiveState>,
   ): Promise<LifecycleView> {
-    if (live.archived) return { state: "archived", blockers: [] };
+    if (!live.archived && !["unknown", "unavailable"].includes(live.status)) this.restored(member.id);
+    if (live.archived)
+      return {
+        state: "archived",
+        blockers: this.store
+          .obligations()
+          .filter((o) => o.ownerId === member.id && o.state === "open")
+          .map(
+            (o) =>
+              `Archived owner still owns open obligation ${o.key}; reconcile evidence or hand off without weakening closeWhen`,
+          ),
+      };
     if (member.decision === "rejected")
       return { state: "rejected", blockers: ["rejected; owner decides rework or archive"] };
     if (member.decision !== "accepted") {
@@ -194,6 +264,26 @@ export class Lifecycle {
     const blockers = await this.blockers(member, live, async (id) => others.get(id) ?? null);
     return { state: blockers.length ? "held" : "archivable", blockers };
   }
+  /** A native reopening restores custody, not permission to replay a parked assignment. */
+  restored(id: string) {
+    const member = this.store.member(id);
+    if (!member?.archivedAt) return;
+    this.store.updateMember(id, { archivedAt: undefined });
+    const run = this.store.autonomyOf(id);
+    if (run?.phase === "archived")
+      this.store.saveAutonomy(
+        {
+          ...run,
+          phase: "paused",
+          pausedBy: "checkpoint",
+          pausedAt: this.now(),
+          reason: `Native session reopened for custody; resume only under the recorded obligation conditions and authority. Previous checkpoint: ${run.reason}`,
+          updatedAt: this.now(),
+          revision: run.revision + 1,
+        },
+        run.revision,
+      );
+  }
 
   private markArchived(id: string) {
     const member = this.store.member(id);
@@ -201,6 +291,12 @@ export class Lifecycle {
       this.store.updateMember(id, { archivedAt: new Date(this.now()).toISOString() });
     const a = this.autonomy.get(id);
     if (a && a.phase !== "archived") this.autonomy.markArchived(id);
+  }
+
+  /** Paseo archived this agent: record it and settle its reminders now, not at the next sweep. */
+  async archived(id: string) {
+    this.markArchived(id);
+    await this.wakes.settle();
   }
 
   /** null: Paseo no longer has the agent (it was deleted). undefined: readback failed. */
@@ -280,14 +376,41 @@ export class Lifecycle {
       page: { limit: 1 },
     });
     if (nativeChildren.entries.length) return;
+    let recheck: (() => void) | undefined;
+    if (member.decisionIntegration && member.decisionEvidence) {
+      const bytes = await readFile(member.decisionEvidence);
+      if (createHash("sha256").update(bytes).digest("hex") !== member.decisionIntegration.dispositionDigest)
+        throw new Error("Integrated product disposition changed; review the candidate again");
+      const record = JSON.parse(bytes.toString());
+      if (record.agentId !== member.id || record.decision !== "accepted" || !record.product)
+        throw new Error("Integrated product disposition changed; review the candidate again");
+      const report = await validateEvidence(
+        record.evidence,
+        member.cwd ?? this.store.room(member.roomId).cwd,
+        record.candidate,
+      );
+      if (!record.verificationArtifact || JSON.stringify(report) !== JSON.stringify(record.verification))
+        throw new Error("Integrated runtime report changed; review the candidate again");
+      if (member.decisionIntegration.contributors.length) {
+        if (record.integration?.contributorsStamp !== member.decisionIntegration.contributorsStamp)
+          throw new Error("Integrated contributor proof changed; review the candidate again");
+        await validateIntegrationProof(record.integration, report);
+      }
+      const receipts = [
+        record.verificationArtifact,
+        { path: member.decisionEvidence, digest: member.decisionIntegration.dispositionDigest },
+      ];
+      recheck = () => validateIntegrationCurrentSync(report, record.integration, receipts, this.sourceRoot);
+    }
     const fresh = await this.live(api, member.id);
-    if (!fresh || fresh.archived || fresh.status !== "idle" || fresh.permissions) return;
+    if (!fresh || fresh.archived || !atRest(fresh.status) || fresh.permissions) return;
     if (
       fresh.lastMessageAt &&
       member.decisionAt &&
       Date.parse(fresh.lastMessageAt) > Date.parse(member.decisionAt)
     )
       return;
+    recheck?.();
     // Final synchronous recheck: no await between it and the archive request.
     const current = this.store.member(member.id);
     const a1 = this.autonomy.get(member.id);
@@ -321,10 +444,11 @@ export class Lifecycle {
       if (member.archivedAt || member.decision !== "open" || member.lastOutcome !== "completed") continue;
       if (!member.lastTurnId) continue;
       const a = this.autonomy.get(member.id);
-      // Active or waiting assignments still have a scheduled next step of their own.
-      if (a && ["active", "waiting", "archived"].includes(a.phase)) continue;
-      const owner = responsibleOwner(member);
-      if (!owner || !this.store.member(owner) || this.store.member(owner)?.archivedAt) continue;
+      // Active assignments have a next step of their own; waiting ones while something will wake them.
+      if (a && ["active", "archived"].includes(a.phase)) continue;
+      if (a?.phase === "waiting" && (this.autonomy.bound(a) || this.autonomy.wakeSource(member.id))) continue;
+      const owner = availableOwner(this.store, member.id);
+      if (!owner) continue;
       const since = member.lastTurnEndedAt ?? member.staleSince;
       if (since === undefined) {
         // Records from before 0.1.16 have no turn end time. Start their clock now, spread over a
@@ -351,12 +475,17 @@ export class Lifecycle {
         } catch {
           /* Changed concurrently; the next scan re-evaluates. */
         }
-      // An unfinished review reminder for this turn already asks the current owner to decide.
-      if (forTurn.some((w) => w.ownerId === owner)) continue;
+      // A review reminder for this turn that will be pushed, or was sent in the last 48 hours,
+      // already asks the current owner to decide; one sent earlier is asked again, once. The
+      // owner's own pull reminder on the turn is never pushed and does not count.
+      const recent = (w: (typeof forTurn)[number]) =>
+        !["delivered", "uncertain"].includes(w.state) ||
+        now - (w.lastSentAt ?? w.updatedAt) < STALE_DECISION_MS;
+      if (forTurn.some((w) => w.ownerId === owner && asking(w) && recent(w))) continue;
       const key = `stale-decision-${hashOf(`${member.id}:${turnId}:${owner}`).slice(0, 32)}`;
       if (this.wakes.list().some((w) => w.key === key)) continue;
       const live = await this.live(api, member.id);
-      if (!live || live.archived || live.status !== "idle") continue;
+      if (!live || live.archived || !atRest(live.status)) continue;
       const ownerLive = await this.live(api, owner);
       if (!ownerLive || ownerLive.archived) continue;
       const hours = Math.floor((now - since) / 3600000);
@@ -365,7 +494,7 @@ export class Lifecycle {
           key,
           roomId: member.roomId,
           ownerId: owner,
-          reason: `Decision pending for ${hours}h on ${member.role} ${member.id}: its last turn completed and nobody accepted, rejected or archived it. Read ${member.resultPath ?? member.assignment}. Accept with evidence (alliance-work accept), request rework, or archive it natively if it is abandoned.`,
+          reason: `Decision pending for ${hours}h on ${member.role} ${member.id}: its last turn completed and nobody decided. Read ${member.resultPath ?? member.assignment}; accept with evidence or give rework. Before any archive reconcile all open obligations, jobs and custody; a finished turn does not retire them.`,
           trigger: { kind: "turn", agentId: member.id, turnId },
           delivery: "idle",
         });

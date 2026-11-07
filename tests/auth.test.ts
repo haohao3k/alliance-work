@@ -118,6 +118,54 @@ test("inherited auth stays private while native protocol and source token rotati
   }
 });
 
+// Real failure 2026-10-24: command output from an Office document contained U+2028; readline cut
+// the JSON line in two, the bridge treated it as a protocol error and stopped the app-server.
+test("Unicode line separators in tool output do not split protocol lines or stop the app-server", async () => {
+  const dir = await temporary("alliance-auth-separator-");
+  const source = join(dir, "auth.json");
+  await writeFile(source, JSON.stringify(cache("separator")), { mode: 0o600 });
+  const input = new PassThrough(),
+    output = new PassThrough();
+  let killed = false;
+  const child = Object.assign(new EventEmitter(), {
+    stdin: new PassThrough(),
+    stdout: new PassThrough(),
+    kill: () => {
+      killed = true;
+      return true;
+    },
+  });
+  const native = messages(child.stdin),
+    parent = messages(output);
+  const stop = bridgeCodexAuth({ child, source, input, output });
+  const send = (stream: PassThrough, value: unknown) => stream.write(JSON.stringify(value) + "\n");
+  try {
+    send(input, { id: 1, method: "initialize", params: {} });
+    await native.next();
+    send(child.stdout, { id: 1, result: { userAgent: "native" } });
+    await native.next();
+    const login = await native.next();
+    send(child.stdout, { id: login.id, result: { type: "chatgptAuthTokens" } });
+    await parent.next();
+    const text = "hỗ trợ mở kết nối USB.\u2028cc: IT\u2029end";
+    const event = { method: "item/completed", params: { item: { aggregatedOutput: text } } };
+    const raw = JSON.stringify(event) + "\n";
+    child.stdout.write(raw.slice(0, raw.indexOf("\u2028") + 1));
+    child.stdout.write(raw.slice(raw.indexOf("\u2028") + 1));
+    assert.deepEqual(await parent.next(), event);
+    const request = { id: 2, method: "turn/start", params: { input: [{ type: "text", text }] } };
+    send(input, request);
+    assert.deepEqual(await native.next(), request);
+    assert.equal(killed, false);
+  } finally {
+    stop();
+    native.close();
+    parent.close();
+    input.destroy();
+    output.destroy();
+  }
+});
+
 test("expired inherited credentials fail explicitly instead of using a stale refresh token", async () => {
   const dir = await temporary("alliance-expired-");
   const path = join(dir, "auth.json");

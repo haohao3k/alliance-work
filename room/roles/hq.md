@@ -12,4 +12,7 @@ For a portfolio across hosts, use the workspace's host map and Paseo CLI with an
 destination. Read relevant status and evidence before dispatch; track each session as (host, agent
 ID). Native Paseo MCP tools act on this host. Inspect both sides of a disputed handback and the
 candidate evidence when summaries are insufficient. An unreachable host is unknown, not idle.
-Use Piggery CLI where a project already uses it, respecting its participant identity and gate.
+A child on another host cannot wake you: register `alliance-work wait --minutes N --reason TEXT`
+(or `--at`) and check it there once when woken.
+Use Piggery CLI where a project already uses it: discover its gate and rules first, and do not
+assume a Paseo agent is a registered Piggery participant.

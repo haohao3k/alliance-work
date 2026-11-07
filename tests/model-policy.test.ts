@@ -44,14 +44,16 @@ test("release defaults give Peer and Lens separate lists in the Human's order", 
     "1 claude/claude-sonnet-5-5 high",
     "2 claude/claude-sonnet-5-5 medium",
     "3 codex/gpt-6.1-sol high",
-    "4 agy/gemini-4-argon-medium medium",
-    "5 pi/zai/glm-5.3 high",
-    "6 pi/izno-vps/ds/deepseek-v4.1-flash high",
+    "4 pi/antigravity/gemini-4-argon medium",
+    "5 pi/antigravity/gemini-3.8-flash medium",
+    "6 pi/zai/glm-5.3 high",
+    "7 pi/izno-vps/ds/deepseek-v4.1-flash high",
   ]);
   assert.deepEqual(ranked(policy, "lens"), [
     "1 claude/claude-opus-5-5 medium",
     "2 codex/gpt-6-astra medium",
-    "3 agy/gemini-4-argon-high high",
+    "3 pi/antigravity/gemini-4-argon high",
+    "4 pi/antigravity/gemini-3.8-flash high",
   ]);
   for (const route of policy.routes) assert.deepEqual(route.difficulties, Difficulty.options);
   assert.equal(ModelPolicy.safeParse(policy).success, true);
@@ -74,8 +76,21 @@ test("omitted worker models take the harness's first choice for that role", () =
   assert.deepEqual(pick("lens", "claude"), { model: "claude-opus-5-5", thinkingOptionId: "medium" });
   assert.deepEqual(pick("peer", "codex"), { model: "gpt-6.1-sol", thinkingOptionId: "high" });
   assert.deepEqual(pick("lens", "codex"), { model: "gpt-6-astra", thinkingOptionId: "medium" });
-  assert.deepEqual(pick("peer", "agy", agy), { model: "gemini-4-argon-medium", thinkingOptionId: "medium" });
-  assert.deepEqual(pick("lens", "agy", agy), { model: "gemini-4-argon-high", thinkingOptionId: "high" });
+  assert.throws(() => pick("peer", "agy", agy), /No allowed/);
+  assert.throws(() => pick("lens", "agy", agy), /No allowed/);
+  const gemini = [model("antigravity/gemini-4-argon"), model("antigravity/gemini-3.8-flash")];
+  assert.deepEqual(pick("peer", "pi", gemini), {
+    model: "antigravity/gemini-4-argon",
+    thinkingOptionId: "medium",
+  });
+  assert.deepEqual(pick("lens", "pi", gemini), {
+    model: "antigravity/gemini-4-argon",
+    thinkingOptionId: "high",
+  });
+  assert.deepEqual(pick("peer", "pi", gemini.slice(1)), {
+    model: "antigravity/gemini-3.8-flash",
+    thinkingOptionId: "medium",
+  });
   assert.deepEqual(pick("peer", "pi"), { model: "zai/glm-5.3", thinkingOptionId: "high" });
   // A route missing from this host's catalog is skipped for the next one, never substituted.
   assert.deepEqual(
@@ -94,7 +109,7 @@ test("omitted worker models take the harness's first choice for that role", () =
     ),
     { model: "claude-sonnet-5-5", thinkingOptionId: "medium" },
   );
-  assert.throws(() => pick("lens", "pi"), /No allowed.*no pi lens routes/);
+  assert.throws(() => pick("lens", "pi"), /No allowed/);
   assert.throws(
     () =>
       pick(
@@ -188,7 +203,7 @@ test("pre-0.1.18 saved routes apply to both Peer and Lens; reset returns a room 
       createdAt: "2026-10-12",
     });
     store.close();
-    // Exactly the shape the 0.1.17 HQ saved for MBASC: one route, no role.
+    // Exactly the shape the 0.1.17 HQ saved for ExampleApp: one route, no role.
     const legacy = {
       leadEffort: "medium",
       routes: [
@@ -224,7 +239,7 @@ test("pre-0.1.18 saved routes apply to both Peer and Lens; reset returns a room 
       store.modelPolicy("legacy").policy,
     );
     const stale = store.modelPolicy("legacy");
-    const reset = store.resetModelPolicy("legacy");
+    const { removed: _kept, ...reset } = store.resetModelPolicy("legacy");
     // Revisions keep counting through a reset; only the saved row is gone.
     assert.deepEqual(reset, { policy: defaultModelPolicy(), revision: 3, saved: false });
     assert.throws(() => store.saveModelPolicy("legacy", stale.policy, stale.revision), /changed elsewhere/);
@@ -348,10 +363,23 @@ test("room policy persists independently, validates coverage and rejects stale e
 
 test("omitted owner models stay economical; premium owners need an explicit choice", () => {
   const policy = defaultModelPolicy();
+  // The live AGY catalog also lists Claude models; AGY owners still default to Gemini.
+  const agyLive = [
+    ...agy,
+    ...["medium", "high"].map((effort) => model(`claude-sonnet-5-5-${effort}`, [effort])),
+  ];
   for (const role of ["hq", "supervisor", "lead"] as const) {
     assert.equal(chooseModel(policy, role, "codex", catalog).model, "gpt-6.1-sol");
     assert.equal(chooseModel(policy, role, "claude", catalog).model, "claude-sonnet-5-5");
+    assert.deepEqual(chooseModel(policy, role, "agy", agyLive), {
+      model: "gemini-4-argon-medium",
+      thinkingOptionId: "medium",
+    });
     assert.equal(chooseModel(policy, role, "codex", catalog, "gpt-6-astra", "high").model, "gpt-6-astra");
+    assert.deepEqual(chooseModel(policy, role, "pi", [model("antigravity/gemini-3.8-flash")]), {
+      model: "antigravity/gemini-3.8-flash",
+      thinkingOptionId: "medium",
+    });
     // Owners ignore the worker lists entirely.
     assert.equal(
       chooseModel(policy, role, "claude", catalog, "claude-opus-5-5", "xhigh").thinkingOptionId,
@@ -428,8 +456,30 @@ test("reset clears unreadable lists, never lowers the revision and can require t
     assert.deepEqual([cleared.revision, cleared.saved], [4, false], "max(row 1, counter 3) + 1");
     // The Models page passes the revision it shows (plain was saved once: revision 1).
     assert.throws(() => store.resetModelPolicy("plain", 0), /changed elsewhere/);
-    assert.equal(store.resetModelPolicy("plain", 1).saved, false);
+    const plain = store.resetModelPolicy("plain", 1);
+    assert.equal(plain.saved, false);
     assert.deepEqual(roomsUnreadableBefore0118(home), ["shared room (shared)"]);
+    // Each reset keeps the removed row byte for byte, even when it cannot be parsed; a room with
+    // nothing saved has nothing to keep.
+    assert.equal(cleared.removed?.revision, 1);
+    assert.equal(plain.removed?.revision, 1);
+    assert.equal(store.resetModelPolicy("plain").removed, undefined);
+    const copies = new DatabaseSync(join(home, "rooms.sqlite"), { readOnly: true });
+    const copy = (id?: number) =>
+      copies.prepare("SELECT roomId, revision, data FROM room_model_policy_removed WHERE id=?").get(id ?? -1);
+    assert.deepEqual(
+      { ...copy(cleared.removed?.id) },
+      {
+        roomId: "broken",
+        revision: 1,
+        data: JSON.stringify({
+          leadEffort: "medium",
+          routes: [{ harness: "future", model: "x", effort: "high" }],
+        }),
+      },
+    );
+    assert.deepEqual({ ...copy(plain.removed?.id) }, { roomId: "plain", revision: 1, data: "{" });
+    copies.close();
   } finally {
     store.close();
   }

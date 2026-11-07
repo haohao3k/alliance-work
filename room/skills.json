@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "alliance-verify": ["hq", "supervisor", "lead", "peer", "lens"],
+    "alliance-learn-from-failure": ["hq", "supervisor", "lead", "peer", "lens"],
+    "alliance-test-audit": ["hq", "supervisor", "lead", "peer", "lens"],
+    "alliance-blast-radius": ["hq", "supervisor", "lead", "peer", "lens"],
+    "alliance-friction": ["hq", "supervisor", "lead"]
+  }
+}

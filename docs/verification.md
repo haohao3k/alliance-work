@@ -4,6 +4,73 @@ Lead chooses scope, tools, assertions and whether independent review is useful. 
 record and validate evidence; they neither require every feature on every task nor register new
 skills automatically. `verify --scenario NAME -- COMMAND` remains available for focused checks.
 
+## Proof of integrated contributions
+
+Product acceptance binds the final runtime report to every currently accepted direct contributor,
+including archived children and children linked through responsible ownership or native parentage.
+A child being accepted is not proof that its work landed in the final candidate.
+
+For Git work, the child records its reviewed starting commit when verifying its contribution:
+
+```sh
+alliance-work verify --base BASE_SHA --scenario child-check -- npm test
+alliance-work accept --agent CHILD_ID --report /absolute/child/report.json
+# Integrate the reviewed change, then exercise the resulting product:
+alliance-work verify --kind runtime --scenario integrated-journey -- npm run test:e2e
+alliance-work accept --agent PARENT_ID --report /absolute/final/report.json --product journey.json
+```
+
+`--base` resolves a commit and captures the changed output files, contents, executable bits and
+deletions in the same candidate snapshot as the check. Ignored inputs added with `--input` affect
+verification but are not automatically Git deliverables. A normal merge needs a committed child
+contribution, its source HEAD reachable from final HEAD, and matching final output fingerprints.
+An ancestor commit alone does not prove that a later edit preserved the contribution.
+
+For squash, cherry-pick, copied files or non-code review, supply `accept --integration plan.json`
+alongside `--product`. Each entry pins the child and its accepted candidate digest; omitted entries
+use normal merge checks. For example, portable output from another checkout:
+
+```json
+{
+  "version": 1,
+  "children": [{
+    "agentId": "CHILD_ID", "candidate": "ACCEPTED_SHA256",
+    "method": "files", "reason": "Reviewed output copied into the final project",
+    "paths": [{"source": "output/report.txt", "target": "reports/final.txt"}]
+  }]
+}
+```
+
+`files` maps every contributed output to a relative final path. Non-Git checks capture their
+explicit `--input` files as outputs. Final destinations must be captured by the parent's report;
+use `--input` and rerun verification for ignored or non-Git destinations. `squash` and `cherry-pick`
+require `landedHead` and a reason, with optional complete `paths` when files moved. The landed
+commit must be reachable from final HEAD; source, landed and final scoped bytes are checked.
+`review` requires an analysis report, a reason and specific `{path,digest}` artifacts already in
+that accepted report. It records an applied non-code contribution and cannot discard recorded Git
+code changes. None of these methods turns a test report into product runtime evidence.
+
+When later accepted work intentionally replaces an earlier output, add a `supersessions` entry:
+`{agentId,candidate,path,byAgentId,byCandidate,reason}`. It names the earlier source path and a later
+accepted contributor covering the same final destination. Unexplained conflicts, duplicate entries
+and cycles are refused. Rerun final verification after resolving conflicts; do not edit reports.
+
+The disposition freezes contributor decision identities and hashes of their reports/artifacts.
+Source worktrees may be removed after integration: their accepted snapshots remain the evidence.
+Changing an artifact, the final candidate, a contributor's decision or its ownership/turn binding
+invalidates the proof. Reaccepting identical child bytes is still a new decision. Automatic archive
+rechecks stored integrated evidence and current contributor identities; status reports dependency
+changes without rehashing the whole project. Unresolved native turn input also holds the decision.
+
+Technical acceptance remains available without integration metadata. Older reports need another
+verification with contribution scope before serving as integrated code evidence. Existing historical
+dispositions are preserved; they are not retroactively labeled as having integration proof.
+Dependencies are direct: a higher coordinator binds its accepted child's candidate and decision.
+Reaccept that child after changing its integrated result; a grandchild decision alone does not
+recursively rewrite or invalidate every ancestor's frozen proof. Keep the candidate quiet during
+acceptance: final checks prevent local asynchronous callbacks interleaving with the commit, but
+cannot lock arbitrary external writers or make a remote native action atomic with filesystem reads.
+
 ## Feature map
 
 Put a map under the project, normally `.alliance/features.json`:

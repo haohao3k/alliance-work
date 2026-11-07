@@ -9,6 +9,7 @@ export async function enableMobbin(home) {
   await atomicWrite(join(home, "user-mcp.json"), `${JSON.stringify(config, null, 2)}\n`);
   return config;
 }
-export async function userMcpServers(home, harness, root = projectRoot) {
-  return servers(home, harness, root);
+/** @param {string | undefined} cwd */
+export async function userMcpServers(home, harness, root = projectRoot, cwd = undefined) {
+  return servers(home, harness, root, cwd);
 }

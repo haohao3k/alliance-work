@@ -1,6 +1,7 @@
 import { defineRpc, defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
 import { AutonomyRecord } from "./autonomy";
+import { IntegrationPlan } from "./integration.mjs";
 import { Difficulty, ModelPolicy } from "./model-policy";
 import { ObligationRecord } from "./obligations";
 import { WakeRecord } from "./wakeups";
@@ -14,6 +15,7 @@ export const settings = defineSettings({
   schema: z.object({ home: z.string().default("") }),
 });
 export const Room = z.object({
+  nativeTitle: z.string().optional(),
   id: z.string(),
   title: z.string(),
   cwd: z.string(),
@@ -58,6 +60,8 @@ export const Member = z.object({
   provider: z.string(),
   title: z.string(),
   model: z.string().nullable(),
+  selectedModel: z.string().nullable().optional(),
+  runtimeModel: z.string().nullable().optional(),
   updatedAt: z.string().nullable(),
   archived: z.boolean(),
   parentId: z.string().nullable(),
@@ -80,6 +84,19 @@ export const Member = z.object({
   // "Human" or the deciding agent ID; absent for decisions recorded before v0.1.16.
   decisionBy: z.string().optional(),
   decisionScope: z.enum(["technical", "product"]).nullable(),
+  // Its running turn has been quiet since `since`; key: the owner's notice, null when none is woken.
+  silence: z
+    .object({
+      turnId: z.string().nullable(),
+      since: z.string(),
+      key: z.string().nullable(),
+      notifiedAt: z.string().nullable(),
+    })
+    .optional(),
+  // The last approval request Alliance denied for it: nobody approves commands for members.
+  denied: z
+    .object({ requestId: z.string(), tool: z.string(), command: z.string().nullable(), at: z.string() })
+    .optional(),
   lifecycle: z.object({
     state: z.enum(["archived", "archivable", "held", "awaiting-decision", "rejected"]),
     blockers: z.array(z.string()),
@@ -101,7 +118,15 @@ export const roomList = defineRpc({
         ownerLabel: z.string(),
       }),
     ),
-    wakeupHealth: z.object({ checkedAt: z.string().nullable(), error: z.string().nullable() }),
+    wakeupHealth: z.object({
+      checkedAt: z.string().nullable(),
+      error: z.string().nullable(),
+      // The daemon the scheduler last connected to; null before its first connection.
+      daemon: z
+        .object({ version: z.string().nullable(), agentMessageProvenance: z.boolean() })
+        .nullable()
+        .optional(),
+    }),
   }),
 });
 export const roomCreate = defineRpc({
@@ -148,7 +173,10 @@ export const roomModelPolicyReset = defineRpc({
   name: "models.reset",
   // The Models page passes the revision it shows; the Human's CLI resets unconditionally.
   input: z.object({ roomId: z.string(), revision: z.number().int().nonnegative().optional() }),
-  output: roomModelPolicy.output,
+  // removed: the deleted saved list, kept raw in rooms.sqlite table room_model_policy_removed.
+  output: roomModelPolicy.output.extend({
+    removed: z.object({ id: z.number().int(), revision: z.number().int(), at: z.string() }).optional(),
+  }),
 });
 export const roomModelCatalog = defineRpc({
   name: "models.catalog",
@@ -170,6 +198,8 @@ export const memberDisposition = defineRpc({
     candidate: z.string().min(1),
     evidence: z.string().min(1),
     product: ProductAcceptance.optional(),
+    integration: IntegrationPlan.optional(),
+    analysisRoot: z.string().min(1).optional(),
     // null is the Human. Agents pass their PASEO_AGENT_ID; the plugin enforces the owner chain.
     // Absent only from CLIs older than 0.1.16, which the plugin refuses with the current command.
     actorId: z.string().min(1).nullable().optional(),

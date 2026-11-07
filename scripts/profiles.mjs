@@ -1,17 +1,21 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rename, rmdir, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   assertNoLinks,
   codexTrust,
   digest,
   managedDigest,
+  nativePiSettingsFile,
   nativeTrustFile,
+  preservePiPreferences,
 } from "../server/profile-integrity.mjs";
+import { skillOverrides } from "../server/skill-overrides.mjs";
 import { contextTokenLimit } from "./context-policy.mjs";
 import { bundledPi } from "./pi-runtime.mjs";
+import { verifyAdaptedPlaybooks } from "./verify-vendor.mjs";
 
 export { assertNoLinks, digest, managedDigest, verifyProfile } from "../server/profile-integrity.mjs";
 
@@ -23,6 +27,7 @@ export const codexIsolationFeatures = {
   tool_suggest: false,
 };
 export const roles = ["hq", "supervisor", "lead", "peer", "lens"];
+const ownerRoles = new Set(["hq", "supervisor", "lead"]);
 export const harnesses = ["codex", "claude", "pi"];
 export const projectRoot = fileURLToPath(new URL("../", import.meta.url));
 /** @typedef {{harness:string,role:string,home:string,osHome:string,executable:string,files:Record<string,string>,skillDirectories:string[],skillEntries:string[],extensionPaths:string[]}} Profile */
@@ -54,8 +59,16 @@ export async function prepareProfiles({ home, executables, isolatedRoot = undefi
   const writes = new Map();
   const removals = [];
   const provenance = JSON.parse(await readFile(join(root, "vendor/seatwork/provenance.json"), "utf8"));
+  const adaptations = verifyAdaptedPlaybooks(root);
+  const overrides = await skillOverrides(root, provenance);
   const ownership = await readFile(join(root, "room/policies/agent-ownership.md"), "utf8");
   const operating = await readFile(join(root, "room/policies/operating-contract.md"), "utf8");
+  // Releases before 0.1.19 have no owner duties and give every role the same policies. Rollback
+  // builds their profiles with this code, so a root without the file keeps that assembly.
+  const ownerDuties = await readFile(join(root, "room/policies/owner-duties.md"), "utf8").catch((e) => {
+    if (e.code === "ENOENT") return null;
+    throw e;
+  });
   const laws = await readFile(join(root, "room/policies/engineering-laws.md"), "utf8");
   const modelSelection = await readFile(join(root, "room/policies/model-selection.md"), "utf8");
   const mapping = await readFile(join(root, "room/policies/seatwork-mapping.md"), "utf8");
@@ -69,6 +82,41 @@ export async function prepareProfiles({ home, executables, isolatedRoot = undefi
     }
   };
   await collect(join(root, "room/skills"));
+  const catalog = await readFile(join(root, "room/skills.json"), "utf8")
+    .then(JSON.parse)
+    .catch((error) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+  // Rollback to a release without a catalog preserves its original all-role local skills.
+  if (adaptations && !catalog) throw new Error("Missing bundled skill catalog for adapted playbooks");
+  if (catalog) {
+    if (
+      catalog.version !== 1 ||
+      !catalog.skills ||
+      typeof catalog.skills !== "object" ||
+      Array.isArray(catalog.skills)
+    )
+      throw new Error("Invalid bundled skill catalog");
+    const names = new Set(localSkills.map((path) => relative(join(root, "room/skills"), path).split("/")[0]));
+    for (const name of names) {
+      if (
+        !Object.hasOwn(catalog.skills, name) ||
+        !localSkills.includes(join(root, "room/skills", name, "SKILL.md"))
+      )
+        throw new Error(`Bundled skill missing from catalog or missing SKILL.md: ${name}`);
+    }
+    for (const [name, selectedRoles] of Object.entries(catalog.skills)) {
+      if (
+        !names.has(name) ||
+        !Array.isArray(selectedRoles) ||
+        !selectedRoles.length ||
+        new Set(selectedRoles).size !== selectedRoles.length ||
+        selectedRoles.some((role) => !roles.includes(role))
+      )
+        throw new Error(`Invalid bundled skill catalog entry: ${name}`);
+    }
+  }
   /** @type {Record<string, Profile>} */
   const profiles = {};
   for (const harness of [...harnesses, ...(executables.agy ? ["agy"] : [])]) {
@@ -116,6 +164,7 @@ export async function prepareProfiles({ home, executables, isolatedRoot = undefi
                   bytes.toString().trimEnd() + "\n" + (old.toString().match(codexTrust) ?? []).join("\n"),
                 );
         }
+        if (old && nativePiSettingsFile(profile, path)) bytes = preservePiPreferences(bytes, old);
         writes.set(path, bytes);
         profile.files[path] = managedDigest(profile, path, bytes);
       };
@@ -125,8 +174,17 @@ export async function prepareProfiles({ home, executables, isolatedRoot = undefi
           : file.path.startsWith(`vendor/seatwork/skills/${role}/`),
       );
       for (const file of [
-        ...selected,
-        ...localSkills.map((path) => ({ path: path.slice(root.length + 1), local: true, sha256: "" })),
+        ...selected.filter((file) => !overrides.has(file.path.split("/")[4])),
+        ...[...overrides.values()]
+          .filter((entry) => entry.roles.includes(role))
+          .flatMap((entry) => entry.files),
+        ...localSkills
+          .filter(
+            (path) =>
+              !catalog ||
+              catalog.skills[relative(join(root, "room/skills"), path).split("/")[0]].includes(role),
+          )
+          .map((path) => ({ path: path.slice(root.length + 1), local: true, sha256: "" })),
       ]) {
         const bytes = await readFile(join(root, file.path));
         if (!file.local && digest(bytes) !== file.sha256)
@@ -142,24 +200,31 @@ export async function prepareProfiles({ home, executables, isolatedRoot = undefi
         if (relative.endsWith("/SKILL.md") && harness === "pi") {
           const name = relative.split("/")[0];
           const description = /^description: (.*)$/m.exec(bytes.toString())?.[1];
-          if (!description) throw new Error(`Missing Seatwork description: ${file.path}`);
+          if (!description) throw new Error(`Missing bundled playbook description: ${file.path}`);
           const entry = join(roleHome, "pi-skill-index", name, "SKILL.md");
           await manage(
             entry,
-            `---\nname: ${name}\ndescription: ${JSON.stringify(description)}\n---\nRead and apply the exact Seatwork playbook at ${JSON.stringify(path)}. Resolve its references relative to that source file. The Alliance operating contract still applies.\n`,
+            `---\nname: ${name}\ndescription: ${JSON.stringify(description)}\n---\nRead and apply the bundled playbook at ${JSON.stringify(path)}. Resolve its references relative to that source file. The Alliance operating contract still applies.\n`,
           );
           profile.skillEntries.push(entry);
         }
       }
       const roleText = await readFile(join(root, "room/roles", `${role}.md`), "utf8");
+      // Delegation, decisions and Seatwork's coordination vocabulary are written for owner roles.
+      const owner =
+        ownerDuties === null
+          ? `${mapping}\n\n${modelSelection}\n\n`
+          : ownerRoles.has(role)
+            ? `${ownerDuties}\n\n${mapping}\n\n${modelSelection}\n\n`
+            : "";
       await manage(
         join(roleHome, "root-instructions.md"),
-        `${ownership}\n\n${laws}\n\n${operating}\n\n${mapping}\n\n${modelSelection}\n\n${roleText}`,
+        `${ownership}\n\n${laws}\n\n${operating}\n\n${owner}${roleText}`,
       );
       if (harness === "codex")
         await manage(
           join(roleHome, "config.toml"),
-          `cli_auth_credentials_store = "file"\nmodel_auto_compact_token_limit = ${contextTokenLimit}\nmodel_auto_compact_token_limit_scope = "total"\n[features]\n` +
+          `cli_auth_credentials_store = "file"\nmodel_auto_compact_token_limit = ${contextTokenLimit}\nmodel_auto_compact_token_limit_scope = "total"\n[agents]\nenabled = false\n[features]\n` +
             Object.entries(codexIsolationFeatures)
               .map(([name, value]) => `${name} = ${value}\n`)
               .join(""),

@@ -4,16 +4,10 @@ import { lstat, mkdir, readdir, readFile, realpath, rename, rm, writeFile } from
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { parse } from "yaml";
-import { z } from "zod";
 import { assertNoLinks } from "../server/profile-integrity.mjs";
+import { SkillManifest as Manifest } from "../shared/skill-settings.mjs";
 
 const execute = promisify(execFile);
-const Manifest = z
-  .object({
-    version: z.literal(1),
-    skills: z.array(z.string().regex(/^\.agents\/skills\/[a-z0-9][a-z0-9-]{0,63}$/)).max(100),
-  })
-  .strict();
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 export async function projectRootFor(cwd) {
@@ -34,56 +28,89 @@ export async function projectSkills(cwd, selection = undefined) {
     if (error.code === "ENOENT") return null;
     throw error;
   });
-  const manifest =
-    selection ?? (text === null ? { version: 1, skills: [] } : Manifest.parse(JSON.parse(text)));
+  const manifest = Manifest.parse(
+    selection ?? (text === null ? { version: 1, skills: [] } : JSON.parse(text)),
+  );
   if (new Set(manifest.skills).size !== manifest.skills.length) throw new Error("Duplicate project skill");
   const skills = [];
   let bytes = 0;
   for (const entry of manifest.skills) {
     const directory = join(root, entry);
-    await assertNoLinks(directory);
-    const files = [];
-    const walk = async (dir) => {
-      for (const name of (await readdir(dir)).sort()) {
-        const file = join(dir, name);
-        const stat = await lstat(file);
-        if (stat.isSymbolicLink()) throw new Error(`Project skill contains a symlink: ${file}`);
-        if (stat.isDirectory()) await walk(file);
-        else if (stat.isFile()) {
-          bytes += stat.size;
-          if (bytes > 16 * 1024 * 1024 || files.length >= 1000)
-            throw new Error("Project skill bundle exceeds 16 MiB / 1000 files");
-          const content = await readFile(file);
-          files.push({
-            path: relative(directory, file),
-            digest: hash(content),
-            mode: stat.mode & 0o111,
-            content,
-          });
-        } else throw new Error(`Unsupported project skill file: ${file}`);
-      }
-    };
-    await walk(directory);
-    const body = files.find((file) => file.path === "SKILL.md")?.content.toString();
-    const frontmatter = body?.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1];
-    if (!frontmatter) throw new Error(`Missing skill frontmatter: ${directory}`);
-    const metadata = parse(frontmatter);
-    const name = entry.split("/").at(-1);
-    if (metadata?.name !== name || typeof metadata.description !== "string" || !metadata.description.trim())
-      throw new Error(`Skill name must match its folder and have a description: ${entry}`);
-    if (name.startsWith("slp-") || name.startsWith("alliance-"))
-      throw new Error(`Reserved role skill name: ${name}`);
-    skills.push({ name, description: metadata.description, directory, files });
+    const skill = await readSkillDirectory(directory);
+    if (skill.name.startsWith("slp-") || skill.name.startsWith("alliance-"))
+      throw new Error(`Reserved role skill name: ${skill.name}`);
+    bytes += skill.files.reduce((sum, file) => sum + file.content.length, 0);
+    if (bytes > 16 * 1024 * 1024) throw new Error("Project skill bundle exceeds 16 MiB");
+    skills.push(skill);
   }
-  const digest = hash(
-    JSON.stringify(
-      skills.map(({ name, files }) => ({
+  return {
+    root,
+    digest: skillDigest(skills, manifest.disabledBundled),
+    skills,
+    disabledBundled: manifest.disabledBundled ?? [],
+  };
+}
+
+export function skillDigest(skills, disabledBundled = []) {
+  return hash(
+    JSON.stringify({
+      disabledBundled,
+      skills: skills.map(({ name, files }) => ({
         name,
         files: files.map(({ path, digest, mode }) => ({ path, digest, mode })),
       })),
-    ),
+    }),
   );
-  return { root, digest, skills };
+}
+
+export function skillMetadata(body, bundled = false) {
+  const frontmatter = body?.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1];
+  if (!frontmatter) throw new Error("Missing skill frontmatter");
+  try {
+    return parse(frontmatter);
+  } catch (error) {
+    // Pinned Seatwork legacy descriptions contain unquoted colons. Do not rewrite upstream bytes.
+    if (!bundled) throw error;
+    const name = /^name: ([a-z0-9-]+)$/m.exec(frontmatter)?.[1];
+    const description = /^description: (.+)$/m.exec(frontmatter)?.[1];
+    if (!name || !description) throw error;
+    return { name, description };
+  }
+}
+
+export async function readSkillDirectory(directory, bundled = false) {
+  await assertNoLinks(directory);
+  const files = [];
+  let bytes = 0;
+  const walk = async (dir) => {
+    for (const name of (await readdir(dir)).sort()) {
+      const file = join(dir, name),
+        stat = await lstat(file);
+      if (stat.isSymbolicLink()) throw new Error(`Skill contains a symlink: ${file}`);
+      if (stat.isDirectory()) await walk(file);
+      else if (stat.isFile()) {
+        bytes += stat.size;
+        if (bytes > 16 * 1024 * 1024 || files.length >= 1000)
+          throw new Error("Skill exceeds 16 MiB / 1000 files");
+        const content = await readFile(file);
+        files.push({
+          path: relative(directory, file),
+          digest: hash(content),
+          mode: stat.mode & 0o111,
+          content,
+        });
+      } else throw new Error(`Unsupported skill file: ${file}`);
+    }
+  };
+  await walk(directory);
+  const body = files.find((file) => file.path === "SKILL.md")?.content.toString();
+  const frontmatter = body?.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1];
+  if (!frontmatter) throw new Error(`Missing skill frontmatter: ${directory}`);
+  const metadata = skillMetadata(body, bundled),
+    name = directory.split(sep).at(-1);
+  if (metadata?.name !== name || typeof metadata.description !== "string" || !metadata.description.trim())
+    throw new Error(`Skill name must match its folder and have a description: ${directory}`);
+  return { name, description: metadata.description, directory, files };
 }
 
 // Claude's explicit plugin directory contains only selected skills, never a project's
@@ -143,28 +170,16 @@ export async function claudeSkillPlugin(home, bundle) {
 }
 
 export function skillCatalog(bundle) {
-  if (!bundle.skills.length)
-    return "No project skills are registered. Register project-owned .agents/skills directories in .alliance/skills.json when needed.";
-  return `Project skills (revision ${bundle.digest}):\n${bundle.skills.map((skill) => `- ${skill.name}: ${skill.description}\n  Read ${join(skill.directory, "SKILL.md")} and resolve its resources relative to that file.`).join("\n")}\nUse a skill when its trigger fits the task. The Lead chooses the approach; discovery does not mandate every skill on every task.`;
+  if (!bundle.skills.length) return "No skills are enabled for this runtime.";
+  return `Enabled skills (revision ${bundle.digest}):\n${bundle.skills.map((skill) => `- ${skill.name}: ${skill.description}\n  Read ${join(skill.directory, "SKILL.md")} and resolve its resources relative to that file.`).join("\n")}\nUse a skill when its trigger fits the task. The Lead chooses the approach; discovery does not mandate every skill on every task.`;
 }
 
 export async function registerSkill(cwd, directory) {
   const root = await projectRootFor(cwd);
   const entry = relative(root, resolve(cwd, directory)).split(sep).join("/");
+  const { projectSkillSettings, saveProjectSkills } = await import("./skill-settings.mjs");
+  const current = await projectSkillSettings(root);
+  await saveProjectSkills(root, [...new Set([...current.selected, entry])], current.revision);
   const path = join(root, ".alliance/skills.json");
-  await assertNoLinks(path);
-  const current = await readFile(path, "utf8")
-    .then(JSON.parse)
-    .catch((error) => {
-      if (error.code === "ENOENT") return { version: 1, skills: [] };
-      throw error;
-    });
-  const next = Manifest.parse({ ...current, skills: [...new Set([...current.skills, entry])] });
-  // Validate source before saving registration; no machine-wide profiles are changed.
-  await projectSkills(cwd, next);
-  await mkdir(dirname(path), { recursive: true });
-  const temporary = `${path}.${randomUUID()}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
-  await rename(temporary, path);
   return path;
 }

@@ -1,0 +1,3 @@
+#!/bin/sh
+# Git supplies the exact outgoing refs on stdin, including non-checked-out branches.
+exec node "$(git rev-parse --show-toplevel)/scripts/scan-secrets.mjs" --pre-push "$@"

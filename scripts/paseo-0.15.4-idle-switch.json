@@ -1,0 +1,72 @@
+{
+  "version": "0.15.4",
+  "files": [
+    {
+      "path": "@getpaseo/server/dist/server/server/agent/agent-manager.js",
+      "beforeSha256": "70ccb7af3911971e2b869d92d3038fbdbb3ac9c75ba2a54dd1a48f899346d4b0",
+      "afterSha256": "180c9304d5832444602d545ea34c3369f5d779b801e84244bda581d4b5e70f50",
+      "changes": [
+        [
+          "    getRuntimeCleanupCandidates() {",
+          "/** Runs inside the native lifecycle owner. No prompts, archive, cancellation or SQL writes. */\nasync retireIdleRuntime(agentId, expectedUpdatedAt) {\n  const live = this.getAgent(agentId);\n  if (!live || live.updatedAt.toISOString() !== expectedUpdatedAt) return false;\n  const runtimes = this.getRuntimeCleanupCandidates();\n  const root = runtimes.find((item) => item.agentId === agentId);\n  if (!root?.sessionId || !root.provider.startsWith(\"alliance-claude-\")) return false;\n  const family = new Map([[root.agentId, root]]);\n  for (const parent of family.values())\n    for (const child of runtimes)\n      if (child.parentAgentId === parent.agentId) family.set(child.agentId, child);\n  const eligible = () => {\n    const current = this.getRuntimeCleanupCandidates();\n    return (\n      [...family.values()].every((item) => item.isEligible()) &&\n      current\n        .filter((item) => family.has(item.agentId))\n        .every((item) => family.get(item.agentId).identity === item.identity) &&\n      !current.some(\n        (item) => item.parentAgentId && family.has(item.parentAgentId) && !family.has(item.agentId),\n      )\n    );\n  };\n  if (!eligible()) return false;\n  for (const item of family.values()) {\n    // Unknown provider background ownership is a veto, never a permission to stop.\n    if (!item.canStopRuntime) return false;\n    let timer;\n    try {\n      const allowed = await Promise.race([\n        item.canStopRuntime(),\n        new Promise((resolve) => {\n          timer = setTimeout(() => resolve(false), 10000);\n        }),\n      ]);\n      if (allowed !== true || !eligible()) return false;\n    } finally {\n      clearTimeout(timer);\n    }\n  }\n  // Native closeIfEligible blocks prompt admission, acquires the lifecycle lane, drains events,\n  // revalidates captured runtime identities and preserves the native persistence handle/history.\n  return root.closeIfEligible(eligible);\n}\n\n    getRuntimeCleanupCandidates() {"
+        ]
+      ]
+    },
+    {
+      "path": "@getpaseo/server/dist/server/server/session.js",
+      "beforeSha256": "8501c67dc2281740bfa5947457cb252fb00151707f27791bad7820f3b45c626b",
+      "afterSha256": "afbcf98eb9215b0c9081b62f78a4f9c7d6dc6fb7bb044b5b07462263a7c20572",
+      "changes": [
+        [
+          "        const { agentId, requestId } = msg;\n        this.sessionLogger.info({ agentId }, `Refreshing agent ${agentId} from persistence`);",
+          "        const { agentId, requestId } = msg;\n        if (msg.idleOnly === true) {\n            let runtimeRetired = false;\n            try {\n                runtimeRetired = await this.agentManager.retireIdleRuntime(agentId, msg.expectedUpdatedAt);\n            } catch { /* Keep custody and retry; do not fall through to destructive refresh. */ }\n            this.emit({ type: \"status\", payload: {\n                status: \"agent_refreshed\", agentId, requestId, timelineSize: 0, runtimeRetired,\n            }});\n            return;\n        }\n        this.sessionLogger.info({ agentId }, `Refreshing agent ${agentId} from persistence`);"
+        ]
+      ]
+    },
+    {
+      "path": "@getpaseo/protocol/dist/messages.js",
+      "beforeSha256": "7fae4753f56af42b9c418904d191eeb63339e0caebc52493864602009098b589",
+      "afterSha256": "f5b2e19a975519d234093268a0fc0affd63d58ae3e862e0a64617fe1a91cb9ec",
+      "changes": [
+        [
+          "    type: z.literal(\"refresh_agent_request\"),",
+          "    type: z.literal(\"refresh_agent_request\"),\n    idleOnly: z.literal(true).optional(),\n    expectedUpdatedAt: z.string().optional(),"
+        ],
+        [
+          "    status: z.literal(\"agent_refreshed\"),",
+          "    status: z.literal(\"agent_refreshed\"),\n    runtimeRetired: z.boolean().optional(),"
+        ],
+        [
+          "        idleRuntimeCleanupSetting: z.boolean().optional(),",
+          "        idleRuntimeCleanupSetting: z.boolean().optional(),\n        idleAccountSwitch: z.boolean().optional(),"
+        ]
+      ]
+    },
+    {
+      "path": "@getpaseo/server/dist/server/server/websocket-server.js",
+      "beforeSha256": "4f5a770d175334cb06cf7dbbba42714a2bf5fd5d6f16aae9682226a7ce64d466",
+      "afterSha256": "43caa05d0982115abf28d3b76049779cf9c8f0a4d683bb90e4f20c9b7ea1ac80",
+      "changes": [
+        [
+          "                idleRuntimeCleanupSetting: true,",
+          "                idleRuntimeCleanupSetting: true,\n                idleAccountSwitch: true,"
+        ]
+      ]
+    },
+    {
+      "path": "@getpaseo/client/dist/daemon-client.js",
+      "beforeSha256": "ec9286a70b759d0dabaf4e3b29680ed3739e4bd1300d019026d487a399500a17",
+      "afterSha256": "64841e431debb1f66311bd2b9805a340f441d2391ebe688ebf1e752e694b57bb",
+      "changes": [
+        [
+          "    async refreshAgent(agentId, requestId) {",
+          "    async retireIdleAgentRuntime(agentId, expectedUpdatedAt) {\n        if (this.getLastServerInfoMessage()?.features?.idleAccountSwitch !== true)\n            throw new Error(\"Daemon needs idle-account-switch support; no reload was attempted\");\n        return this.refreshAgent(agentId, undefined, { idleOnly: true, expectedUpdatedAt });\n    }\n    async refreshAgent(agentId, requestId, idleOptions = {}) {"
+        ],
+        [
+          "            type: \"refresh_agent_request\",",
+          "            type: \"refresh_agent_request\",\n            ...idleOptions,"
+        ]
+      ]
+    }
+  ]
+}

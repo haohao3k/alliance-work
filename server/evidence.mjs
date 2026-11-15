@@ -62,17 +62,25 @@ export async function candidateSnapshot(cwd, inputs = []) {
   return (await candidateCapture(cwd, inputs)).candidate;
 }
 
-/** The candidate and portable fingerprints from the same reads; Git inputs outside its file list remain proof inputs only. */
-export async function candidateCapture(cwd, inputs = []) {
+/** The candidate and portable fingerprints from the same reads; Git inputs outside its file list remain proof inputs only.
+ * @param {string} cwd @param {string[]} inputs @param {string} [expectedCwd]
+ */
+export async function candidateCapture(cwd, inputs = [], expectedCwd) {
   cwd = await realpath(cwd);
   const git = async (...args) => (await execute("git", args, { cwd, maxBuffer: 32 * 1024 * 1024 })).stdout;
   let root;
   try {
     root = (await git("rev-parse", "--show-toplevel")).trim();
   } catch {
-    if (!inputs.length) throw new Error("For non-Git work, name the candidate files with --input FILE");
+    root = null;
   }
   cwd = root ? await realpath(root) : cwd;
+  if (expectedCwd !== undefined && cwd !== expectedCwd)
+    throw new Error(
+      "Verification report belongs to another checkout; verify the member's registered checkout before accepting",
+    );
+  if (!root && !inputs.length)
+    throw new Error("For non-Git work, name the candidate files with --input FILE");
   const head = root
     ? await execute("git", ["rev-parse", "--verify", "HEAD"], { cwd })
         .then((r) => r.stdout.trim())
@@ -340,7 +348,7 @@ export async function validateEvidence(path, cwd, candidate) {
     throw new Error(
       "Acceptance needs a PASS verification report; record a rejection or resolve the failed/blocked check",
     );
-  const captured = await candidateCapture(cwd, report.candidate.inputs);
+  const captured = await candidateCapture(cwd, report.candidate.inputs, report.candidate.cwd);
   const current = captured.candidate;
   if (
     report.candidate.cwd !== current.cwd ||

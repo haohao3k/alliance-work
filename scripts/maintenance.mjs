@@ -3,7 +3,9 @@ import { constants, rmSync } from "node:fs";
 import { access, chmod, lstat, mkdir, readFile, rm, rmdir, unlink } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { diskHealth } from "../server/disk-health.mjs";
 import { bootTime, LOCK, lockState, MUTEX, takeLock } from "../server/maintenance-lock.mjs";
+import { storeAccessAt } from "../server/store-compat.mjs";
 import { authStatus, setAuthSource } from "./auth.mjs";
 import { inspectCapabilities } from "./capabilities.mjs";
 import { run } from "./distribution.mjs";
@@ -14,6 +16,7 @@ import {
   reloadRegisteredPlugin,
   requireCompatibleDaemon,
   requireIdle,
+  requireIdleSwitchDaemon,
   verifyRuntime,
 } from "./paseo.mjs";
 import { bundledPi } from "./pi-runtime.mjs";
@@ -66,7 +69,12 @@ export async function withMaintenance(home, action, { pause = true } = {}) {
   if (process.env.ALLIANCE_PARENT_MAINTENANCE === String(process.ppid)) {
     // The candidate installer runs under the pause its parent update holds.
     const owner = await readFile(join(home, LOCK, "owner.json"), "utf8").then(JSON.parse);
-    if (owner.pid !== process.ppid) throw new Error("Parent maintenance lock does not match.");
+    const hold = owner.holdId
+      ? await readFile(join(home, "maintenance-hold.json"), "utf8").then(JSON.parse)
+      : null;
+    const controller =
+      owner.controllerPid === process.ppid && hold?.id === owner.holdId && hold.phase !== "complete";
+    if (owner.pid !== process.ppid && !controller) throw new Error("Parent maintenance lock does not match.");
     return action();
   }
   const mutex = await takeLock(home, MUTEX);
@@ -220,6 +228,7 @@ export async function activate({
   }
   const pkg = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
   requireCompatibleDaemon(state?.daemonVersion, pkg.devDependencies["@getpaseo/cli"]);
+  if (state?.localDaemon === "running") await requireIdleSwitchDaemon(paseoHome);
   const capabilities = await inspectCapabilities(root);
   if (!capabilities.ok) throw new Error("Candidate is missing required Alliance capabilities");
   const pi = await bundledPi(root);
@@ -324,6 +333,31 @@ export async function doctor(home) {
   } catch (error) {
     findings.push({ check: "runtime", ok: false, error: error.message });
   }
+  try {
+    const store = await storeAccessAt(home);
+    if (store)
+      findings.push({
+        check: "store",
+        ok: store.access === "write",
+        ...(store.access === "write"
+          ? { level: store.level }
+          : {
+              access: store.access,
+              level: store.level,
+              neededLevel: store.access === "none" ? store.readLevel : store.writeLevel,
+              markedBy: store.markedBy,
+              error: store.message,
+            }),
+      });
+  } catch (error) {
+    findings.push({ check: "store", ok: false, error: `Could not read rooms.sqlite: ${error.message}` });
+  }
+  // Advice only: a full disk is reported, never a failed check, and never blocks an update.
+  const disk = await diskHealth({ home, paseoHome }).catch((error) => ({
+    warnings: [],
+    error: error.message,
+  }));
+  findings.push({ check: "disk", ok: true, ...disk });
   if (!record)
     findings.push({
       check: "installation",

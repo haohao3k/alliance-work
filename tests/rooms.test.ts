@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmod, mkdir, readFile, symlink, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, symlink, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { type TestContext, test } from "node:test";
 import type { PaseoApi } from "@getpaseo/client";
 import type { PluginHookAgent, PluginServerContext, PluginTurnOutcome } from "@getpaseo/plugin/server";
@@ -10,19 +11,58 @@ import contribute from "../index.server";
 import { launchPlan, profileEnvironment } from "../scripts/launch.mjs";
 import { writeLauncher } from "../scripts/maintenance.mjs";
 import { prepareProfiles, projectRoot, verifyProfile } from "../scripts/profiles.mjs";
+import { recordClaudeRuntime } from "../server/claude-runtime.mjs";
 import { runVerification } from "../server/evidence.mjs";
 import { composeInstruction } from "../server/instructions";
 import { AllianceRuntime, type DaemonInfo, type SchedulerClient, sendingRule } from "../server/runtime";
 import type { AutonomyState } from "../shared/autonomy";
 import { roomList } from "../shared/contracts";
+import { defaultModelPolicy } from "../shared/model-policy";
 import type { WakeRecordValue } from "../shared/wakeups";
 import { temporary } from "./temp";
 
+// Synthetic regression fixtures use invented agent IDs and fixed test clocks.
 function member(runtime: AllianceRuntime, id: string) {
   const record = runtime.store.member(id);
   assert(record, "Assigned member must exist");
   return record;
 }
+
+test("status exposes persisted Carbon routes without changing old model policies", async (t) => {
+  const f = await fixture();
+  t.after(() => f.runtime.close());
+  const policy = defaultModelPolicy();
+  policy.routes.push({
+    role: "lens",
+    harness: "agy",
+    model: "gemini-4-carbon-medium",
+    effort: "medium",
+    priority: 5,
+    difficulties: ["frontier"],
+  });
+  const data = JSON.stringify(policy);
+  const db = new DatabaseSync(join(f.home, "rooms.sqlite"));
+  try {
+    db.prepare("INSERT INTO room_model_policies(roomId,revision,data) VALUES(?,?,?)").run(f.room.id, 6, data);
+    const status = roomList.output.parse(await f.runtime.list(f.paseo));
+    assert.deepEqual(
+      status.modelPolicyWarnings?.map((w) => [w.roomId, w.revision, w.model]),
+      [[f.room.id, 6, "gemini-4-carbon-medium"]],
+    );
+    assert.equal(
+      db.prepare("SELECT data FROM room_model_policies WHERE roomId=?").get(f.room.id)?.data,
+      data,
+    );
+    assert.equal(f.runtime.store.modelPolicy(f.room.id).revision, 6);
+    assert.throws(() => f.runtime.store.saveModelPolicy(f.room.id, policy, 6), /Carbon.*refused/);
+    db.prepare("UPDATE room_model_policies SET data='{' WHERE roomId=?").run(f.room.id);
+    const unreadable = roomList.output.parse(await f.runtime.list(f.paseo));
+    assert.match(unreadable.modelPolicyWarnings?.[0]?.reason ?? "", /policy is unreadable/);
+    assert.equal(db.prepare("SELECT data FROM room_model_policies WHERE roomId=?").get(f.room.id)?.data, "{");
+  } finally {
+    db.close();
+  }
+});
 
 test("analysis bundle acceptance binds room files without promoting them to product completion", async (t) => {
   const f = await fixture();
@@ -738,6 +778,41 @@ test("native inheritance replaces the generated role without duplicating it or l
   assert.equal(composeInstruction("PEER_ROLE", peer), peer);
 });
 
+test("workers start without owner-only guidance, keep initiative and naming, and owners still get it all", async () => {
+  const f = await fixture();
+  try {
+    const read = (role: string) => f.runtime.instruction(`alliance-codex-${role}`, f.cwd, f.paseo);
+    const ownerOnly = [
+      "rename_workspace", // workspace titles belong to the accountable owner
+      "alliance-work reject --agent", // review decisions for children
+      "Lead chooses the difficulty", // route choice and intervention
+    ];
+    for (const role of ["hq", "supervisor", "lead"]) {
+      const text = await read(role);
+      for (const part of ownerOnly) assert.ok(text.includes(part), `${role} lacks ${part}`);
+    }
+    for (const role of ["peer", "lens"]) {
+      const text = await read(role);
+      for (const part of ownerOnly) assert.ok(!text.includes(part), `${role} still gets ${part}`);
+      // What a worker still needs: the Human's ownership text, laws, its own session name.
+      for (const part of ["Know your strength", "Engineering laws", "update_agent", "PASEO_AGENT_ID"])
+        assert.ok(text.includes(part), `${role} lacks ${part}`);
+    }
+    // A Peer may delegate, so it still sees the routes it can delegate to; a read-only Lens does not.
+    assert.ok((await read("peer")).includes("claude/claude-sonnet-5-5, high"));
+    const lens = await read("lens");
+    assert.ok(!lens.includes("claude/claude-opus-5-5, medium") && !lens.includes("Delegate on this host"));
+    const sizes = Object.fromEntries(
+      await Promise.all(
+        ["hq", "lead", "peer", "lens"].map(async (role) => [role, (await read(role)).length]),
+      ),
+    );
+    assert.ok(sizes.peer < sizes.lead && sizes.lens < sizes.peer, JSON.stringify(sizes));
+  } finally {
+    f.runtime.close();
+  }
+});
+
 test("native Alliance launch creates a missing room once and reuses it across concurrent starts and restart", async () => {
   const f = await fixture();
   try {
@@ -983,11 +1058,11 @@ test("a running member silent for 20 minutes wakes its idle owner once on Paseo 
 });
 
 test("an approval request still pending 5 minutes after Alliance first saw it is denied with how to redo the step, never allowed; its owner is not woken", async (t) => {
-  // Mac mini, 2026-10-21: Claude peer 3d285d1d (bypassPermissions) asked to run the first command at
-  // 16:46:31Z (its Lead c3f72b0b allowed it 29.7 min later) and the second at 17:20:37Z, which waited
+  // synthetic host, 2026-10-21: Claude peer 00000009 (bypassPermissions) asked to run the first command at
+  // 16:46:31Z (its Lead 00000017 allowed it 29.7 min later) and the second at 17:20:37Z, which waited
   // 8 h 40 min until the operator canceled the turn; the Lead sat idle. Here the plugin first loads
   // at 16:47:00Z, so a sweep first sees the earlier request; Paseo's hook reports the later one.
-  // Every scheduler round is a fresh plugin load (Paseo 0.11.2, as on the fleet).
+  // Every scheduler round is a fresh plugin load (Paseo 0.11.2, as in this fixture).
   t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-10-21T16:46:31Z") });
   const f = await fixture();
   const hooks = new Map<string, (event: unknown) => Promise<void>>();
@@ -1003,8 +1078,8 @@ test("an approval request still pending 5 minutes after Alliance first saw it is
   } as unknown as PluginServerContext);
   try {
     for (const [id, role, parentId] of [
-      ["c3f72b0b", "lead", null],
-      ["3d285d1d", "peer", "c3f72b0b"],
+      ["00000017", "lead", null],
+      ["00000009", "peer", "00000017"],
     ] as const)
       f.runtime.store.saveMember({
         id,
@@ -1030,8 +1105,8 @@ test("an approval request still pending 5 minutes after Alliance first saw it is
       approvals: [{ id, command }],
     });
     const agents = new Map<string, Live>([
-      ["c3f72b0b", { status: "idle", updatedAt: Date.now() }],
-      ["3d285d1d", asking("request-1", first)],
+      ["00000017", { status: "idle", updatedAt: Date.now() }],
+      ["00000009", asking("request-1", first)],
       // An agent that is not an Alliance member keeps its request.
       ["daily-claude", asking("request-9", second)],
     ]);
@@ -1049,19 +1124,19 @@ test("an approval request still pending 5 minutes after Alliance first saw it is
     await until("16:52:00");
     assert.deepEqual(
       daemon.answers.map((a) => [a.id, a.requestId, a.behavior, a.at]),
-      [["3d285d1d", "request-1", "deny", Date.parse("2026-10-21T16:52:00Z")]],
+      [["00000009", "request-1", "deny", Date.parse("2026-10-21T16:52:00Z")]],
     );
     assert.ok(daemon.answers[0].message, "the denial says how to go on");
-    agents.set("3d285d1d", { status: "idle", updatedAt: Date.now() }); // its turn went on and ended
+    agents.set("00000009", { status: "idle", updatedAt: Date.now() }); // its turn went on and ended
     t.mock.timers.setTime(Date.parse("2026-10-21T17:20:37Z"));
-    agents.set("3d285d1d", asking("request-2", second));
+    agents.set("00000009", asking("request-2", second));
     await hooks.get("agent.permission.before")?.({
       agent: {
-        id: "3d285d1d",
+        id: "00000009",
         provider: "alliance-claude-peer",
         cwd: f.cwd,
         workspaceId: "workspace-1",
-        parentAgentId: "c3f72b0b",
+        parentAgentId: "00000017",
         title: null,
       },
       request: {
@@ -1076,8 +1151,8 @@ test("an approval request still pending 5 minutes after Alliance first saw it is
     assert.deepEqual(
       daemon.answers.map((a) => [a.id, a.requestId, a.behavior, a.at]),
       [
-        ["3d285d1d", "request-1", "deny", Date.parse("2026-10-21T16:52:00Z")],
-        ["3d285d1d", "request-2", "deny", Date.parse("2026-10-21T17:25:37Z")],
+        ["00000009", "request-1", "deny", Date.parse("2026-10-21T16:52:00Z")],
+        ["00000009", "request-2", "deny", Date.parse("2026-10-21T17:25:37Z")],
       ],
       "5 minutes after the hook reported it; nothing is ever allowed, and only members are answered",
     );
@@ -1085,13 +1160,13 @@ test("an approval request still pending 5 minutes after Alliance first saw it is
     assert.deepEqual(
       f.runtime.wakeups.list().map((w) => [w.ownerId, w.delivery, w.state]),
       [
-        ["c3f72b0b", "pull", "pending"],
-        ["c3f72b0b", "pull", "pending"],
+        ["00000017", "pull", "pending"],
+        ["00000017", "pull", "pending"],
       ],
       "the owner finds each denial among its pull items",
     );
     const status = roomList.output.parse(await f.runtime.list(daemon.api));
-    assert.deepEqual(status.members.find((m) => m.id === "3d285d1d")?.denied, {
+    assert.deepEqual(status.members.find((m) => m.id === "00000009")?.denied, {
       requestId: "request-2",
       tool: "Bash",
       command: second,
@@ -1587,12 +1662,12 @@ test("a coordinator waiting on its worker's turn is not continued meanwhile and 
 });
 
 test("a coordinator waiting on its worker's turn acks the reminder when that turn handed nothing back, not when it handed back", async (t) => {
-  // Mac mini, 2026-10-22: Lead c3f72b0b's 03:05:00 message started peer b3a45374's foreground-turn-7 (U2).
+  // synthetic host, 2026-10-22: Lead 00000017's 03:05:00 message started peer 00000016's foreground-turn-7 (U2).
   // The peer checkpointed waiting at 03:40:49 while its own rig ran and ended the turn at 03:41:02; its
   // Monitor started autonomous-turn-8 at 03:41:19. The Lead's 04:27:23 rework started foreground-turn-11,
   // which handed back at 04:30:43. 0.1.18 had no `wait`; 0.1.19's contract has the Lead run `wait --agent`
-  // after such a message. Nothing is kept, as on ryzen (a keep would release the ack anyway).
-  const [hq, lead, peer] = ["d34294ec", "c3f72b0b", "b3a45374"];
+  // after such a message. Nothing is kept, as on primaryHost (a keep would release the ack anyway).
+  const [hq, lead, peer] = ["00000019", "00000017", "00000016"];
   const h = await claudeHost(t, "2026-10-22", "03:05:00.233", [
     [hq, "hq", null],
     [lead, "lead", hq],
@@ -1632,7 +1707,7 @@ test("a coordinator waiting on its worker's turn acks the reminder when that tur
     h.runtime.autonomy.checkpoint(
       peer,
       "review",
-      "U2 handback offline xong: results/pilot/u2.md, commit local; rig đạt, chờ Lead chạy bộ test runtime",
+      "U2 fixture handback ready: results/fixture/u2.md; awaiting runtime validation",
     );
     await h.end(peer, "autonomous-turn-8", "03:59:08.593", []);
     await h.rounds("04:27:23.548", true);
@@ -1648,11 +1723,11 @@ test("a coordinator waiting on its worker's turn acks the reminder when that tur
     await h.rounds("04:31:10", true);
     assert.throws(
       () => ack(handback),
-      /Decide on b3a45374 turn foreground-turn-11/,
+      /Decide on 00000016 turn foreground-turn-11/,
       "a handback needs a decision",
     );
     // Not in that sequence: the Lead's next message starts foreground-turn-12, and a blocker the peer
-    // records in it needs a decision too (HQ acked Lead c3f72b0b's real one, 2026-10-21 15:55:34Z).
+    // records in it needs a decision too (HQ acked Lead 00000017's real one, 2026-10-21 15:55:34Z).
     await h.rounds("04:32:00", true);
     await h.begin(peer, "foreground-turn-12", "04:32:00");
     const blocker = await registerWait(rpc, request, () => {});
@@ -1661,7 +1736,7 @@ test("a coordinator waiting on its worker's turn acks the reminder when that tur
     await h.rounds("04:33:00", true);
     assert.throws(
       () => ack(blocker),
-      /Decide on b3a45374 turn foreground-turn-12/,
+      /Decide on 00000016 turn foreground-turn-12/,
       "a blocker needs a decision",
     );
   } finally {
@@ -1670,10 +1745,10 @@ test("a coordinator waiting on its worker's turn acks the reminder when that tur
 });
 
 test("the 48h reminder about an older handback that a handback-only record waits on needs a decision, not an ack", async (t) => {
-  // ryzen's first 0.1.19 load, replayed at 2026-10-24T20:00Z: Lead 2f2afb70, owned by Supervisor 07c84a80,
+  // the synthetic host's first 0.1.19 load, replayed at 2026-10-24T20:00Z: Lead 00000006, owned by Supervisor 00000003,
   // last completed codex-turn-34 undecided, before turn ends were recorded (0.1.18 started its clock at
   // 2026-10-21T13:15:42.644Z). ensure() gives it a record that waits, with no checkpoint of its own.
-  const [supervisor, lead] = ["07c84a80", "2f2afb70"];
+  const [supervisor, lead] = ["00000003", "00000006"];
   const h = await claudeHost(t, "2026-10-24", "20:00:00", [
     [supervisor, "supervisor", null],
     [lead, "lead", supervisor],
@@ -1683,7 +1758,8 @@ test("the 48h reminder about an older handback that a handback-only record waits
       lastTurnId: "codex-turn-34",
       lastOutcome: "completed",
       resultPath: "codex-turn-34.json",
-      staleSince: Date.parse("2026-10-21T13:15:42.644Z"),
+      // A day later than the synthetic host's clock: work over three days overdue is phased in over a day instead.
+      staleSince: Date.parse("2026-10-22T13:15:42.644Z"),
     });
     await h.rounds("20:00:15", true);
     const r = h.runtime.autonomy.get(lead);
@@ -1696,7 +1772,7 @@ test("the 48h reminder about an older handback that a handback-only record waits
     const [reminder] = h.runtime.wakeups.list().filter((w) => w.ownerId === supervisor);
     assert.throws(
       () => h.runtime.wakeups.action(reminder.key, supervisor, reminder.revision, "ack"),
-      /Decide on 2f2afb70 turn codex-turn-34/,
+      /Decide on 00000006 turn codex-turn-34/,
       "an older handback needs a decision",
     );
   } finally {
@@ -1704,27 +1780,26 @@ test("the 48h reminder about an older handback that a handback-only record waits
   }
 });
 
-test("ryzen's 2026-10-21 Claude session limit: nothing is sent before its reset, then one retry per member whose own turn it cut", async (t) => {
-  // The real limit turns of ryzen's 96 (turn ids, outcomes, end times and text from the plugin's own
-  // turn records), without the continuations and review pushes 0.1.18 caused. Reconstructed, as the
-  // store keeps no history: one room; turn starts where only ends were recorded; a086bd67 handed back
-  // at 13:53:37 and 6b1b2874, waiting on it, was reviewing that handback when the limit hit.
+test("the synthetic host's 2026-10-21 Claude session limit: nothing is sent before its reset, then one retry per member whose own turn it cut", async (t) => {
+  // Synthetic limit turns exercise the interaction between turn ownership and quota recovery.
+  // One room includes both explicit prompts and self-started turns; 00000015 handed back
+  // at 13:53:37 and 00000010, waiting on it, was reviewing that handback when the limit hit.
   const notice = "You've hit your session limit · resets 9:40pm (Asia/Ho_Chi_Minh)";
   const h = await claudeHost(t, "2026-10-21", "13:45:00", [
-    ["09965fb3", "hq", null],
-    ["0797f638", "lead", null],
-    ["7f6471fb", "lead", null],
-    ["ccd9ee38", "lead", "09965fb3"],
-    ["5e3d3284", "lead", "0797f638"],
-    ["6b1b2874", "lead", "7f6471fb"],
-    ["5ea0e42d", "peer", "ccd9ee38"],
-    ["3122c64c", "peer", "ccd9ee38"],
-    ["101b90b1", "peer", "5e3d3284"],
-    ["a086bd67", "peer", "6b1b2874"],
+    ["00000004", "hq", null],
+    ["00000002", "lead", null],
+    ["00000013", "lead", null],
+    ["00000018", "lead", "00000004"],
+    ["0000000e", "lead", "00000002"],
+    ["00000010", "lead", "00000013"],
+    ["0000000f", "peer", "00000018"],
+    ["00000007", "peer", "00000018"],
+    ["00000005", "peer", "0000000e"],
+    ["00000015", "peer", "00000010"],
   ]);
   try {
-    // Each owner created its assignments; ccd9ee38 had none, so the plugin gives it a handback-only one.
-    for (const id of ["5e3d3284", "6b1b2874", "5ea0e42d", "3122c64c", "101b90b1", "a086bd67"])
+    // Each owner created its assignments; 00000018 had none, so the plugin gives it a handback-only one.
+    for (const id of ["0000000e", "00000010", "0000000f", "00000007", "00000005", "00000015"])
       h.runtime.autonomy.start(id);
     const prompted = (id: string, turnId: string, messageId = `${id}-${turnId}`): AgentTimelineItem[] => [
       { type: "user_message", text: `Prompt of ${turnId}`, clientMessageId: messageId },
@@ -1735,36 +1810,36 @@ test("ryzen's 2026-10-21 Claude session limit: nothing is sent before its reset,
       { type: "assistant_message", text: "Earlier reply" },
       { type: "assistant_message", text: notice },
     ];
-    await h.begin("6b1b2874", "foreground-turn-7", "13:45:00");
-    h.runtime.autonomy.checkpoint("6b1b2874", "waiting", "Waiting for peer a086bd67", "foreground-turn-7");
-    await h.end("6b1b2874", "foreground-turn-7", "13:45:10", []);
-    await h.begin("5e3d3284", "foreground-turn-9", "13:47:00");
-    await h.begin("5ea0e42d", "foreground-turn-1", "13:50:00");
-    await h.begin("3122c64c", "foreground-turn-1", "13:52:00");
+    await h.begin("00000010", "foreground-turn-7", "13:45:00");
+    h.runtime.autonomy.checkpoint("00000010", "waiting", "Waiting for peer 00000015", "foreground-turn-7");
+    await h.end("00000010", "foreground-turn-7", "13:45:10", []);
+    await h.begin("0000000e", "foreground-turn-9", "13:47:00");
+    await h.begin("0000000f", "foreground-turn-1", "13:50:00");
+    await h.begin("00000007", "foreground-turn-1", "13:52:00");
     await h.rounds("13:53:30", true);
-    await h.begin("a086bd67", "autonomous-turn-54", "13:53:30");
-    h.runtime.autonomy.checkpoint("a086bd67", "review", "Peer R's work is done", "autonomous-turn-54");
-    await h.end("a086bd67", "autonomous-turn-54", "13:53:37", []);
+    await h.begin("00000015", "autonomous-turn-54", "13:53:30");
+    h.runtime.autonomy.checkpoint("00000015", "review", "Peer R's work is done", "autonomous-turn-54");
+    await h.end("00000015", "autonomous-turn-54", "13:53:37", []);
     await h.rounds("13:55:00", true);
-    await h.begin("101b90b1", "foreground-turn-3", "13:55:00");
+    await h.begin("00000005", "foreground-turn-3", "13:55:00");
     await h.rounds("13:56:00", true);
-    const batch = h.sent.find((s) => s.id === "6b1b2874");
+    const batch = h.sent.find((s) => s.id === "00000010");
     assert.ok(batch, "the handback was pushed to its owner");
-    await h.begin("6b1b2874", "foreground-turn-8", "13:56:00");
+    await h.begin("00000010", "foreground-turn-8", "13:56:00");
     await h.rounds("14:03:16", true);
-    await h.end("5ea0e42d", "foreground-turn-1", "14:03:16", prompted("5ea0e42d", "foreground-turn-1"));
+    await h.end("0000000f", "foreground-turn-1", "14:03:16", prompted("0000000f", "foreground-turn-1"));
     await h.rounds("14:03:29", true);
-    await h.end("3122c64c", "foreground-turn-1", "14:03:29", prompted("3122c64c", "foreground-turn-1"));
+    await h.end("00000007", "foreground-turn-1", "14:03:29", prompted("00000007", "foreground-turn-1"));
     await h.rounds("14:06:13", true);
-    await h.end("6b1b2874", "foreground-turn-8", "14:06:13", prompted("6b1b2874", "", batch.messageId));
+    await h.end("00000010", "foreground-turn-8", "14:06:13", prompted("00000010", "", batch.messageId));
     await h.rounds("14:06:40", true);
-    await h.end("101b90b1", "foreground-turn-3", "14:06:40", prompted("101b90b1", "foreground-turn-3"));
-    await h.end("5e3d3284", "foreground-turn-9", "14:06:41", prompted("5e3d3284", "foreground-turn-9"));
+    await h.end("00000005", "foreground-turn-3", "14:06:40", prompted("00000005", "foreground-turn-3"));
+    await h.end("0000000e", "foreground-turn-9", "14:06:41", prompted("0000000e", "foreground-turn-9"));
     for (const [id, turnId, start, end] of [
-      ["a086bd67", "autonomous-turn-55", "14:08:30", "14:08:33"],
-      ["a086bd67", "autonomous-turn-60", "14:10:38", "14:10:41"],
-      ["ccd9ee38", "autonomous-turn-11", "14:20:23", "14:20:26"],
-      ["09965fb3", "autonomous-turn-7", "14:25:58", "14:26:01"],
+      ["00000015", "autonomous-turn-55", "14:08:30", "14:08:33"],
+      ["00000015", "autonomous-turn-60", "14:10:38", "14:10:41"],
+      ["00000018", "autonomous-turn-11", "14:20:23", "14:20:26"],
+      ["00000004", "autonomous-turn-7", "14:25:58", "14:26:01"],
     ]) {
       await h.rounds(start, true);
       await h.begin(id, turnId, start);
@@ -1794,26 +1869,26 @@ test("ryzen's 2026-10-21 Claude session limit: nothing is sent before its reset,
     assert.deepEqual(
       own.map((s) => [s.id, s.text.split(" [", 1)[0]]).sort(),
       [
-        ["101b90b1", "Alliance retry after failed turn"],
-        ["3122c64c", "Alliance retry after failed turn"],
-        ["5e3d3284", "Alliance retry after failed turn"],
-        ["5ea0e42d", "Alliance retry after failed turn"],
-        ["ccd9ee38", "Alliance retry after failed turn"],
+        ["00000005", "Alliance retry after failed turn"],
+        ["00000007", "Alliance retry after failed turn"],
+        ["0000000e", "Alliance retry after failed turn"],
+        ["0000000f", "Alliance retry after failed turn"],
+        ["00000018", "Alliance retry after failed turn"],
       ],
       "one retry for each member whose own turn the limit cut",
     );
-    for (const id of ["5ea0e42d", "3122c64c", "101b90b1", "5e3d3284"])
+    for (const id of ["0000000f", "00000007", "00000005", "0000000e"])
       assert.deepEqual(
         [h.runtime.autonomy.get(id)?.retries, h.runtime.autonomy.get(id)?.continuations],
         [0, 0],
         `${id} used no budget`,
       );
     const during = Date.parse("2026-10-21T14:26:01Z");
-    assert.equal(h.runtime.store.heldUntil("7f6471fb", during), reset, "every Claude member waited");
+    assert.equal(h.runtime.store.heldUntil("00000013", during), reset, "every Claude member waited");
     // A handback stands; the review batch the limit cut short is Wakeups' to send again.
-    assert.equal(h.runtime.autonomy.get("a086bd67")?.phase, "review");
-    assert.equal(h.runtime.autonomy.get("6b1b2874")?.phase, "waiting");
-    assert.deepEqual(h.runtime.store.member("6b1b2874")?.limited, {
+    assert.equal(h.runtime.autonomy.get("00000015")?.phase, "review");
+    assert.equal(h.runtime.autonomy.get("00000010")?.phase, "waiting");
+    assert.deepEqual(h.runtime.store.member("00000010")?.limited, {
       until: reset,
       messageId: batch.messageId,
     });
@@ -1822,67 +1897,67 @@ test("ryzen's 2026-10-21 Claude session limit: nothing is sent before its reset,
       [],
       "no prompt of any kind, owners' notices included, reaches a Claude member while the limit holds",
     );
-    // a086bd67's own Monitor turns after its handback leave that review standing.
-    const again = h.sent.filter((s) => s.id === "6b1b2874" && s.at >= reset);
-    assert.equal(again.length, 1, "after the reset its owner is asked about a086bd67's handback, once");
+    // 00000015's own Monitor turns after its handback leave that review standing.
+    const again = h.sent.filter((s) => s.id === "00000010" && s.at >= reset);
+    assert.equal(again.length, 1, "after the reset its owner is asked about 00000015's handback, once");
     assert.deepEqual(
       h.runtime.wakeups
         .list()
         .filter((w) => w.messageId === again[0].messageId)
         .map((w) => w.trigger.kind === "turn" && w.trigger.agentId),
-      ["a086bd67"],
+      ["00000015"],
     );
     // 15:42-15:43:42: the Lead's resume prompt started foreground-turn-22, and its next message
     // canceled it before Claude replied. The timeline Paseo passed still ended on the old notice.
-    await h.begin("5ea0e42d", "foreground-turn-22", "15:42:00");
+    await h.begin("0000000f", "foreground-turn-22", "15:42:00");
     await h.end(
-      "5ea0e42d",
+      "0000000f",
       "foreground-turn-22",
       "15:43:42",
       [
-        ...prompted("5ea0e42d", "foreground-turn-21"),
+        ...prompted("0000000f", "foreground-turn-21"),
         {
           type: "user_message",
-          text: "Lead ccd9ee38: you stopped on the account session limit…",
+          text: "Lead 00000018: you stopped on the account session limit…",
           clientMessageId: "resume",
         },
       ],
       { kind: "canceled", reason: "interrupted" },
     );
-    assert.equal(h.runtime.autonomy.get("5ea0e42d")?.pausedBy, "cancel", "a cancellation, not another limit");
-    assert.equal(h.runtime.store.member("5ea0e42d")?.limited, undefined);
+    assert.equal(h.runtime.autonomy.get("0000000f")?.pausedBy, "cancel", "a cancellation, not another limit");
+    assert.equal(h.runtime.store.member("0000000f")?.limited, undefined);
   } finally {
     await h.runtime.close();
   }
 });
 
-test("a review batch whose turn ended on ryzen's session limit is sent to its owner again once the limit lifts", async (t) => {
-  // ryzen, 2026-10-21: the plugin pushed a086bd67's handback (13:53:37Z) to its waiting Lead 6b1b2874,
+test("a review batch whose turn ended on the synthetic host's session limit is sent to its owner again once the limit lifts", async (t) => {
+  // primaryHost, 2026-10-21: the plugin pushed 00000015's handback (13:53:37Z) to its waiting Lead 00000010,
   // whose turn reading it (foreground-turn-8, 13:56Z) ended at 14:06:13Z on Claude's session-limit
-  // notice; Paseo reported it completed. 0.1.18 left such reviews "delivered" for 14 h (6b1b2874's and
-  // 5e3d3284's at 14:17-14:18Z, with the peers at rest). The peer's later Monitor turns are left out
+  // notice; Paseo reported it completed. 0.1.18 left such reviews "delivered" for 14 h (00000010's and
+  // 0000000e's at 14:17-14:18Z, with the peers at rest). The peer's later Monitor turns are left out
   // here; the replay above covers them.
   const notice = "You've hit your session limit · resets 9:40pm (Asia/Ho_Chi_Minh)";
   const h = await claudeHost(t, "2026-10-21", "13:45:00", [
-    ["7f6471fb", "lead", null],
-    ["6b1b2874", "lead", "7f6471fb"],
-    ["a086bd67", "peer", "6b1b2874"],
+    ["00000013", "lead", null],
+    ["00000010", "lead", "00000013"],
+    ["00000015", "peer", "00000010"],
   ]);
   try {
-    for (const id of ["6b1b2874", "a086bd67"]) h.runtime.autonomy.start(id);
-    await h.begin("6b1b2874", "foreground-turn-7", "13:45:00");
-    h.runtime.autonomy.checkpoint("6b1b2874", "waiting", "Waiting for peer a086bd67", "foreground-turn-7");
-    await h.end("6b1b2874", "foreground-turn-7", "13:45:10", []);
-    await h.begin("a086bd67", "autonomous-turn-54", "13:53:30");
-    h.runtime.autonomy.checkpoint("a086bd67", "review", "Peer R's work is done", "autonomous-turn-54");
-    await h.end("a086bd67", "autonomous-turn-54", "13:53:37", []);
+    for (const id of ["00000010", "00000015"]) h.runtime.autonomy.start(id);
+    await h.begin("00000010", "foreground-turn-7", "13:45:00");
+    h.runtime.autonomy.checkpoint("00000010", "waiting", "Waiting for peer 00000015", "foreground-turn-7");
+    await h.end("00000010", "foreground-turn-7", "13:45:10", []);
+    await h.begin("00000015", "autonomous-turn-54", "13:53:30");
+    h.runtime.autonomy.checkpoint("00000015", "review", "Peer R's work is done", "autonomous-turn-54");
+    await h.end("00000015", "autonomous-turn-54", "13:53:37", []);
     await h.rounds("13:56:00", true);
     const [batch] = h.sent;
-    assert.equal(batch?.id, "6b1b2874", "the handback was pushed to its owner");
+    assert.equal(batch?.id, "00000010", "the handback was pushed to its owner");
     const review = h.runtime.wakeups.list().find((w) => w.messageId === batch.messageId);
-    await h.begin("6b1b2874", "foreground-turn-8", "13:56:00");
+    await h.begin("00000010", "foreground-turn-8", "13:56:00");
     await h.rounds("14:06:13", true);
-    await h.end("6b1b2874", "foreground-turn-8", "14:06:13", [
+    await h.end("00000010", "foreground-turn-8", "14:06:13", [
       { type: "user_message", text: batch.text, clientMessageId: batch.messageId },
       { type: "assistant_message", text: notice },
     ]);
@@ -1890,12 +1965,12 @@ test("a review batch whose turn ended on ryzen's session limit is sent to its ow
     const reset = Date.parse("2026-10-21T14:41:00Z");
     assert.deepEqual(
       h.sent.slice(1).map((s) => [s.id, s.at >= reset]),
-      [["6b1b2874", true]],
+      [["00000010", true]],
       "nothing before the reset, then that batch again",
     );
     assert.ok(review && h.sent[1].text.includes(`[${review.key}]`));
     assert.equal(h.runtime.wakeups.list().find((w) => w.key === review.key)?.messageId, h.sent[1].messageId);
-    assert.equal(h.runtime.autonomy.get("6b1b2874")?.phase, "waiting");
+    assert.equal(h.runtime.autonomy.get("00000010")?.phase, "waiting");
   } finally {
     await h.runtime.close();
   }
@@ -1906,13 +1981,13 @@ test("a Claude API error that Paseo reports as a completed turn is retried withi
   // turn completed on this message with zero usage, and the plugin continued the peer until its
   // continuation budget ran out.
   const h = await claudeHost(t, "2026-10-22", "05:10:29", [
-    ["3f96ef8a", "lead", null],
-    ["5e2719a2", "peer", "3f96ef8a"],
+    ["0000000a", "lead", null],
+    ["0000000d", "peer", "0000000a"],
   ]);
   try {
-    h.runtime.autonomy.start("5e2719a2");
-    await h.begin("5e2719a2", "foreground-turn-1", "05:10:29");
-    await h.end("5e2719a2", "foreground-turn-1", "05:10:33", [
+    h.runtime.autonomy.start("0000000d");
+    await h.begin("0000000d", "foreground-turn-1", "05:10:29");
+    await h.end("0000000d", "foreground-turn-1", "05:10:33", [
       {
         type: "user_message",
         text: "Write hello.txt containing hello, then end your turn.",
@@ -1928,39 +2003,39 @@ test("a Claude API error that Paseo reports as a completed turn is retried withi
       h.sent.map((s) => s.text.split(" [", 1)[0]),
       ["Alliance retry after failed turn"],
     );
-    assert.equal(h.runtime.autonomy.get("5e2719a2")?.continuations, 0);
-    assert.equal(h.runtime.store.member("5e2719a2")?.limited, undefined, "no reset, so nothing is held");
+    assert.equal(h.runtime.autonomy.get("0000000d")?.continuations, 0);
+    assert.equal(h.runtime.store.member("0000000d")?.limited, undefined, "no reset, so nothing is held");
   } finally {
     await h.runtime.close();
   }
 });
 
 test("a Claude limit notice recorded inside its printed reset minute holds until a minute later, not the next day", async (t) => {
-  // ryzen, 2026-10-21: "resets 9:40pm (Asia/Ho_Chi_Minh)" is 14:40Z, and Claude Code prints that minute
-  // without its seconds until the reset second inside it. a086bd67's Monitor turns kept ending on the
+  // primaryHost, 2026-10-21: "resets 9:40pm (Asia/Ho_Chi_Minh)" is 14:40Z, and Claude Code prints that minute
+  // without its seconds until the reset second inside it. 00000015's Monitor turns kept ending on the
   // notice through the limit (14:08:33, 14:10:41); its next one here ends on it at 14:40:20, inside
-  // that minute (the fleet shows no turn in it). The owners' own owners are left out.
+  // that minute (this fixture has no turn in it). The owners' own owners are left out.
   const notice = "You've hit your session limit · resets 9:40pm (Asia/Ho_Chi_Minh)";
   const h = await claudeHost(t, "2026-10-21", "13:50:46.933", [
-    ["ccd9ee38", "lead", null],
-    ["6b1b2874", "lead", null],
-    ["5ea0e42d", "peer", "ccd9ee38"],
-    ["a086bd67", "peer", "6b1b2874"],
+    ["00000018", "lead", null],
+    ["00000010", "lead", null],
+    ["0000000f", "peer", "00000018"],
+    ["00000015", "peer", "00000010"],
   ]);
   try {
-    for (const id of ["5ea0e42d", "a086bd67"]) h.runtime.autonomy.start(id);
-    await h.begin("5ea0e42d", "foreground-turn-1", "13:50:46.933");
-    await h.begin("a086bd67", "autonomous-turn-54", "13:53:30");
+    for (const id of ["0000000f", "00000015"]) h.runtime.autonomy.start(id);
+    await h.begin("0000000f", "foreground-turn-1", "13:50:46.933");
+    await h.begin("00000015", "autonomous-turn-54", "13:53:30");
     h.at("13:53:31.590");
     h.runtime.autonomy.checkpoint(
-      "a086bd67",
+      "00000015",
       "review",
       "Peer R handback ready: handback-R.md; Part 1 and Part 2 checks pass; npm check and build exit 0; dev servers stopped.",
     );
-    await h.end("a086bd67", "autonomous-turn-54", "13:53:37.869", []);
+    await h.end("00000015", "autonomous-turn-54", "13:53:37.869", []);
     await h.rounds("14:03:16.870", true);
-    await h.end("5ea0e42d", "foreground-turn-1", "14:03:16.870", [
-      { type: "user_message", text: "Prompt of foreground-turn-1", clientMessageId: "5ea0e42d-create" },
+    await h.end("0000000f", "foreground-turn-1", "14:03:16.870", [
+      { type: "user_message", text: "Prompt of foreground-turn-1", clientMessageId: "0000000f-create" },
       { type: "assistant_message", text: notice },
     ]);
     for (const [turnId, start, end] of [
@@ -1969,12 +2044,12 @@ test("a Claude limit notice recorded inside its printed reset minute holds until
       ["autonomous-turn-61", "14:40:19", "14:40:20"],
     ]) {
       await h.rounds(start, true);
-      await h.begin("a086bd67", turnId, start);
-      await h.end("a086bd67", turnId, end, [{ type: "assistant_message", text: notice }]);
+      await h.begin("00000015", turnId, start);
+      await h.end("00000015", turnId, end, [{ type: "assistant_message", text: notice }]);
     }
-    assert.equal(h.runtime.store.member("a086bd67")?.limited?.until, Date.parse("2026-10-21T14:41:20Z"));
+    assert.equal(h.runtime.store.member("00000015")?.limited?.until, Date.parse("2026-10-21T14:41:20Z"));
     await h.rounds("14:45:00", true);
-    const retry = h.sent.find((s) => s.id === "5ea0e42d" && s.text.startsWith("Alliance retry"));
+    const retry = h.sent.find((s) => s.id === "0000000f" && s.text.startsWith("Alliance retry"));
     assert.ok(
       retry &&
         retry.at >= Date.parse("2026-10-21T14:41:20Z") &&
@@ -1987,36 +2062,36 @@ test("a Claude limit notice recorded inside its printed reset minute holds until
 });
 
 test("a limit in a turn Claude Code starts by itself does not send again the batch an earlier turn read", async (t) => {
-  // ryzen, 2026-10-21: lane A peer 71983338 handed back in foreground-turn-2 (review checkpoint 13:48:28),
-  // and Lead ccd9ee38 read the review the plugin pushed (its foreground-turn-8, ended 13:53:15) without
+  // primaryHost, 2026-10-21: lane A peer 00000075 handed back in foreground-turn-2 (review checkpoint 13:48:28),
+  // and Lead 00000018 read the review the plugin pushed (its foreground-turn-8, ended 13:53:15) without
   // deciding. Its background suite then finished: Claude Code started autonomous-turn-11 at 14:20:26.074,
   // which ended at 14:20:26.771 on the session limit. Paseo records that task notification as a tool
   // call, so the last user message in the turn's timeline is still the batch.
   const notice = "You've hit your session limit · resets 9:40pm (Asia/Ho_Chi_Minh)";
   const h = await claudeHost(t, "2026-10-21", "11:36:54.166", [
-    ["09965fb3", "hq", null],
-    ["ccd9ee38", "lead", "09965fb3"],
-    ["71983338", "peer", "ccd9ee38"],
+    ["00000004", "hq", null],
+    ["00000018", "lead", "00000004"],
+    ["00000075", "peer", "00000018"],
   ]);
   try {
-    h.runtime.autonomy.start("71983338");
-    await h.begin("71983338", "foreground-turn-2", "11:36:54.166");
+    h.runtime.autonomy.start("00000075");
+    await h.begin("00000075", "foreground-turn-2", "11:36:54.166");
     // Its handback prompt starts the Lead's foreground-turn-7; then it records its review.
-    await h.begin("ccd9ee38", "foreground-turn-7", "13:48:27.851");
+    await h.begin("00000018", "foreground-turn-7", "13:48:27.851");
     h.at("13:48:28.195");
     h.runtime.autonomy.checkpoint(
-      "71983338",
+      "00000075",
       "review",
       "a-r1 lane A done: RESULT-a-r1.md written in lead/lane-a",
     );
-    await h.end("71983338", "foreground-turn-2", "13:48:35.595", [
+    await h.end("00000075", "foreground-turn-2", "13:48:35.595", [
       {
         type: "assistant_message",
-        text: "Lane A is finished. I wrote `RESULT-a-r1.md`, sent the single handback to Lead ccd9ee38, and recorded the `review` checkpoint. I'm stopping here.",
+        text: "Lane A is finished. I wrote `RESULT-a-r1.md`, sent the single handback to Lead 00000018, and recorded the `review` checkpoint. I'm stopping here.",
       },
     ]);
     await h.rounds("13:52:50.325", true);
-    await h.end("ccd9ee38", "foreground-turn-7", "13:52:50.325", [
+    await h.end("00000018", "foreground-turn-7", "13:52:50.325", [
       {
         type: "user_message",
         text: "a-r1 (lane A) handback. Result: RESULT-a-r1.md",
@@ -2025,7 +2100,7 @@ test("a limit in a turn Claude Code starts by itself does not send again the bat
       { type: "assistant_message", text: "The full suite is running. Wave 1 work is integrated." },
     ]);
     await h.rounds("13:53:06", true);
-    const batch = h.sent.find((s) => s.id === "ccd9ee38");
+    const batch = h.sent.find((s) => s.id === "00000018");
     assert.ok(batch, "the review is pushed to the Lead");
     const read: AgentTimelineItem[] = [
       { type: "user_message", text: batch.text, clientMessageId: batch.messageId },
@@ -2034,11 +2109,11 @@ test("a limit in a turn Claude Code starts by itself does not send again the bat
         text: "I've acknowledged the lane A review reminder. It needed nothing new: I had already accepted lane A for analysis and used its results to frame lanes B and C.",
       },
     ];
-    await h.begin("ccd9ee38", "foreground-turn-8", "13:53:06");
-    await h.end("ccd9ee38", "foreground-turn-8", "13:53:15.651", read);
+    await h.begin("00000018", "foreground-turn-8", "13:53:06");
+    await h.end("00000018", "foreground-turn-8", "13:53:15.651", read);
     await h.rounds("14:20:26.074", true);
-    await h.begin("ccd9ee38", "autonomous-turn-11", "14:20:26.074");
-    await h.end("ccd9ee38", "autonomous-turn-11", "14:20:26.771", [
+    await h.begin("00000018", "autonomous-turn-11", "14:20:26.074");
+    await h.end("00000018", "autonomous-turn-11", "14:20:26.771", [
       ...read,
       {
         type: "tool_call",
@@ -2054,7 +2129,7 @@ test("a limit in a turn Claude Code starts by itself does not send again the bat
     await h.rounds("14:45:00", true);
     assert.deepEqual(
       h.sent
-        .filter((s) => s.id === "ccd9ee38" && s.at > Date.parse("2026-10-21T14:20:26Z"))
+        .filter((s) => s.id === "00000018" && s.at > Date.parse("2026-10-21T14:20:26Z"))
         .map((s) => s.text.split(/ \[|:\n/, 1)[0]),
       ["Alliance retry after failed turn"],
       "after the reset the Lead gets its own retry, not the batch it already read",
@@ -2065,13 +2140,13 @@ test("a limit in a turn Claude Code starts by itself does not send again the bat
 });
 
 test("Claude's 'Not logged in' notice in a turn Paseo reports completed is a failed turn", async (t) => {
-  // i5: HQ 02f6afb7's first turn (2026-10-21 09:54:38-09:54:43) and peer 793826f7's (10-20) completed on
-  // exactly this text from a role home without a Claude login; so did 3 turns in the Mac mini role
+  // i5: HQ 00000001's first turn (2026-10-21 09:54:38-09:54:43) and peer 00000011's (10-20) completed on
+  // exactly this text from a role home without a Claude login; so did 3 turns in the synthetic host role
   // transcripts on 10-20. Status showed each as a finished turn awaiting acceptance.
-  const h = await claudeHost(t, "2026-10-21", "09:54:38.488", [["02f6afb7", "hq", null]]);
+  const h = await claudeHost(t, "2026-10-21", "09:54:38.488", [["00000001", "hq", null]]);
   try {
-    await h.begin("02f6afb7", "foreground-turn-1", "09:54:38.488");
-    await h.end("02f6afb7", "foreground-turn-1", "09:54:43.013", [
+    await h.begin("00000001", "foreground-turn-1", "09:54:38.488");
+    await h.end("00000001", "foreground-turn-1", "09:54:43.013", [
       {
         type: "user_message",
         text: "Điều phối giúp một lane research thật kỹ.",
@@ -2079,20 +2154,20 @@ test("Claude's 'Not logged in' notice in a turn Paseo reports completed is a fai
       },
       { type: "assistant_message", text: "Not logged in · Please run /login" },
     ]);
-    assert.equal(h.runtime.store.member("02f6afb7")?.lastOutcome, "failed");
+    assert.equal(h.runtime.store.member("00000001")?.lastOutcome, "failed");
   } finally {
     await h.runtime.close();
   }
 });
 
 /**
- * Mac mini, 2026-10-22: Lead c3f72b0b, owned by HQ d34294ec, on the plugin's own hooks. Claude Code
+ * synthetic host, 2026-10-22: Lead 00000017, owned by HQ 00000019, on the plugin's own hooks. Claude Code
  * starts autonomous-turn-N by itself on a task notification or a Monitor event; Paseo gives such a turn
- * no prompt of its own. `turn` runs one real turn with (an excerpt of) its final message, and `inside`
+ * no prompt of its own. `turn` runs one synthetic turn with its fixture final message, and `inside`
  * acts at a time within it.
  */
-async function macMiniLead(t: TestContext, start: string) {
-  const [hq, lead] = ["d34294ec", "c3f72b0b"];
+async function syntheticLead(t: TestContext, start: string) {
+  const [hq, lead] = ["00000019", "00000017"];
   const h = await claudeHost(t, "2026-10-22", start, [
     [hq, "hq", null],
     [lead, "lead", hq],
@@ -2136,41 +2211,37 @@ async function macMiniLead(t: TestContext, start: string) {
   const asks = () =>
     h.sent
       .filter((s) => s.id === hq)
-      .map((s) => ({ about: /Review c3f72b0b: pilot: (\S+)/.exec(s.text)?.[1], text: s.text }));
+      .map((s) => ({ about: /Review 00000017: pilot: (\S+)/.exec(s.text)?.[1], text: s.text }));
   return { ...h, lead, turn, checkpoint, accept, asks };
 }
 
 test("a handback stands through turns Claude Code starts by itself: one ask each, its decision carries, a checkpoint there is a new handback", async (t) => {
-  // Mac mini, 2026-10-22 02:05-03:10Z: the Lead checkpointed four handbacks inside turns Claude Code
-  // started by itself, with only such turns in between (its real turn ids, times, reasons and finals).
+  // synthetic host, 2026-10-22 02:05-03:10Z: the Lead checkpointed four handbacks inside turns Claude Code
+  // started by itself, with only such turns in between (synthetic turn ids, fixed times, reasons and finals).
   // 0.1.18 continued it after three of them (turns 29, 34 and 37, left out: nothing continues a record in
-  // review). Reconstructed: it was waiting from its checkpoint at 00:39:14, recorded here in the turn HQ's
-  // 02:05:53 message started. HQ decides about a minute after an ask, as it did that morning (40-100 s).
-  const SANDBOX =
-    "SANDBOX run2 đã chạy xong, kết quả và evidence ghi trong handback — HQ quyết accept U4; Lead tiếp tục L2 run4 đang chạy";
-  const L2 =
-    "L2 run4 đã chạy xong, kết quả và evidence ghi trong handback + SANDBOX run2 — HQ quyết; Lead đang chạy L3a";
-  const L3A =
-    "L3a đã chạy xong, kết quả và evidence ghi trong handback — HQ quyết U1; cùng SANDBOX run2 + L2 run4 đang chờ. Lead đang chạy registry U7c+legacy";
-  const REGISTRY =
-    "registry U7c + legacy đã chạy xong, kết quả và evidence ghi trong handback — HQ quyết U7/U7c. Lead đã giao U2 + U3 offline, chờ handback ~13:30";
-  const h = await macMiniLead(t, "02:05:53.865");
+  // review). The fixture waits from its checkpoint at 00:39:14 until HQ's
+  // 02:05:53 message starts a turn. HQ decides 40–100 seconds after each ask.
+  const SANDBOX = "SANDBOX fixture completed; evidence ready for owner review.";
+  const L2 = "L2 fixture completed; evidence ready for owner review.";
+  const L3A = "L3a fixture completed; evidence ready for owner review.";
+  const REGISTRY = "registry fixture completed; evidence ready for owner review.";
+  const h = await syntheticLead(t, "02:05:53.865");
   const { turn, checkpoint } = h;
   try {
     await turn(
       "foreground-turn-25",
       "02:05:53.865",
       "02:12:13.312",
-      "Tôi đang chờ SANDBOX run2 chạy xong.",
-      checkpoint("02:06:00", "waiting", "chờ Peer offline (U7c, U7b tích hợp) + máy test bật lại"),
+      "Waiting for the SANDBOX fixture.",
+      checkpoint("02:06:00", "waiting", "waiting for the fixture peer and test service"),
     );
-    await turn("autonomous-turn-26", "02:13:33.551", "02:14:51.838", "Đang chờ lượt chạy lại SANDBOX run2.");
+    await turn("autonomous-turn-26", "02:13:33.551", "02:14:51.838", "Waiting for another SANDBOX fixture attempt.");
     const files = [
       await turn(
         "autonomous-turn-27",
         "02:18:08.625",
         "02:19:57.585",
-        "Đang theo dõi L2 run4 qua Monitor.",
+        "Monitoring the L2 fixture.",
         checkpoint("02:19:35.774", "review", SANDBOX),
       ),
     ];
@@ -2178,9 +2249,9 @@ test("a handback stands through turns Claude Code starts by itself: one ask each
       "autonomous-turn-28",
       "02:19:57.600",
       "02:20:00.114",
-      "Bước build image của L2 run4 vẫn đang chạy.",
+      "The L2 fixture build is running.",
     );
-    await turn("autonomous-turn-30", "02:21:59.257", "02:22:02.040", "L2 run4 đã build xong image.");
+    await turn("autonomous-turn-30", "02:21:59.257", "02:22:02.040", "The L2 fixture build completed.");
     await turn("autonomous-turn-31", "02:23:01.424", "02:23:14.677", "Bước dựng L2 chạy xong (exit 0).");
     files.push(
       await turn(
@@ -2191,7 +2262,7 @@ test("a handback stands through turns Claude Code starts by itself: one ask each
         checkpoint("02:34:22.594", "review", L2),
       ),
     );
-    await turn("autonomous-turn-33", "02:37:44", "02:39:35.886", "Tôi đã sửa script L3a và chạy lại L3a.", [
+    await turn("autonomous-turn-33", "02:37:44", "02:39:35.886", "Updated and reran the L3a fixture.", [
       "02:37:59",
       () => assert.doesNotReject(h.accept("l2-run4"), "HQ decides while a turn the Lead started itself runs"),
     ]);
@@ -2200,7 +2271,7 @@ test("a handback stands through turns Claude Code starts by itself: one ask each
         "autonomous-turn-35",
         "02:40:34",
         "02:41:16.043",
-        "L3a đã xong và đã ghi handback.",
+        "L3a fixture completed with a handback.",
         checkpoint("02:41:09.225", "review", L3A),
       ),
     );
@@ -2213,7 +2284,7 @@ test("a handback stands through turns Claude Code starts by itself: one ask each
         "autonomous-turn-38",
         "03:01:13",
         "03:05:30.231",
-        "Lượt registry đã xong và ghi vào handback.",
+        "The registry fixture completed with a handback.",
         checkpoint("03:05:19.478", "review", REGISTRY),
       ),
     );
@@ -2235,10 +2306,10 @@ test("a handback stands through turns Claude Code starts by itself: one ask each
 });
 
 test("a review names the turn that handed back, not the Monitor turns that followed", async (t) => {
-  // Mac mini, 2026-10-22 03:59-04:16Z: the Lead waited from foreground-turn-48 (checkpoint 03:59:40),
+  // synthetic host, 2026-10-22 03:59-04:16Z: the Lead waited from foreground-turn-48 (checkpoint 03:59:40),
   // checkpointed U3 in autonomous-turn-52 while its U2 chain ran, and Monitor events started turns 53
   // and 55-59 by themselves. Round 3 asked HQ at 04:13:45 to read turn 59's file.
-  const h = await macMiniLead(t, "03:59:34.923");
+  const h = await syntheticLead(t, "03:59:34.923");
   const { turn, checkpoint } = h;
   try {
     await turn(
@@ -2246,7 +2317,7 @@ test("a review names the turn that handed back, not the Monitor turns that follo
       "03:59:34.923",
       "03:59:48.559",
       "U2 đã xong offline.",
-      checkpoint("03:59:40.453", "waiting", "U2 + U3 xong offline; box đang chạy L2/L3a"),
+      checkpoint("03:59:40.453", "waiting", "U2 and U3 fixture artifacts ready; runtime validation is running"),
     );
     for (const [turnId, from, to, final] of [
       ["autonomous-turn-49", "04:00:23.539", "04:00:36.708", "Đã lưu kết quả L2."],
@@ -2259,7 +2330,7 @@ test("a review names the turn that handed back, not the Monitor turns that follo
       "04:04:41.224",
       "04:06:14.584",
       "U3 đã đạt runtime.",
-      checkpoint("04:06:00.872", "review", "U3 runtime xong + hồi quy L2, L3a — HQ quyết"),
+      checkpoint("04:06:00.872", "review", "U3 fixture runtime and regression checks passed; owner review requested"),
     );
     for (const [turnId, from, to, final] of [
       ["autonomous-turn-53", "04:06:14.600", "04:06:17.084", "Chuỗi U2 đang build image."],
@@ -2283,11 +2354,11 @@ test("a review names the turn that handed back, not the Monitor turns that follo
 });
 
 test("a failed turn Claude Code starts by itself is not retried: the waiting peer keeps its turn and decision", async (t) => {
-  // ryzen, 2026-10-21: Supervisor 34bc8484's 12:26:33 message started peer 8f0cbadb's foreground-turn-5,
+  // primaryHost, 2026-10-21: Supervisor 00000008's 12:26:33 message started peer 00000014's foreground-turn-5,
   // which checkpointed waiting on its A/A lanes at 12:35:41 and ended at 12:45:59. Its background waits
   // started autonomous-turn-6 to -10 (completed; left out) and autonomous-turn-11, which ended on this
   // error at 15:11:56; Paseo reported it completed. The Supervisor's next message came at 15:41:24.
-  const [supervisor, peer] = ["34bc8484", "8f0cbadb"];
+  const [supervisor, peer] = ["00000008", "00000014"];
   const h = await claudeHost(t, "2026-10-21", "12:26:33.404", [
     [supervisor, "supervisor", null],
     [peer, "peer", supervisor],
@@ -2299,7 +2370,7 @@ test("a failed turn Claude Code starts by itself is not retried: the waiting pee
     h.runtime.autonomy.checkpoint(
       peer,
       "waiting",
-      "A/A both lanes running as units eval-aa-a and eval-aa-b (harness and order seed pinned); tracked as jobs aa-a-r1 and aa-b-r1; wakeups aa-a-exit, aa-b-exit. Next: bounded polls via a status script, then AA-REPORT-r1.md",
+      "Two fixture jobs are running with fixed inputs; waiting for their completion receipts.",
     );
     await h.end(peer, "foreground-turn-5", "12:45:59.824", []);
     await h.begin(peer, "autonomous-turn-11", "15:10:23.632");
@@ -2328,7 +2399,7 @@ test("a failed turn Claude Code starts by itself is not retried: the waiting pee
 });
 
 // These are component regressions against Paseo's documented timeline metadata, not model E2E runs.
-// No-text autonomous turns exist in the captured fleet data; the stale-quota conjunction below is
+// The textless autonomous-turn and stale-quota conjunction below is
 // constructed to exercise attribution without waiting for a real account to hit a provider limit.
 test("a textless Claude autonomous turn cannot extend an earlier turn's quota hold", async (t) => {
   const h = await claudeHost(t, "2026-10-23", "01:00:00", [
@@ -2742,6 +2813,490 @@ test("native empty hooks retain only this turn's handback and reject uncertain h
   assert.equal(f.runtime.store.member(agent.id)?.lastOutcome, "completed");
 });
 
+test("a later failure retains the last verified success with its original provider and model", async (t) => {
+  const f = await fixture();
+  t.after(() => f.runtime.close());
+  const agent = {
+    id: "last-success",
+    provider: "alliance-codex-peer",
+    cwd: f.cwd,
+    workspaceId: "workspace-1",
+    parentAgentId: null,
+    title: null,
+  };
+  await f.runtime.startTurn(agent, "success");
+  f.runtime.store.updateMember(agent.id, { launchModel: "gpt-6.1-sol" });
+  await f.runtime.endTurn(agent, "success", { kind: "completed" }, [
+    { type: "assistant_message", text: "Verified result" },
+  ]);
+  const successful = f.runtime.store.member(agent.id)!.lastSuccessfulTurn;
+  assert.deepEqual(successful, {
+    endedAt: f.runtime.store.member(agent.id)?.lastTurnEndedAt,
+    provider: agent.provider,
+    model: "gpt-6.1-sol",
+  });
+  await f.runtime.startTurn(agent, "failed");
+  f.runtime.store.updateMember(agent.id, { launchModel: "gpt-6-astra" });
+  await f.runtime.endTurn(
+    agent,
+    "failed",
+    { kind: "failed", error: { message: "Quota reached. Resets in 1h." } },
+    [],
+  );
+  assert.deepEqual(f.runtime.store.member(agent.id)?.lastSuccessfulTurn, successful);
+  const reopened = await new AllianceRuntime(f.home).ready();
+  t.after(() => reopened.close());
+  assert.deepEqual(reopened.store.member(agent.id)?.lastSuccessfulTurn, successful);
+});
+
+test("a native provider limit survives missing history identity without publishing a handback", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-11-12T16:29:00Z") });
+  const f = await fixture();
+  t.after(() => f.runtime.close());
+  const agent = {
+    id: "quota-readback",
+    provider: "alliance-codex-peer",
+    cwd: f.cwd,
+    workspaceId: "workspace-1",
+    parentAgentId: null,
+    title: null,
+  };
+  await f.runtime.bind(agent);
+  f.runtime.autonomy.start(agent.id);
+  await f.runtime.startTurn(agent, "codex-turn-16");
+  let startedAt = f.runtime.store.member(agent.id)!.turnStartedAt!;
+  // Synthetic quota failure combined with a missing-identity timeline row.
+  const outcome: PluginTurnOutcome = {
+    kind: "failed",
+    error: {
+      message:
+        "You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at Nov 14th, 2026 4:19 AM.",
+    },
+  };
+  const reset = Date.parse("Nov 14, 2026 4:19 AM") + 60000;
+  const api = {
+    agents: {
+      ref: () => ({
+        refresh: async () => ({ agent: { status: "error", activeTurn: null } }),
+        timeline: {
+          refetch: async () => ({
+            epoch: "one",
+            hasOlder: false,
+            entries: [
+              {
+                turnId: null,
+                timestamp: new Date(startedAt).toISOString(),
+                item: { type: "user_message", text: "Continue", messageId: "work-16" },
+              },
+            ],
+          }),
+        },
+      }),
+    },
+  } as unknown as PaseoApi;
+  await f.runtime.endTurn(agent, "codex-turn-16", outcome, undefined, api);
+  const failed = f.runtime.store.member(agent.id)!;
+  assert.equal(failed.turnReadbackPending, undefined);
+  assert.equal(failed.lastOutcome, "failed");
+  assert.equal(failed.decision, "open");
+  assert(failed.resultPath);
+  const bytes = await readFile(failed.resultPath, "utf8");
+  const artifact = JSON.parse(bytes);
+  assert.equal(artifact.final, null, "unreadable history cannot invent a handback");
+  assert.equal(artifact.readback.status, "failed-unreadable");
+  assert.equal(artifact.readback.receipt.error, "Native turn history message has no turn identity");
+  assert.deepEqual(artifact.readback.receipt.outcome, outcome);
+  assert.equal(artifact.readback.receipt.startedAt, startedAt);
+  assert.equal(failed.limited?.until, reset);
+  const waiting = f.runtime.autonomy.get(agent.id)!;
+  assert.equal(waiting.outcome, "failed");
+  assert.equal(waiting.quotaWaits, 1);
+  assert.equal(waiting.quotaRetry, true);
+  assert.equal(waiting.dueAt, reset);
+  assert.equal(waiting.retries, 0);
+  await f.runtime.autonomy.tick(f.paseo);
+  assert.equal(f.count().sends, 0, "nothing dispatches before reset");
+  t.mock.timers.setTime(reset + 3600000);
+  const reopened = await new AllianceRuntime(f.home).ready();
+  t.after(() => reopened.close());
+  await reopened.endTurn(agent, "codex-turn-16", outcome, undefined, api);
+  assert.equal(reopened.store.member(agent.id)?.resultPath, failed.resultPath);
+  assert.equal(
+    reopened.store.member(agent.id)?.limited?.until,
+    reset,
+    "a duplicate cannot extend the outage",
+  );
+  assert.equal(reopened.autonomy.get(agent.id)?.revision, waiting.revision);
+  await reopened.autonomy.tick(f.paseo);
+  assert.equal(f.count().sends, 1, "unreadable failed-limit history permits the reset retry");
+  assert.equal(reopened.autonomy.get(agent.id)?.retries, 0);
+  await reopened.startTurn(agent, "codex-turn-16");
+  assert.equal(reopened.autonomy.get(agent.id)?.outcome, null, "a reused ordinal starts a new generation");
+  startedAt = reopened.store.member(agent.id)!.turnStartedAt!;
+  await reopened.endTurn(agent, "codex-turn-16", outcome, undefined, api);
+  assert.equal(
+    reopened.autonomy.get(agent.id)?.quotaWaits,
+    2,
+    "a later failed generation records its own wait",
+  );
+  assert.equal(await readFile(failed.resultPath, "utf8"), bytes, "failure custody survives the retry");
+});
+
+for (const managed of [false, true]) {
+  test(`a stalled provider-limit history read preserves failure custody for a ${managed ? "managed" : "native unmanaged"} member`, async (t) => {
+    const f = await fixture();
+    t.after(() => f.runtime.close());
+    const agent = {
+      id: "stalled-limit",
+      provider: "alliance-codex-hq",
+      cwd: f.cwd,
+      workspaceId: "workspace-1",
+      parentAgentId: null,
+      title: null,
+    };
+    await f.runtime.bind(agent);
+    if (managed) f.runtime.autonomy.start(agent.id);
+    await f.runtime.startTurn(agent, "turn-1");
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let reached!: () => void;
+    const reading = new Promise<void>((resolve) => {
+      reached = resolve;
+    });
+    let release!: (page: unknown) => void;
+    const history = new Promise<unknown>((resolve) => {
+      release = resolve;
+    });
+    const api = {
+      agents: {
+        ref: () => ({
+          refresh: async () => ({ agent: { status: "error", activeTurn: null } }),
+          timeline: {
+            refetch: () => {
+              reached();
+              return history;
+            },
+          },
+        }),
+      },
+    } as unknown as PaseoApi;
+    const ending = f.runtime.endTurn(
+      agent,
+      "turn-1",
+      { kind: "failed", error: { message: "Individual quota reached. Resets in 1h." } },
+      undefined,
+      api,
+    );
+    await reading;
+    t.mock.timers.tick(10000);
+    await ending;
+    const failed = f.runtime.store.member(agent.id)!;
+    assert.equal(failed.turnReadbackPending, undefined);
+    assert.equal(failed.lastOutcome, "failed");
+    assert(failed.limited);
+    assert(failed.resultPath);
+    const artifact = JSON.parse(await readFile(failed.resultPath, "utf8"));
+    assert.equal(artifact.readback.status, "failed-unreadable");
+    assert.match(artifact.readback.receipt.error, /timed out/);
+    assert.equal(artifact.final, null);
+    if (managed) assert.equal(f.runtime.autonomy.get(agent.id)?.quotaRetry, true);
+    else
+      assert.equal(
+        f.runtime.autonomy.get(agent.id),
+        undefined,
+        "a native session does not opt into autonomy",
+      );
+    const bytes = await readFile(failed.resultPath, "utf8");
+    await f.runtime.startTurn(agent, "turn-2");
+    release({ epoch: "late", hasOlder: false, entries: [] });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(f.runtime.store.member(agent.id)?.lastOutcome, null);
+    assert.equal(f.runtime.store.member(agent.id)?.resultPath, null);
+    assert.equal(
+      await readFile(failed.resultPath, "utf8"),
+      bytes,
+      "late history cannot rewrite failure custody",
+    );
+  });
+}
+
+for (const outcome of [
+  { kind: "failed", error: { message: "Connection closed" } },
+  { kind: "completed" },
+] satisfies PluginTurnOutcome[]) {
+  test(`an unreadable ${outcome.kind} non-limit outcome retains pending custody`, async (t) => {
+    const f = await fixture();
+    t.after(() => f.runtime.close());
+    const agent = {
+      id: "unknown-readback",
+      provider: "alliance-codex-peer",
+      cwd: f.cwd,
+      workspaceId: "workspace-1",
+      parentAgentId: null,
+      title: null,
+    };
+    await f.runtime.bind(agent);
+    f.runtime.autonomy.start(agent.id);
+    await f.runtime.startTurn(agent, "turn-1");
+    const api = {
+      agents: {
+        ref: () => ({
+          refresh: async () => ({ agent: { status: "idle", activeTurn: null } }),
+          timeline: { refetch: async () => ({ error: "history unavailable", entries: [] }) },
+        }),
+      },
+    } as unknown as PaseoApi;
+    await assert.rejects(f.runtime.endTurn(agent, "turn-1", outcome, undefined, api), /history unavailable/);
+    const pending = f.runtime.store.member(agent.id)!.turnReadbackPending!;
+    assert.deepEqual(pending.outcome, outcome);
+    assert.equal(f.runtime.store.member(agent.id)?.resultPath, null);
+    assert.equal(f.runtime.store.member(agent.id)?.limited, undefined);
+    assert.equal(f.runtime.autonomy.get(agent.id)?.outcome, null);
+    await f.runtime.autonomy.tick(f.paseo);
+    assert.equal(f.count().sends, 0, "uncertain history cannot resume the assignment");
+    assert.equal(f.runtime.store.member(agent.id)?.turnReadbackPending?.id, pending.id);
+  });
+}
+
+test("a provider-limit failure carrying an accepted handback preserves that handback and failure custody", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-11-12T16:29:00Z") });
+  const f = await fixture();
+  t.after(() => f.runtime.close());
+  const agent = {
+    id: "carried-limit",
+    provider: "alliance-codex-peer",
+    cwd: f.cwd,
+    workspaceId: "workspace-1",
+    parentAgentId: null,
+    title: null,
+  };
+  await f.runtime.bind(agent);
+  f.runtime.autonomy.start(agent.id);
+  await f.runtime.startTurn(agent, "handback");
+  f.runtime.autonomy.checkpoint(agent.id, "review", "Ready for review", "handback");
+  await f.runtime.endTurn(agent, "handback", { kind: "completed" }, [
+    { type: "assistant_message", text: "Verified result" },
+  ]);
+  f.runtime.store.updateMember(agent.id, { decision: "accepted", decisionTurnId: "handback" });
+  const prior = f.runtime.store.member(agent.id)!;
+  const priorBytes = await readFile(prior.resultPath!, "utf8");
+  await f.runtime.startTurn(agent, "autonomous-limit");
+  const api = {
+    agents: {
+      ref: () => ({
+        refresh: async () => ({ agent: { status: "error", activeTurn: null } }),
+        timeline: { refetch: async () => ({ error: "history unavailable", entries: [] }) },
+      }),
+    },
+  } as unknown as PaseoApi;
+  await f.runtime.endTurn(
+    agent,
+    "autonomous-limit",
+    { kind: "failed", error: { message: "Individual quota reached. Resets in 1h." } },
+    undefined,
+    api,
+  );
+  const current = f.runtime.store.member(agent.id)!;
+  assert.equal(current.lastTurnId, prior.lastTurnId);
+  assert.equal(current.resultPath, prior.resultPath);
+  assert.equal(current.lastOutcome, "completed");
+  assert.equal(current.decision, "accepted");
+  assert.equal(await readFile(prior.resultPath!, "utf8"), priorBytes);
+  assert.equal(current.turnReadbackPending, undefined);
+  assert.equal(f.runtime.autonomy.get(agent.id)?.phase, "review");
+  const turns = join(f.runtime.store.room(current.roomId).artifacts, "turns");
+  const receipts = await Promise.all(
+    (await readdir(turns)).map(async (name) => JSON.parse(await readFile(join(turns, name), "utf8"))),
+  );
+  const failure = receipts.find((r) => r.turnId === "autonomous-limit");
+  assert.equal(failure.readback.status, "failed-unreadable");
+  assert.equal(failure.readback.receipt.turnId, "autonomous-limit");
+  assert.equal(failure.final, null);
+  const receiptName = (await readdir(turns)).find((name) => name !== prior.resultPath?.split("/").at(-1));
+  assert(receiptName);
+  const receiptPath = join(turns, receiptName);
+  const receiptBytes = await readFile(receiptPath, "utf8");
+  t.mock.timers.setTime(Date.now() + 5000);
+  await f.runtime.endTurn(
+    agent,
+    "autonomous-limit",
+    { kind: "failed", error: { message: "Individual quota reached. Resets in 1h." } },
+    undefined,
+    api,
+  );
+  assert.equal(f.runtime.store.member(agent.id)?.limited?.until, current.limited?.until);
+  assert.equal(
+    await readFile(receiptPath, "utf8"),
+    receiptBytes,
+    "duplicate hooks preserve the published receipt",
+  );
+});
+
+test("an active native generation cannot be closed by a provider-limit completion", async (t) => {
+  const f = await fixture();
+  t.after(() => f.runtime.close());
+  const agent = {
+    id: "active-limit",
+    provider: "alliance-codex-peer",
+    cwd: f.cwd,
+    workspaceId: "workspace-1",
+    parentAgentId: null,
+    title: null,
+  };
+  await f.runtime.bind(agent);
+  f.runtime.autonomy.start(agent.id);
+  await f.runtime.startTurn(agent, "turn-1");
+  const api = {
+    agents: {
+      ref: () => ({
+        refresh: async () => ({ agent: { status: "running", activeTurn: { turnId: "turn-1" } } }),
+      }),
+    },
+  } as unknown as PaseoApi;
+  await assert.rejects(
+    f.runtime.endTurn(
+      agent,
+      "turn-1",
+      { kind: "failed", error: { message: "Quota reached. Resets in 1h." } },
+      undefined,
+      api,
+    ),
+    /active native turn/,
+  );
+  assert.equal(f.runtime.store.member(agent.id)?.limited, undefined);
+  assert.equal(f.runtime.autonomy.get(agent.id)?.outcome, null);
+  assert.equal(f.runtime.store.member(agent.id)?.turnReadbackPending?.awaitEndEvent, true);
+});
+
+for (const snapshot of [
+  { status: "unknown" },
+  { status: "idle", providerUnavailable: true },
+  { status: "error", providerUnavailable: true },
+]) {
+  test(`provider-limit readback retains custody when native inactivity is unknown (${snapshot.status}, providerUnavailable=${snapshot.providerUnavailable ?? false})`, async (t) => {
+    const f = await fixture();
+    t.after(() => f.runtime.close());
+    const agent = {
+      id: "unknown-inactivity",
+      provider: "alliance-codex-peer",
+      cwd: f.cwd,
+      workspaceId: "workspace-1",
+      parentAgentId: null,
+      title: null,
+    };
+    await f.runtime.bind(agent);
+    f.runtime.autonomy.start(agent.id);
+    await f.runtime.startTurn(agent, "turn-1");
+    let historyReads = 0;
+    const native = { ...snapshot };
+    const api = {
+      agents: {
+        ref: () => ({
+          refresh: async () => ({ agent: { ...native, activeTurn: null } }),
+          timeline: {
+            refetch: async () => {
+              historyReads++;
+              return { error: "history unavailable", entries: [] };
+            },
+          },
+        }),
+      },
+    } as unknown as PaseoApi;
+    const outcome: PluginTurnOutcome = { kind: "failed", error: { message: "Quota reached. Resets in 1h." } };
+    await assert.rejects(
+      f.runtime.endTurn(agent, "turn-1", outcome, undefined, api),
+      /inactivity could not be verified/,
+    );
+    const current = f.runtime.store.member(agent.id)!;
+    assert.deepEqual(current.turnReadbackPending?.outcome, outcome);
+    assert.match(current.turnReadbackPending!.error, /inactivity could not be verified/);
+    assert.equal(
+      current.turnReadbackPending?.awaitEndEvent,
+      undefined,
+      "a fresh snapshot can retry inactivity proof",
+    );
+    assert.equal(historyReads, 0, "unknown inactivity cannot authorize readback closure");
+    assert.equal(current.lastOutcome, null);
+    assert.equal(current.resultPath, null);
+    assert.equal(current.limited, undefined);
+    assert.equal(f.runtime.autonomy.get(agent.id)?.outcome, null);
+    assert.equal(f.runtime.autonomy.get(agent.id)?.quotaWaits, undefined);
+    await f.runtime.autonomy.tick(f.paseo);
+    assert.equal(f.count().sends, 0);
+    native.status = "closed";
+    native.providerUnavailable = false;
+    await f.runtime.reconcileTurnReadback(agent.id, api);
+    assert.equal(f.runtime.store.member(agent.id)?.turnReadbackPending, undefined);
+    assert.equal(f.runtime.store.member(agent.id)?.lastOutcome, "failed");
+    assert.equal(
+      f.runtime.autonomy.get(agent.id)?.quotaRetry,
+      true,
+      "a proven inactive snapshot permits recovery",
+    );
+  });
+}
+
+test("a delayed provider-limit completion cannot fail a newer native generation with the same ordinal", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-11-12T16:29:00Z") });
+  const f = await fixture();
+  t.after(() => f.runtime.close());
+  const agent = {
+    id: "late-limit",
+    provider: "alliance-codex-peer",
+    cwd: f.cwd,
+    workspaceId: "workspace-1",
+    parentAgentId: null,
+    title: null,
+  };
+  await f.runtime.bind(agent);
+  f.runtime.autonomy.start(agent.id);
+  await f.runtime.startTurn(agent, "reused");
+  let reached!: () => void;
+  const reading = new Promise<void>((resolve) => {
+    reached = resolve;
+  });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const delayed = {
+    agents: {
+      ref: () => ({
+        refresh: async () => {
+          reached();
+          await gate;
+          return { agent: { status: "error", activeTurn: null } };
+        },
+      }),
+    },
+  } as unknown as PaseoApi;
+  const ending = f.runtime.endTurn(
+    agent,
+    "reused",
+    { kind: "failed", error: { message: "Quota reached. Resets in 1h." } },
+    undefined,
+    delayed,
+  );
+  await reading;
+  t.mock.timers.setTime(Date.now() + 1000);
+  const fresh = {
+    agents: {
+      ref: () => ({
+        refresh: async () => ({
+          agent: { status: "running", activeTurn: { turnId: "reused", startedAt: new Date().toISOString() } },
+        }),
+      }),
+    },
+  } as unknown as PaseoApi;
+  await f.runtime.startTurn(agent, "reused", fresh);
+  release();
+  await ending;
+  assert.equal(f.runtime.autonomy.get(agent.id)?.outcome, null);
+  assert.equal(f.runtime.autonomy.get(agent.id)?.quotaWaits, undefined);
+  assert.equal(f.runtime.store.member(agent.id)?.turnReadbackPending, undefined);
+  assert.equal(f.runtime.store.member(agent.id)?.limited, undefined);
+  assert.equal(f.runtime.store.member(agent.id)?.resultPath, null);
+});
+
 test("overlapping native handbacks keep the newest receipt and immutable result", async (t) => {
   const f = await fixture();
   t.after(() => f.runtime.close());
@@ -2962,8 +3517,8 @@ test("new room names reach native workspace and later native rename reaches the 
     ...f.paseo,
     workspaces: { open: async () => native, ref: () => native },
   } as unknown as PaseoApi;
-  const room = await f.runtime.createRoom({ cwd, title: "Sleek Radar", mission: "" }, api);
-  assert.equal(title, "[team] [Sleek Radar]");
+  const room = await f.runtime.createRoom({ cwd, title: "Example Workspace", mission: "" }, api);
+  assert.equal(title, "[team] [Example Workspace]");
   assert.equal(writes, 1);
   f.runtime.store.addRoom({
     ...room,
@@ -2994,4 +3549,219 @@ test("joining a named native workspace preserves its Human title", async (t) => 
   const api = { ...f.paseo, workspaces: { open: async () => native } } as unknown as PaseoApi;
   const room = await f.runtime.createRoom({ cwd, title: "Suggested name", mission: "" }, api);
   assert.equal(room.title, "Human project title");
+});
+
+const accountNotice = (w: WakeRecordValue) => /\b(5x|20x)\b/.test(w.reason);
+
+/** A host with both Claude accounts provisioned and each member's launch receipt written. */
+async function twoAccountHost(
+  t: TestContext,
+  accounts: string[],
+  running: Record<string, "5x" | "20x" | null>,
+  roles: Record<string, string> = {},
+) {
+  const h = await claudeHost(t, "2026-11-13", "01:00:00", [
+    ["hq", "hq", null],
+    ...Object.keys(running)
+      .filter((id) => id !== "hq")
+      .map((id): [string, "peer", string] => [id, "peer", "hq"]),
+  ]);
+  await writeFile(
+    join(h.runtime.home, "claude-accounts.json"),
+    JSON.stringify({ version: 1, accounts, defaultAccount: accounts[0], roles }),
+    { mode: 0o600 },
+  );
+  for (const [id, account] of Object.entries(running))
+    if (account) await recordClaudeRuntime(h.runtime.home, id, account, process.pid);
+  await h.runtime.claudeSwitch.sweep(h.api);
+  const limit = async (id: string, time: string) => {
+    h.runtime.autonomy.start(id);
+    const prompt: AgentTimelineItem = { type: "user_message", text: "Continue", messageId: `p-${id}` };
+    const notice: AgentTimelineItem = {
+      type: "assistant_message",
+      text: "You've hit your session limit · resets 9am (Asia/Ho_Chi_Minh)",
+      messageId: `n-${id}`,
+    };
+    await h.begin(id, `foreground-turn-${id}`, time);
+    await h.end(
+      id,
+      `foreground-turn-${id}`,
+      time.replace(/:(\d\d)$/, (_, sec) => `:${String(Number(sec) + 1).padStart(2, "0")}`),
+      [prompt, notice],
+    );
+  };
+  return { ...h, limit, reset: Date.parse("2026-11-13T02:01:00Z") };
+}
+
+test("a limit on one Claude account holds only the members running that account", async (t) => {
+  // 2026-11-12 review: the 5x limit held an agent on 20x because the credential behind a role is not read.
+  const h = await twoAccountHost(t, ["5x", "20x"], { hq: "5x", worker: "20x", same: "20x", stray: null });
+  try {
+    await h.limit("worker", "01:00:00");
+    assert.equal(h.runtime.store.heldUntil("same", Date.now()), h.reset, "same account waits");
+    assert.equal(h.runtime.store.heldUntil("worker", Date.now()), h.reset);
+    assert.equal(h.runtime.store.heldUntil("hq", Date.now()), null, "the other account is free");
+    assert.equal(h.runtime.store.heldUntil("stray", Date.now()), h.reset, "an unknown account stays held");
+    const limited = h.runtime.store.member("worker")?.limited;
+    assert.equal(limited?.until, h.reset, "records an older release can still read");
+    assert.equal(limited?.messageId, "p-worker");
+  } finally {
+    await h.runtime.close();
+  }
+});
+
+test("a limit whose account is unknown holds every Claude member, as before", async (t) => {
+  const h = await twoAccountHost(t, ["5x", "20x"], { hq: "5x", worker: null, other: "20x" });
+  try {
+    await h.limit("worker", "01:00:00");
+    assert.equal(h.runtime.store.member("worker")?.limited?.until, h.reset);
+    for (const id of ["hq", "other"])
+      assert.equal(h.runtime.store.heldUntil(id, Date.now()), h.reset, `${id} stays held`);
+  } finally {
+    await h.runtime.close();
+  }
+});
+
+test("the Human's contact hears once when one Claude account is spent and the other is free", async (t) => {
+  const h = await twoAccountHost(t, ["5x", "20x"], { hq: "5x", worker: "20x", second: "20x", free: "5x" });
+  try {
+    await h.limit("worker", "01:00:00");
+    await h.limit("second", "01:00:10");
+    const notices = h.runtime.wakeups.list().filter(accountNotice);
+    assert.equal(notices.length, 1, "one notice per limit, however many members report it");
+    assert.equal(notices[0].ownerId, "hq", "the room's HQ is the Human's contact");
+    assert.equal(notices[0].delivery, "idle");
+    for (const needle of ["5x", "worker", "second", "alliance-work accounts select"])
+      assert(notices[0].reason.includes(needle), `names ${needle}`);
+    assert(!notices[0].reason.includes("free "), "a member on the free account is not affected");
+    assert.equal(h.runtime.store.heldUntil("free", Date.now()), null);
+    assert.equal(
+      h.runtime.store.members().filter((m) => m.role === "peer" && m.limited).length,
+      2,
+      "nothing was switched or cleared",
+    );
+  } finally {
+    await h.runtime.close();
+  }
+});
+
+test("no switch notice when the other Claude account is not provisioned", async (t) => {
+  const only = await twoAccountHost(t, ["20x"], { hq: "20x", worker: "20x" });
+  try {
+    await only.limit("worker", "01:00:00");
+    assert.deepEqual(only.runtime.wakeups.list().filter(accountNotice), []);
+  } finally {
+    await only.runtime.close();
+  }
+});
+
+test("no switch notice when the other Claude account is limited too", async (t) => {
+  const both = await twoAccountHost(t, ["5x", "20x"], { hq: "5x", worker: "20x", other: "5x" });
+  try {
+    await both.limit("other", "01:00:00");
+    await both.limit("worker", "01:00:20");
+    assert.deepEqual(
+      both.runtime.wakeups.list().filter(accountNotice),
+      [],
+      "the 5x account is limited as well, so there is nothing to offer",
+    );
+  } finally {
+    await both.runtime.close();
+  }
+});
+
+test("turn start attributes an exact wake identity without copying prompt text", async (t) => {
+  const f = await fixture();
+  t.after(() => f.runtime.close());
+  const agent = {
+    id: "wake-start",
+    provider: "alliance-codex-peer",
+    cwd: f.cwd,
+    workspaceId: "workspace-1",
+    parentAgentId: null,
+    title: null,
+  };
+  await f.runtime.startTurn(agent, "previous");
+  f.runtime.store.noteWakeMessage(agent.id, "resume-id", "alliance.resume", Date.now());
+  const time = Date.now() + 1;
+  const api = {
+    agents: {
+      ref: () => ({
+        refresh: async () => ({
+          agent: { activeTurn: { turnId: "next", startedAt: new Date(time).toISOString() } },
+        }),
+        timeline: {
+          refetch: async () => ({
+            epoch: "one",
+            hasOlder: false,
+            entries: [
+              {
+                turnId: "next",
+                timestamp: new Date(time).toISOString(),
+                item: { type: "user_message", text: "PRIVATE BODY", clientMessageId: "resume-id" },
+              },
+            ],
+          }),
+        },
+      }),
+    },
+  } as unknown as PaseoApi;
+  await f.runtime.startTurn(agent, "next", api);
+  assert.equal(f.runtime.store.member(agent.id)?.turnWake?.source, "alliance.resume");
+  assert.equal(f.runtime.store.member(agent.id)?.turnWake?.turnId, "next");
+  assert.ok(!(await readFile(join(f.home, "wake-markers.jsonl"), "utf8")).includes("PRIVATE BODY"));
+});
+
+test("delayed wake attribution cannot replace a newer turn with the same timestamp", async (t) => {
+  const f = await fixture();
+  t.after(() => f.runtime.close());
+  const time = Date.now();
+  t.mock.timers.enable({ apis: ["Date"], now: time });
+  const agent = {
+    id: "wake-race",
+    provider: "alliance-codex-peer",
+    cwd: f.cwd,
+    workspaceId: "workspace-1",
+    parentAgentId: null,
+    title: null,
+  };
+  let resolveEntered = () => {};
+  const entered = new Promise<void>((resolve) => {
+    resolveEntered = resolve;
+  });
+  let resolveRead: (value: unknown) => void = () => {};
+  const read = new Promise<unknown>((resolve) => {
+    resolveRead = resolve;
+  });
+  const api = {
+    agents: {
+      ref: () => ({
+        refresh: async () => ({
+          agent: { activeTurn: { turnId: "old", startedAt: new Date(time).toISOString() } },
+        }),
+        timeline: {
+          refetch: async () => {
+            resolveEntered();
+            return read;
+          },
+        },
+      }),
+    },
+  } as unknown as PaseoApi;
+  const old = f.runtime.startTurn(agent, "old", api);
+  await entered;
+  await f.runtime.startTurn(agent, "new");
+  resolveRead({
+    epoch: "one",
+    hasOlder: false,
+    entries: [
+      {
+        turnId: "old",
+        timestamp: new Date(time).toISOString(),
+        item: { type: "user_message", text: "old", clientMessageId: "old-input" },
+      },
+    ],
+  });
+  await old;
+  assert.equal(f.runtime.store.member(agent.id)?.turnWake?.turnId, "new");
 });

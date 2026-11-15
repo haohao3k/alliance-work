@@ -13,6 +13,7 @@ import {
   preservePiPreferences,
 } from "../server/profile-integrity.mjs";
 import { skillOverrides } from "../server/skill-overrides.mjs";
+import { claudeContextTokenLimit } from "../shared/context-settings.mjs";
 import { contextTokenLimit } from "./context-policy.mjs";
 import { bundledPi } from "./pi-runtime.mjs";
 import { verifyAdaptedPlaybooks } from "./verify-vendor.mjs";
@@ -238,8 +239,9 @@ export async function prepareProfiles({ home, executables, isolatedRoot = undefi
               syncClaudeAiSkills: false,
               syncClaudeAiPlugins: false,
               disableClaudeAiConnectors: true,
+              disableWorkflows: true,
               enabledPlugins: {},
-              autoCompactWindow: contextTokenLimit,
+              autoCompactWindow: claudeContextTokenLimit,
             },
             null,
             2,

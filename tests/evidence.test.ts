@@ -133,3 +133,43 @@ test("verification reports source mutations and blocked commands without claimin
   });
   await validateEvidence(passed.path, cwd, passed.report.candidate.digest);
 });
+
+test("wrong-checkout reports identify their scope before requesting inputs or reading candidate files", async () => {
+  const root = await temporary("alliance-evidence-scope-");
+  const repo = join(root, "repo");
+  const member = join(root, "member");
+  const bundle = join(root, "bundle");
+  await Promise.all([mkdir(repo), mkdir(member), mkdir(bundle)]);
+  execFileSync("git", ["init", "-q", repo]);
+  await writeFile(join(repo, "source.txt"), "candidate");
+  const git = await runVerification({
+    cwd: repo,
+    output: join(root, "git-proof"),
+    scenario: "git-candidate",
+    command: [process.execPath, "-e", "process.exit(0)"],
+  });
+  const scopeError = (error: unknown) => {
+    assert(error instanceof Error);
+    assert.match(error.message, /checkout/i);
+    assert.doesNotMatch(error.message, /--input|ENOENT/);
+    return true;
+  };
+  // Observed: a Git report with no inputs was submitted against a non-Git member directory.
+  await assert.rejects(validateEvidence(git.path, member, git.report.candidate.digest), scopeError);
+  const nested = join(repo, "nested");
+  await mkdir(nested);
+  await validateEvidence(git.path, nested, git.report.candidate.digest);
+
+  await writeFile(join(bundle, "analysis.txt"), "bounded analysis");
+  const analysis = await runVerification({
+    cwd: bundle,
+    inputs: ["analysis.txt"],
+    output: join(root, "analysis-proof"),
+    scenario: "analysis-candidate",
+    kind: "analysis",
+    command: [process.execPath, "-e", "process.exit(0)"],
+  });
+  // Observed: explicit bundle inputs were instead looked up in the member checkout.
+  await assert.rejects(validateEvidence(analysis.path, repo, analysis.report.candidate.digest), scopeError);
+  await validateEvidence(analysis.path, bundle, analysis.report.candidate.digest);
+});

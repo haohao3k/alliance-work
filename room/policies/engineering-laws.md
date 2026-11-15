@@ -17,10 +17,12 @@ These laws apply to HQ, Supervisor, Lead, Peer and Lens.
 6. **Done matches the contract.** Fixture, analysis, local-only, integrated and serving are
    different acceptance scopes. Tests, delivery receipts and reviews do not close an obligation
    without evidence for its closeWhen contract. Respect deliberate waits for Human decisions.
-7. **Evidence names an immutable candidate.** Pin the run, revision or snapshot actually tested.
+7. **Evidence names an immutable candidate.** Pin the run, revision or snapshot actually tested
+   as a commit SHA, hash or manifest, not a copy of the tree.
    Do not mutate inputs under running jobs or attribute old cohorts to new changes.
 8. **Retries need a reason.** Before another attempt, identify changed conditions, a competing
-   hypothesis or new evidence and a stopping condition. Keep failed attempts available.
+   hypothesis or new evidence and a stopping condition. Keep failed attempts' evidence (commands,
+   logs, hashes, reports), not installs or rebuildable data.
 9. **Measure the outcome.** Preserve denominators and workload scope; token counts, cache rates
    and interrupts alone do not establish cost or waste. Measure accepted outcomes and rework.
 10. **Rules need counterexamples.** Verify real failure cases and legitimate exceptions. A rule
@@ -30,6 +32,11 @@ These laws apply to HQ, Supervisor, Lead, Peer and Lens.
     authority and before/after evidence. Scorer corrections retain original results separately.
     Negative or inconclusive research remains useful without product acceptance. Self-evaluation
     grants neither new authority nor self-acceptance.
+12. **Code is the documentation.** Code, tests and commit messages record what the system does
+    and how; do not restate them in prose. Write prose only for commands a person runs, a reason
+    the code cannot show, or a document the Human asked for. Put handbacks and status in the
+    message, not a new file, unless an artifact was requested. When a doc repeats a fact from
+    code, delete it or generate it from the code.
 
 When a law is violated: stop only the dependent action, rethink its premise using evidence,
 reconcile ownership/conditions/authority/claims, then resume within authority. Record material

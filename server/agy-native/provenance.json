@@ -39,5 +39,26 @@
       "path": "server/agy-native/provider.ts",
       "sha256": "84b0a5c8f75d8ba4aa549da2d79aaac6f17266c73a5edcd4054ee429f65ec50c"
     }
-  ]
+  ],
+  "adaptations": [
+    {
+      "path": "server/agy-native/internal/process.ts",
+      "upstreamPath": "server/agy-native/upstream/process.ts.txt",
+      "sha256": "31942ac4f2ae2e879651aa12acb9a9a2728980c6ce3d14163578e669f771d154",
+      "reason": "Contain denied process-group signal cleanup failures in provider promises and retain stopping-state custody; regression EPERM previously exited the entire plugin host."
+    },
+    {
+      "path": "server/agy-native/internal/session.ts",
+      "upstreamPath": "server/agy-native/upstream/session.ts.txt",
+      "sha256": "e292be578966f5a10c171f6b069d6b008d1dc47ae5d7373203fe3df85f103cfa",
+      "reason": "Contain denied process-group signal cleanup failures in provider promises and retain stopping-state custody; regression EPERM previously exited the entire plugin host. Retain a proven completed AGY response when the terminal result repeats the stale stream interruption."
+    }
+  ],
+  "repository": "https://github.com/getpaseo/paseo",
+  "revision": "cafe4b01c8522ff39560241c5deb01427dc8dc5b",
+  "license": {
+    "spdx": "Apache-2.0",
+    "path": "server/agy-native/LICENSE",
+    "source": "https://github.com/getpaseo/paseo/blob/cafe4b01c8522ff39560241c5deb01427dc8dc5b/LICENSE"
+  }
 }

@@ -1,20 +1,29 @@
-# Public source update
+# Public 0.1.55 candidate
 
-This candidate advances the public 0.1.18 source to the reviewed 0.1.34 feature set:
+This candidate advances the public source to the reviewed 0.1.55 feature set on public history:
 
-- Project cards collapse by default, with compact status summaries and expandable details.
-- Native workspace/session naming follows project, role and assignment context.
-- Per-project MCP settings and skill selection apply across native harnesses.
-- Account selection and quota reporting keep credential values out of configuration and RPCs.
-- Durable ownership, wakeup recovery and process identity checks preserve unfinished work.
-- Paseo CLI/client/plugin 0.15.3, Pi 1.5.0 and updated runtime dependencies are pinned.
-- Gitleaks and TruffleHog are required by the tracked pre-push hook.
+- Durable ownership, evidence-bound acceptance, wakeup recovery and idle readback without repeated
+  provider resumes when activity is unchanged; quota recovery retains the original reset deadline.
+- Native Claude account switching and quota visibility, context controls, opt-in owner keepwarm,
+  project model policies, per-project MCP and bundled-skill selection across supported harnesses.
+- Read-only usage/cache/cost reports with explicit partial coverage on older Node; disk inventory,
+  guarded worktree/scratch cleanup, retained job history and safe release cleanup.
+- Runtime maintenance holds and recovery, public installer/update/deploy defaults, and pinned
+  Paseo CLI/client/plugin 0.15.4 with Pi 1.5.0.
 
-The public branch is based on its existing public history. It does not import private Git
-history, host snapshots, runtime homes, credentials, personal setup helpers or internal
-integration notes. Fourteen additional same-name Seatwork adaptations are not included because
-their redistribution rights have not been established. The pre-existing pinned bundle remains
-unchanged. The three new attributed playbooks carry their MIT/Apache notices and provenance.
+Installer, update and release defaults target `haohao3k/alliance-work` and require public
+visibility (`private=false`). Public Peer defaults use seven configured routes; personal endpoint
+routes are excluded. User-defined providers remain supported.
 
-Installer and update defaults target `haohao3k/alliance-work`. A source push is not a tagged
-release or fleet deployment. Existing release tags remain unchanged.
+The candidate excludes private Git history, runtime homes, credentials, host data, personal setup
+helpers and internal integration notes. The fourteen same-name Seatwork adaptations with
+unestablished redistribution rights are excluded; the pre-existing public vendor bundle remains
+unchanged. Optional override behavior is tested with original synthetic fixtures. Attributed
+playbooks retain their existing notices and provenance. The two AGY upstream `.txt` files are
+source snapshots matched to the npm package and immutable Paseo revision, retained with the
+Apache-2.0 license, provenance and modified-file notices. They are not development transcripts.
+
+Publication requires the source/native/maintenance/lint gates, an unpacked archive check and the
+tracked Gitleaks plus TruffleHog pre-push gate. Historical-reader checks skip only when their
+historical commit is unavailable. A source push does not itself establish deployment or model
+handback; those require separate evidence. Existing published tags remain immutable.

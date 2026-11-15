@@ -1,3 +1,5 @@
+// Modified by Alliance Work: Contain process-group cleanup failures and preserve process custody.
+// Upstream: @getpaseo/server 0.12.0, Apache-2.0; see ../LICENSE and ../provenance.json.
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { spawnProcess } from "@getpaseo/plugin/server";
 import { signalProcess } from "./signals.js";
@@ -144,7 +146,7 @@ export function startDriver(options: DriverOptions): Driver {
       });
     },
     async stop(reason) {
-      if (process.platform === "win32") await cleanup;
+      await cleanup;
       if (state === "exited") return;
       if (state === "starting") rejectReady(new AntigravityError("Antigravity startup canceled"));
       clearTimeout(startupDeadline);
@@ -157,22 +159,32 @@ export function startDriver(options: DriverOptions): Driver {
         return;
       }
       if (reason === "close") child.stdin.end();
-      else signalGroup(child, "SIGINT");
-      const terminate = setTimeout(() => signalGroup(child, "SIGTERM"), 1000);
-      const kill = setTimeout(() => signalGroup(child, "SIGKILL"), 2000);
-      await exited;
-      clearTimeout(terminate);
-      clearTimeout(kill);
-      // A tool can keep running after its CLI leader exits.
-      signalGroup(child, "SIGKILL");
+      else await signalGroup(child, "SIGINT");
+      let rejectSignal: (error: unknown) => void;
+      const signalFailed = new Promise<never>((_, reject) => {
+        rejectSignal = reject;
+      });
+      const attempt = (signal: NodeJS.Signals) => {
+        void signalGroup(child, signal).catch(rejectSignal);
+      };
+      const terminate = setTimeout(() => attempt("SIGTERM"), 1000);
+      const kill = setTimeout(() => attempt("SIGKILL"), 2000);
+      try {
+        await Promise.race([exited, signalFailed]);
+        // A tool can keep running after its CLI leader exits.
+        await signalGroup(child, "SIGKILL");
+      } finally {
+        clearTimeout(terminate);
+        clearTimeout(kill);
+      }
     },
   };
 }
 
-function signalGroup(
+async function signalGroup(
   child: ChildProcessWithoutNullStreams,
   signal: NodeJS.Signals,
-): void | Promise<void> {
+): Promise<void> {
   if (!child.pid) return;
   return signalProcess({ platform: process.platform, pid: child.pid, signal });
 }

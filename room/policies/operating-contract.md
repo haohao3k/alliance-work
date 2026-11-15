@@ -61,29 +61,33 @@ Use the exact Alliance CLI from your room context, including --home.
 - Wait: never sleep, poll or re-read status inside a turn. Run `alliance-work wait` with
   `--job KEY`, `--pid PID`, `--agent CHILD`, `--at ISO_TIME` or `--minutes N`, plus `--reason
   TEXT`, then end your turn: it records `waiting` (a handback, blocker or pause stands) and
-  Alliance wakes you. Keep Paseo's notifyOnFinish on when delegating. After a resume,
-  reconcile once with `wakeups take` and get_agent_status for your open children, not the
+  Alliance wakes you. Prefer ≤45 or >75 minutes. Keep Paseo's notifyOnFinish on when delegating.
+  On resume, reconcile children with `wakeups take` and get_agent_status, not
   installation-wide `alliance-work status`.
-- A review wake ends with a decision for each child, which closes the review (an ack alone is
-  refused): `alliance-work accept --agent ID --report REPORT` (the report `verify` wrote, not a
-  turn file); a prompt with rework, or with the answer to a `blocked` handback (the child's new
-  turn replaces the review); or
-  `alliance-work reject --agent ID --reason TEXT`, which tells the child nothing, so follow it with
-  rework or archive the child natively. Defer (`wakeups defer … --minutes M`, at most three
-  times) only while the decision awaits something, such as a sibling's handback or a running
-  check. Decide after the child hands back; never accept your own work.
 - Reminders from `alliance-work wakeups add` wake their owner when idle; `--delivery pull` is
   opt-in and obligation reminders are pull-only. Alliance prompts list your pending pull items;
   read them with `wakeups take`. Act on other reminders, then `wakeups ack` them. For an uncertain
   delivery, inspect native history and side effects before acting; never resend it under a new key.
 - Commands must not wait for input or approval: pass non-interactive flags, leave no prompt or
-  stdin open, and avoid commands that need approval, such as `rm -rf` with a glob (take a fresh
-  `mktemp -d` instead of emptying a directory); nobody approves them: Alliance denies a request
+  stdin open, and avoid commands that need approval, such as `rm -rf` with a glob (use
+  `alliance-work scratch clean` for your scratch); nobody approves them: Alliance denies a request
   left pending for 5 minutes. Run a long command in the background, then `jobs track` it or
   `wait --pid` on it. A running member silent for 20 minutes is reported to its owner.
 - Alliance retries a failed turn twice by default; a provider quota waits for its reset. A
   cancellation or `paused` stops continuation. In a root chat with a substantive task, run
   `alliance-work autonomy start` once, not each turn.
 
+
+## Disk hygiene
+
+- Scratch (builds, clones, installs, data) lives in your session's `$TMPDIR` (`$ALLIANCE_SCRATCH`);
+  make no directories in `/tmp`, `/var/tmp` or `~`.
+- Candidates hold reports, manifests, hashes and short logs; large data stays in scratch, its path
+  and sha256 in the manifest. Later rounds hold only what changed. Reference existing repos and
+  toolchains (`git worktree`, `clone --reference`) instead of copying them.
+- Before handback delete what is rebuildable (`alliance-work scratch clean`, or `scratch clean
+  PATH` for a subpath); keep what your manifest or report names until the decision is final, and
+  report what you kept and why.
+- Remove only your own worktrees, when clean and merged, never `--force`.
 
 Apply contextual naming guidance in `$ALLIANCE_CONTEXT` during normal work.

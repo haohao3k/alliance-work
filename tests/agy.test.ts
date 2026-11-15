@@ -1,21 +1,64 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { lstat, mkdir, readFile, readlink, rename, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { cp, lstat, mkdir, readFile, readlink, rename, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import type { PluginServerContext } from "@getpaseo/plugin/server";
-import type { ProviderSessionConfig } from "@getpaseo/plugin/server/provider";
+import type {
+  ProviderEvent,
+  ProviderInput,
+  ProviderRegistration,
+  ProviderSessionConfig,
+} from "@getpaseo/plugin/server/provider";
 import contribute from "../index.server";
 import { linkAgyAuth, setAgyAuthSource } from "../scripts/agy-auth.mjs";
 import { launchPlan, profileEnvironment } from "../scripts/launch.mjs";
-import { prepareProfiles } from "../scripts/profiles.mjs";
+import { prepareProfiles, projectRoot } from "../scripts/profiles.mjs";
 import { enableMobbin } from "../scripts/user-mcp.mjs";
-import { agyEffort, prepareAgySession } from "../server/agy-provider";
+import { agyEffort, createAllianceAgyProvider, prepareAgySession } from "../server/agy-provider";
 import { chooseModel } from "../server/model-policy";
 import { allianceProvider } from "../server/runtime";
 import { projectSkillSettings, saveProjectSkills } from "../server/skill-settings.mjs";
 import { defaultModelPolicy } from "../shared/model-policy";
 import { temporary } from "./temp";
+
+test("public vendor verification needs no private overrides and rejects changed source or adapted AGY bytes", async () => {
+  const root = await temporary("alliance-public-vendor-");
+  for (const path of ["vendor/seatwork", "room/skills", "server/agy-native"])
+    await cp(join(projectRoot, path), join(root, path), { recursive: true });
+  for (const path of [
+    "scripts/verify-vendor.mjs",
+    "server/skill-overrides.mjs",
+    "server/profile-integrity.mjs",
+    "room/skills.json",
+  ]) {
+    await mkdir(dirname(join(root, path)), { recursive: true });
+    await cp(join(projectRoot, path), join(root, path));
+  }
+  const run = () =>
+    execFileSync(process.execPath, [join(root, "scripts/verify-vendor.mjs")], {
+      encoding: "utf8",
+      stdio: "pipe",
+    });
+  await assert.rejects(stat(join(root, "room/skill-overrides.json")), { code: "ENOENT" });
+  await assert.rejects(stat(join(root, "room/skill-overrides")), { code: "ENOENT" });
+  run();
+  for (const path of [
+    "vendor/seatwork/skills/hq/slp-portfolio-digest/SKILL.md",
+    "server/agy-native/LICENSE",
+    "server/agy-native/upstream/process.ts.txt",
+    "server/agy-native/upstream/session.ts.txt",
+    "server/agy-native/internal/process.ts",
+    "server/agy-native/internal/session.ts",
+  ]) {
+    const file = join(root, path);
+    const original = await readFile(file);
+    await writeFile(file, "modified fixture\n");
+    assert.throws(run, /Vendored bytes changed|Vendored AGY driver changed|Adapted AGY driver changed/);
+    await writeFile(file, original);
+  }
+  run();
+});
 
 async function fixture() {
   const root = await temporary("alliance-agy-test-");
@@ -53,6 +96,102 @@ async function fixture() {
   };
   return { home, cwd, manifest, profile, config };
 }
+
+test("AGY native sessions refuse non-Gemini and Carbon before forwarding or preparing files for every role", async () => {
+  for (const role of ["hq", "supervisor", "lead", "peer", "lens"]) {
+    const sent: ProviderInput[] = [];
+    let emit: (event: ProviderEvent) => void = () => {};
+    const base = {
+      id: "fixture",
+      label: "fixture",
+      command: ["/usr/bin/false"],
+      connect: async () => ({
+        version: 1,
+        capabilities: [],
+        onEvent(listener: typeof emit) {
+          emit = listener;
+          return () => {};
+        },
+        send: async (input: ProviderInput) => {
+          sent.push(input);
+        },
+        close: async () => {},
+      }),
+    } as ProviderRegistration;
+    const connection = await createAllianceAgyProvider(role, base).connect({
+      versions: [1],
+      capabilities: [],
+    });
+    try {
+      for (const model of ["claude-sonnet-5-5-high", "gemini-4-carbon-medium"]) {
+        await assert.rejects(
+          connection.send({
+            type: "session.open",
+            requestId: "open",
+            history: "skip",
+            sessionId: "bad",
+            config: {
+              cwd: "/unused",
+              env: {},
+              settings: {},
+              mcpServers: {},
+              persist: false,
+              model,
+            },
+          }),
+          /only Gemini|Carbon.*refused/,
+        );
+        await assert.rejects(
+          connection.send({
+            type: "session.configure",
+            requestId: "configure",
+            sessionId: "existing",
+            changes: { model },
+          }),
+          /only Gemini|Carbon.*refused/,
+        );
+      }
+      assert.equal(sent.length, 0);
+      const events: ProviderEvent[] = [];
+      connection.onEvent((event) => events.push(event));
+      emit({
+        type: "catalog",
+        requestId: "catalog",
+        catalog: {
+          models: [
+            "claude-sonnet-5-5-high",
+            "gemini-4-carbon-medium",
+            "gemini-4-hydrogen-medium",
+            "gemini-4-argon-high",
+          ].map((id) => ({ id, label: id })),
+          modes: [],
+          thinkingOptions: [],
+          defaultModel: "gemini-4-carbon-medium",
+        },
+      });
+      const event = events[0];
+      assert.equal(event.type, "catalog");
+      if (event.type !== "catalog") throw new Error("Missing catalog");
+      assert.equal(event.catalog.defaultModel, undefined);
+      assert.deepEqual(
+        event.catalog.models.map((m) => [m.id, m.defaultThinkingOptionId]),
+        [
+          ["gemini-4-hydrogen-medium", "medium"],
+          ["gemini-4-argon-high", "high"],
+        ],
+      );
+      await connection.send({
+        type: "session.configure",
+        requestId: "configure",
+        sessionId: "existing",
+        changes: { model: "gemini-4-hydrogen-medium" },
+      });
+      assert.equal(sent.length, 1);
+    } finally {
+      await connection.close();
+    }
+  }
+});
 
 test("AGY every role uses the saved skill toggles on fresh session configuration without importing project defaults", async () => {
   const f = await fixture();
@@ -337,6 +476,57 @@ test("dedicated AGY auth links follow native refresh without copying tokens or r
   await assert.rejects(linkAgyAuth(f.home, other), /refusing to replace/);
 });
 
+test("a configured AGY file source stays isolated from Keychain in every macOS launch", async () => {
+  const f = await fixture();
+  const source = join(f.profile.osHome, ".gemini/antigravity-cli/antigravity-oauth-token");
+  const unbound = await launchPlan(f.home, "agy-peer", ["models"], {}, f.cwd, "darwin");
+  assert.equal(unbound.executable, f.profile.executable);
+  await mkdir(join(f.profile.osHome, ".gemini/antigravity-cli"), { recursive: true });
+  await writeFile(source, "synthetic-login", { mode: 0o600 });
+  await setAgyAuthSource(f.home, source);
+  const session = await prepareAgySession(f.config);
+  const ssh = { SSH_CONNECTION: "fixture-connection", SSH_TTY: "/dev/fixture" };
+  try {
+    const resume = ["--input-format", "stream-json", "--conversation", "retained-fixture"];
+    const launches = [
+      { id: "agy-peer", args: [], ambient: ssh },
+      { id: "agy-lens", args: ["--version"], ambient: ssh },
+      { id: "agy-lens", args: ["models"], ambient: ssh },
+      {
+        id: "agy-peer",
+        args: resume,
+        ambient: { ...f.config.env, ...ssh, ALLIANCE_AGY_SESSION_DIR: session.path },
+      },
+    ];
+    for (const { id, args, ambient } of launches) {
+      const plan = await launchPlan(f.home, id, args, ambient, f.cwd, "darwin");
+      assert.equal(plan.executable, "/usr/bin/sandbox-exec");
+      assert.deepEqual(plan.args.slice(2, 3 + args.length), [f.profile.executable, ...args]);
+      assert.equal(plan.env.SSH_CONNECTION, args.length === 0 ? ssh.SSH_CONNECTION : undefined);
+    }
+    const linux = await launchPlan(f.home, "agy-lens", ["models"], {}, f.cwd, "linux");
+    assert.equal(linux.executable, f.profile.executable);
+    assert.deepEqual(linux.args, ["models"]);
+    const codex = await launchPlan(f.home, "codex-peer", ["--version"], {}, f.cwd, "darwin");
+    assert.equal(codex.executable, f.manifest.profiles["codex-peer"].executable);
+    if (process.platform === "darwin") {
+      const lens = await launchPlan(f.home, "agy-lens", ["models"], {}, f.cwd, "darwin");
+      const linked = join(lens.env.HOME, ".gemini/antigravity-cli/antigravity-oauth-token");
+      execFileSync(lens.executable, [
+        ...lens.args.slice(0, 2),
+        "/bin/sh",
+        "-c",
+        '/usr/bin/security help >/dev/null 2>&1; [ "$?" -eq 126 ] && printf "%s" synthetic-refreshed > "$1"',
+        "fixture",
+        linked,
+      ]);
+      assert.equal(await readFile(source, "utf8"), "synthetic-refreshed");
+    }
+  } finally {
+    await session.dispose();
+  }
+});
+
 test("native AGY discovers the isolated generated agent", {
   skip: !process.env.ALLIANCE_AGY_BINARY,
 }, async () => {
@@ -353,4 +543,26 @@ test("native AGY discovers the isolated generated agent", {
   } finally {
     await session.dispose();
   }
+});
+
+test("AGY can reauthenticate its source profile after logout without allowing other roles to fork auth", async () => {
+  const f = await fixture();
+  const source = join(f.profile.osHome, ".gemini/antigravity-cli/antigravity-oauth-token");
+  await mkdir(join(f.profile.osHome, ".gemini/antigravity-cli"), { recursive: true });
+  await writeFile(source, "synthetic-login", { mode: 0o600 });
+  await setAgyAuthSource(f.home, source);
+  const lens = f.manifest.profiles["agy-lens"];
+  await linkAgyAuth(f.home, lens);
+  await rm(source);
+  const plan = await launchPlan(f.home, "agy-peer", [], {}, f.cwd, "darwin");
+  assert.equal(plan.executable, "/usr/bin/sandbox-exec");
+  assert.equal(plan.env.HOME, f.profile.osHome);
+  await assert.rejects(linkAgyAuth(f.home, f.profile), /ENOENT/);
+  await assert.rejects(launchPlan(f.home, "agy-lens", [], {}, f.cwd), /ENOENT/);
+  await assert.rejects(lstat(source), /ENOENT/);
+  await writeFile(source, "synthetic-new-login", { mode: 0o600 });
+  assert.equal(
+    await readFile(join(lens.osHome, ".gemini/antigravity-cli/antigravity-oauth-token"), "utf8"),
+    "synthetic-new-login",
+  );
 });

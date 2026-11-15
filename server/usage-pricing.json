@@ -1,0 +1,217 @@
+{
+  "_fetched": "2026-11-14",
+  "_how_to_update": "Edit this file (or pass --pricing FILE / place usage-pricing.json in the Alliance home to override per model) and re-run; prices are USD per 1M tokens.",
+  "_doc": "USD per 1M tokens, standard tier, global routing; base snapshot 2026-11-12, Hydrogen verified 2026-11-14. Equivalent API cost only: the Human pays subscriptions, not these rates.",
+  "_sources": {
+    "anthropic": "https://platform.claude.com/docs/en/about-claude/pricing (copy: evidence/anthropic-pricing-page-20261112.md)",
+    "openai": "https://developers.openai.com/api/docs/pricing + https://developers.openai.com/api/docs/guides/prompt-caching",
+    "google": "https://aistudio.google.com/docs/pricing + https://aistudio.google.com/docs/caching"
+  },
+  "anthropic": {
+    "claude-fable-5-2": {
+      "input": 8,
+      "cache_write_5m": 10,
+      "cache_write_1h": 16,
+      "cache_read": 0.2,
+      "output": 40
+    },
+    "claude-fable-5-1": {
+      "input": 10,
+      "cache_write_5m": 12.5,
+      "cache_write_1h": 20,
+      "cache_read": 0.25,
+      "output": 50
+    },
+    "claude-fable-5": {
+      "input": 10,
+      "cache_write_5m": 12.5,
+      "cache_write_1h": 20,
+      "cache_read": 1.0,
+      "output": 50
+    },
+    "claude-opus-5-5": {
+      "input": 4,
+      "cache_write_5m": 5,
+      "cache_write_1h": 8,
+      "cache_read": 0.2,
+      "output": 20
+    },
+    "claude-opus-5": {
+      "input": 5,
+      "cache_write_5m": 6.25,
+      "cache_write_1h": 10,
+      "cache_read": 0.5,
+      "output": 25
+    },
+    "claude-opus-4-8": {
+      "input": 5,
+      "cache_write_5m": 6.25,
+      "cache_write_1h": 10,
+      "cache_read": 0.5,
+      "output": 25
+    },
+    "claude-opus-4-7": {
+      "input": 5,
+      "cache_write_5m": 6.25,
+      "cache_write_1h": 10,
+      "cache_read": 0.5,
+      "output": 25
+    },
+    "claude-opus-4-6": {
+      "input": 5,
+      "cache_write_5m": 6.25,
+      "cache_write_1h": 10,
+      "cache_read": 0.5,
+      "output": 25
+    },
+    "claude-sonnet-5-5": {
+      "input": 2,
+      "cache_write_5m": 2.5,
+      "cache_write_1h": 4,
+      "cache_read": 0.1,
+      "output": 10
+    },
+    "claude-sonnet-5": {
+      "input": 2,
+      "cache_write_5m": 2.5,
+      "cache_write_1h": 4,
+      "cache_read": 0.2,
+      "output": 10
+    },
+    "claude-sonnet-4-6": {
+      "input": 3,
+      "cache_write_5m": 3.75,
+      "cache_write_1h": 6,
+      "cache_read": 0.3,
+      "output": 15
+    },
+    "claude-sonnet-4-5": {
+      "input": 3,
+      "cache_write_5m": 3.75,
+      "cache_write_1h": 6,
+      "cache_read": 0.3,
+      "output": 15
+    },
+    "claude-haiku-5-5": {
+      "input": 0.1,
+      "cache_write_5m": 0.125,
+      "cache_write_1h": 0.2,
+      "cache_read": 0.01,
+      "output": 0.5,
+      "_note": "prompts <=100K; >100K: 0.50/0.625/1/0.05/2.50"
+    },
+    "claude-haiku-4-5": {
+      "input": 1,
+      "cache_write_5m": 1.25,
+      "cache_write_1h": 2,
+      "cache_read": 0.1,
+      "output": 5
+    }
+  },
+  "openai": {
+    "_note": "<=272K context. GPT-5.6+ bill cache writes at 1.25x input (30-min TTL) / 2.5x (12h); earlier models: no write charge. Codex input_tokens INCLUDES cached tokens.",
+    "gpt-6-astra": {
+      "input": 10,
+      "cache_read": 1.0,
+      "cache_write": 12.5,
+      "output": 50
+    },
+    "gpt-6.1-sol": {
+      "input": 2,
+      "cache_read": 0.1,
+      "cache_write": 2.5,
+      "output": 10,
+      "_long_ctx": {
+        "input": 4,
+        "cache_read": 0.2,
+        "output": 15
+      }
+    },
+    "gpt-6.1-terra": {
+      "input": 1,
+      "cache_read": 0.05,
+      "cache_write": 1.25,
+      "output": 5
+    },
+    "gpt-6-sol": {
+      "input": 2,
+      "cache_read": 0.2,
+      "cache_write": 2.5,
+      "output": 10
+    },
+    "gpt-6-luna": {
+      "input": 0.1,
+      "cache_read": 0.01,
+      "cache_write": 0.125,
+      "output": 0.5
+    },
+    "gpt-5.6-sol": {
+      "input": 4,
+      "cache_read": 0.4,
+      "cache_write": 5,
+      "output": 20
+    },
+    "gpt-5.6-terra": {
+      "input": 2,
+      "cache_read": 0.2,
+      "cache_write": 2.5,
+      "output": 12
+    },
+    "gpt-5.5": {
+      "input": 5,
+      "cache_read": 0.5,
+      "cache_write": 5,
+      "output": 30
+    },
+    "gpt-5.4": {
+      "input": 2.5,
+      "cache_read": 0.25,
+      "cache_write": 2.5,
+      "output": 15
+    },
+    "gpt-5.3-codex": {
+      "input": 1.75,
+      "cache_read": 0.175,
+      "cache_write": 1.75,
+      "output": 14
+    }
+  },
+  "google": {
+    "_note": "Gemini 4: implicit caching only, min 4,096 tokens; Argon and Carbon prices rise 2x on 2026-12-01. Multi-turn: whole previous request cached only if the new request adds >=2,050 tokens.",
+    "gemini-4-hydrogen": {
+      "input": 1.5,
+      "cache_read": 0.075,
+      "output": 7.5
+    },
+    "gemini-4-argon": {
+      "input": 2,
+      "cache_read": 0.1,
+      "output": 10,
+      "_from_2026_12_01": {
+        "input": 4,
+        "cache_read": 0.2,
+        "output": 20
+      }
+    },
+    "gemini-4-carbon": {
+      "input": 2,
+      "cache_read": 0.1,
+      "output": 10,
+      "_from_2026_12_01": {
+        "input": 4,
+        "cache_read": 0.2,
+        "output": 20
+      }
+    },
+    "gemini-3.1-pro-preview": {
+      "input": 2,
+      "cache_read": 0.2,
+      "output": 12
+    },
+    "gemini-3.8-flash": {
+      "input": 0.75,
+      "cache_read": 0.075,
+      "output": 3.75
+    }
+  }
+}

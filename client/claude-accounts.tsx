@@ -6,6 +6,7 @@ import { Pressable, Text, View } from "react-native";
 import {
   claudeAccountsRead,
   claudeAccountsSelect,
+  claudeAccountsSwitchNow,
   claudeQuotaRead,
 } from "../shared/claude-account-contracts";
 
@@ -22,10 +23,12 @@ export function ClaudeAccountSettings({
     retry: false,
     refetchInterval: 60000,
   });
+  const switchNow = useRpc(claudeAccountsSwitchNow);
   const select = useRpc(claudeAccountsSelect);
   const state = useQuery({
     queryKey: ["alliance-claude-accounts", host.id],
     queryFn: () => read({}),
+    refetchInterval: 5000,
     retry: false,
   });
   const [busy, setBusy] = useState(false);
@@ -48,9 +51,10 @@ export function ClaudeAccountSettings({
             Applies only to this host. Select another Paseo host to configure its accounts.
           </Text>
           <Text style={muted}>
-            Selections apply to newly started Claude processes. Running processes retain their current
-            credential until they exit; saving never stops or resumes an agent. A resumed session may reuse
-            its existing process.
+            Idle sessions switch automatically. Child-session jobs do not block their HQ. History is
+            preserved. Switch now stops the current turn and continues it on the selected account; existing
+            tool results must be checked before repeating work. Jobs owned by that session require a safe
+            checkpoint first.
           </Text>
           {(error || state.error) && (
             <Text accessibilityRole="alert" style={text}>
@@ -64,7 +68,7 @@ export function ClaudeAccountSettings({
               return (
                 <View key={role} style={{ gap: 6 }}>
                   <Text style={text}>
-                    {role === "default" ? "Host default" : role.toUpperCase()} · next process:{" "}
+                    {role === "default" ? "Host default" : role.toUpperCase()} · selected:{" "}
                     {selected === "inherit" ? config.defaultAccount : selected}
                   </Text>
                   <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8 }}>
@@ -116,6 +120,48 @@ export function ClaudeAccountSettings({
                 </View>
               );
             })}
+          <Text style={text}>Session accounts</Text>
+          {state.data?.sessions?.map((session) => (
+            <View key={session.agentId} style={{ gap: 4 }}>
+              <Text style={text}>{session.title}</Text>
+              <Text style={muted}>
+                In use: {session.current ?? (session.state === "ready" ? "No active process" : "Unknown")}
+                {" · Selected: "}
+                {session.selected}
+              </Text>
+              <Text style={muted}>
+                {session.state === "current"
+                  ? "Using selected account"
+                  : session.state === "ready"
+                    ? "Ready · selected account applies on next message"
+                    : session.state === "pending"
+                      ? "Waiting for this session’s turn or native work to finish"
+                      : session.state === "unsupported"
+                        ? "Daemon update required for safe automatic switching"
+                        : "Unable to verify current account; no interruption attempted"}
+              </Text>
+              {session.reason && <Text style={muted}>{session.reason}</Text>}
+              {session.state === "pending" && (
+                <Pressable
+                  accessibilityRole="button"
+                  disabled={busy}
+                  onPress={() => {
+                    setBusy(true);
+                    setError("");
+                    void switchNow({
+                      agentId: session.agentId,
+                      selected: session.selected as "legacy" | "5x" | "20x",
+                    })
+                      .then(() => state.refetch())
+                      .catch((e: Error) => setError(e.message || "Switch failed; checkpoint retained"))
+                      .finally(() => setBusy(false));
+                  }}
+                >
+                  <Text style={text}>Switch now · stop turn and resume</Text>
+                </Pressable>
+              )}
+            </View>
+          ))}
           <Text style={text}>Account quota · {host.label}</Text>
           <Text style={muted}>
             Reads this host’s registered OAuth profiles. Quota covers the account’s usage across machines.

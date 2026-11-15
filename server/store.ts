@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { PluginHookAgent, PluginTurnOutcome } from "@getpaseo/plugin/server";
@@ -6,17 +6,21 @@ import type { z } from "zod";
 import type { AutonomyState } from "../shared/autonomy";
 import type { RoleName, RoomRecord } from "../shared/contracts";
 import type { Contributor } from "../shared/integration.mjs";
+import { KeepWarmPolicy, type WarmState } from "../shared/keepwarm";
 import {
   allowedModel,
   defaultModelPolicy,
+  GLOBAL_MODEL_POLICY,
   ModelPolicy,
   type ModelPolicyValue,
+  modelPolicyWarnings,
   refusedModel,
   upgradeModelPolicy,
 } from "../shared/model-policy";
 import type { Obligation } from "../shared/obligations";
-import { harnessOf } from "../shared/operations";
+import { apartFromLimit, harnessOf } from "../shared/operations";
 import type { WakeRecordValue } from "../shared/wakeups";
+import { guardWrites, StoreBlockedError, storeAccess } from "./store-compat.mjs";
 
 export interface TurnInputReceipt {
   turnId: string;
@@ -42,7 +46,25 @@ export interface TurnReadbackReceipt {
   awaitEndEvent?: boolean;
 }
 
+export type WakeSource =
+  | "unknown"
+  | "native.plain"
+  | "alliance.wakeup"
+  | "alliance.retry"
+  | "alliance.continue"
+  | "alliance.resume"
+  | "alliance.account-switch";
+export interface TurnWake {
+  turnId: string | null;
+  time: number;
+  source: WakeSource;
+  promptId?: string;
+}
+
 export interface MemberRecord {
+  warm?: WarmState;
+  turnWake?: TurnWake;
+  wakeMessages?: { id: string; at: number; source: WakeSource }[];
   id: string;
   roomId: string;
   role: RoleName;
@@ -67,6 +89,8 @@ export interface MemberRecord {
   lastTurnId?: string | null;
   /** Epoch ms when the latest turn ended; drives the stale-decision reminder. */
   lastTurnEndedAt?: number;
+  /** Most recent verified completed turn; retained when a later turn fails. Older releases ignore it. */
+  lastSuccessfulTurn?: { endedAt: number; provider: string; model?: string };
   /** When Alliance received the latest start hook; bounds native notice attribution across reused turn IDs. */
   turnStartedAt?: number;
   /** Native input rows already inspected in this turn/generation; a new start clears the cursor. */
@@ -76,7 +100,7 @@ export interface MemberRecord {
   turnReadbackPending?: TurnReadbackReceipt;
   /** Baseline for members recorded before turn end times existed. */
   staleSince?: number;
-  /** Who recorded the decision: an agent ID, null for the Human, absent for legacy records. */
+  /** Who recorded the decision: an agent ID, null for an unidentified caller, absent for legacy records. */
   decisionBy?: string | null;
   decisionAt?: string;
   decisionScope?: "technical" | "product";
@@ -88,15 +112,39 @@ export interface MemberRecord {
   };
   /** The turn the decision reviewed; a later turn needs its own decision. */
   decisionTurnId?: string | null;
-  /** Explicitly kept open by its owner chain or the Human; never auto-archived. */
-  keep?: { by: string; at: string };
+  /**
+   * Explicitly kept open by its owner chain or the Human. `until` is when it lapses (releases before
+   * 0.1.52 wrote none and read any keep as permanent); it also lapses when `by` is archived.
+   */
+  keep?: { by: string; at: string; reason?: string; until?: string };
+  /**
+   * Overdue-decision reminders sent for `turnId`: how many each owner up the chain received, when
+   * the latest went out, and a start time that phases records already overdue at upgrade in. A
+   * different turn starts afresh. Older releases ignore it.
+   */
+  remind?: { turnId: string; owners: Record<string, number>; at: number; notBefore?: number };
+  /** The one reminder owed for a rejection nobody followed up, by that rejection's `decisionAt`. */
+  rejectedRemind?: { decisionAt: string; notBefore?: number; sentAt?: number };
+  /** The latest prompts this plugin sent to the agent, so they are not mistaken for new work. */
+  pluginMessages?: { id: string; at: number }[];
   /** Set once Paseo reports the agent archived; a reopened agent clears it on its next turn. */
   archivedAt?: string;
   /**
    * Its latest turn ended on a provider limit that lifts at `until` (the reset plus a minute).
    * `messageId` is the plugin message that started that turn, if any. Cleared when a turn ends otherwise.
    */
-  limited?: { until: number; messageId: string | null };
+  limited?: { until: number; messageId: string | null; account?: string };
+  /**
+   * Claude accounts this member's next prompt can run under (the launch receipt of its live
+   * process, and the account selected for its next launch). Refreshed by the account sweep;
+   * absent when unknown. Older releases ignore it.
+   */
+  claudeAccounts?: string[];
+  /**
+   * Its provider is signed out: prompts failed on sign-in `failures` times since `since`, and
+   * Alliance sends it nothing by itself until `until` (0: not held yet). `reason` names what to do.
+   */
+  signIn?: { since: number; lastAt: number; failures: number; holds: number; until: number; reason: string };
   /**
    * Its running turn has shown no activity since `since` (ISO). `key` names the owner's notice,
    * null when no member owner is notified; cleared once the member works again or stops.
@@ -121,6 +169,9 @@ export interface MemberRecord {
     product?: { outcome: string; journey: string; reviewer: string; remaining: string[] };
   };
 }
+/** True while Alliance must not prompt this member by itself: its provider is signed out. */
+export const signInHeld = (member: Pick<MemberRecord, "signIn"> | null | undefined, now: number) =>
+  (member?.signIn?.until ?? 0) > now;
 /** A turn that is new work: its result is still to come and an earlier decision no longer applies. */
 export const newTurn = (turnId: string | null): Partial<MemberRecord> => ({
   lastTurnId: turnId,
@@ -140,6 +191,16 @@ export const newTurn = (turnId: string | null): Partial<MemberRecord> => ({
   turnReadbackPending: undefined,
 });
 export interface JobRecord {
+  settlementHistory?: NonNullable<JobRecord["settlement"]>[];
+  settlement?: {
+    outcome: "succeeded" | "failed" | "superseded" | "unverified";
+    reason: string;
+    evidence: string;
+    digest: string;
+    at: string;
+    actorId: string | null;
+  };
+  archivedAt?: string;
   key: string;
   roomId: string;
   ownerId: string;
@@ -152,10 +213,23 @@ export interface JobRecord {
 /** A saved model list a reset removed, kept raw in room_model_policy_removed under this id. */
 export type RemovedModelPolicy = { id: number; revision: number; at: string };
 export class RoomStore {
-  private db: DatabaseSync;
-  constructor(home: string) {
+  private db: ReturnType<typeof guardWrites>;
+  /** Set when a newer release marked this store as needing a newer writer: it is read, never written. */
+  readonly readOnly: ReturnType<typeof storeAccess> | null = null;
+  constructor(private home: string) {
     mkdirSync(home, { recursive: true, mode: 0o700 });
-    this.db = new DatabaseSync(join(home, "rooms.sqlite"));
+    const path = join(home, "rooms.sqlite");
+    const raw = new DatabaseSync(path);
+    // Before any write (journal mode, DDL), see whether a newer release marked the store.
+    const access = storeAccess(raw);
+    if (access.access !== "write") {
+      raw.close();
+      if (access.access === "none") throw new StoreBlockedError(access);
+      this.readOnly = access;
+      this.db = guardWrites(new DatabaseSync(path, { readOnly: true }));
+      return;
+    }
+    this.db = guardWrites(raw);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS rooms(id TEXT PRIMARY KEY, cwd TEXT NOT NULL UNIQUE, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS members(id TEXT PRIMARY KEY, roomId TEXT NOT NULL, launchKey TEXT, data TEXT NOT NULL, UNIQUE(roomId, launchKey));
@@ -165,6 +239,7 @@ export class RoomStore {
       CREATE TABLE IF NOT EXISTS obligations(key TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS obligation_history(key TEXT NOT NULL, revision INTEGER NOT NULL, data TEXT NOT NULL, PRIMARY KEY(key,revision));
       CREATE TABLE IF NOT EXISTS room_model_policies(roomId TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS room_keepwarm(roomId TEXT PRIMARY KEY, revision INTEGER NOT NULL, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS room_model_policy_resets(roomId TEXT PRIMARY KEY, revision INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS room_model_policy_removed(id INTEGER PRIMARY KEY AUTOINCREMENT, roomId TEXT NOT NULL, revision INTEGER NOT NULL, data TEXT NOT NULL, removedAt TEXT NOT NULL);`);
   }
@@ -172,6 +247,40 @@ export class RoomStore {
     return (this.db.prepare("SELECT data FROM obligations ORDER BY rowid").all() as { data: string }[]).map(
       (r) => JSON.parse(r.data),
     );
+  }
+  keepwarm(roomId: string) {
+    this.room(roomId);
+    const exists = this.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='room_keepwarm'")
+      .get();
+    const row = exists
+      ? (this.db.prepare("SELECT revision,data FROM room_keepwarm WHERE roomId=?").get(roomId) as
+          | { revision: number; data: string }
+          | undefined)
+      : undefined;
+    return { revision: row?.revision ?? 0, ...KeepWarmPolicy.parse(row ? JSON.parse(row.data) : {}) };
+  }
+  setKeepwarm(
+    roomId: string,
+    enabled: boolean,
+    actorId: string | null,
+    maxPings?: number,
+    disabledReason?: string,
+  ) {
+    if (actorId !== null) throw new Error("Keepwarm settings belong to the Human");
+    const current = this.keepwarm(roomId);
+    const policy = KeepWarmPolicy.parse({
+      enabled,
+      maxPings: maxPings ?? current.maxPings,
+      minCtx: current.minCtx,
+      ...(disabledReason ? { disabledAt: Date.now(), disabledReason } : {}),
+    });
+    this.db
+      .prepare(
+        "INSERT INTO room_keepwarm(roomId,revision,data) VALUES(?,?,?) ON CONFLICT(roomId) DO UPDATE SET revision=excluded.revision,data=excluded.data",
+      )
+      .run(roomId, current.revision + 1, JSON.stringify(policy));
+    return this.keepwarm(roomId);
   }
   obligation(key: string): Obligation | undefined {
     const row = this.db.prepare("SELECT data FROM obligations WHERE key=?").get(key) as
@@ -310,15 +419,18 @@ export class RoomStore {
     if (!result.changes) throw new Error("Job changed; refresh before updating ownership");
   }
 
-  modelPolicy(roomId: string) {
-    this.room(roomId);
+  modelPolicy(roomId: string): { revision: number; saved: boolean; policy: ModelPolicyValue } {
+    if (roomId !== GLOBAL_MODEL_POLICY) this.room(roomId);
     const row = this.db.prepare("SELECT revision,data FROM room_model_policies WHERE roomId=?").get(roomId) as
       | { revision: number; data: string }
       | undefined;
+    const global = roomId === GLOBAL_MODEL_POLICY ? null : this.modelPolicy(GLOBAL_MODEL_POLICY);
     return {
-      revision: row?.revision ?? this.resetRevision(roomId),
+      revision: row?.revision ?? this.resetRevision(roomId) + (global?.revision ?? 0),
       saved: Boolean(row),
-      policy: row ? ModelPolicy.parse(upgradeModelPolicy(JSON.parse(row.data))) : defaultModelPolicy(),
+      policy: row
+        ? ModelPolicy.parse(upgradeModelPolicy(JSON.parse(row.data)))
+        : (global?.policy ?? defaultModelPolicy()),
     };
   }
   // A reset deletes the saved row (older releases then read their own defaults) but keeps the
@@ -336,7 +448,7 @@ export class RoomStore {
     roomId: string,
     expected?: number,
   ): ReturnType<RoomStore["modelPolicy"]> & { removed?: RemovedModelPolicy } {
-    this.room(roomId);
+    if (roomId !== GLOBAL_MODEL_POLICY) this.room(roomId);
     let removed: RemovedModelPolicy | undefined;
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -344,7 +456,12 @@ export class RoomStore {
         .prepare("SELECT revision,data FROM room_model_policies WHERE roomId=?")
         .get(roomId) as { revision: number; data: string } | undefined;
       const counter = this.resetRevision(roomId);
-      if (expected !== undefined && expected !== (row?.revision ?? counter))
+      if (
+        expected !== undefined &&
+        expected !==
+          (row?.revision ??
+            counter + (roomId === GLOBAL_MODEL_POLICY ? 0 : this.modelPolicy(GLOBAL_MODEL_POLICY).revision))
+      )
         throw new Error("Model policy changed elsewhere. Reload settings before resetting.");
       // An older release may have saved below the counter; never let the revision go back.
       this.db
@@ -372,6 +489,8 @@ export class RoomStore {
     const parsed = ModelPolicy.parse(policy);
     const refused = parsed.routes.find((route) => !allowedModel(route.harness, route.model));
     if (refused) throw new Error(`${refusedModel(refused.model)} Remove that ${refused.role} route to save.`);
+    const warning = modelPolicyWarnings(parsed)[0];
+    if (warning) throw new Error(warning.reason);
     const data = JSON.stringify(parsed);
     const result = current.saved
       ? this.db
@@ -423,18 +542,33 @@ export class RoomStore {
   }
   /**
    * When the provider limit this agent shares lifts, or null: the latest reset reported by a member
-   * of the same harness on this host. The credential behind a role is not read, so every member of
-   * that harness counts as sharing it (all Claude roles of a host hit one limit on 2026-10-21).
+   * of the same harness still unarchived on this host. A Claude limit records the account it ran on, and releases
+   * only members known to run the other named account (apartFromLimit); a limit or member with no
+   * known account still holds every member of the harness (all Claude roles hit one limit on 2026-10-21).
    */
   heldUntil(agentId: string, now: number): number | null {
-    const harness = harnessOf(this.member(agentId)?.provider ?? "");
+    const asker = this.member(agentId);
+    const harness = harnessOf(asker?.provider ?? "");
     if (!harness) return null;
-    const { until } = this.db
+    const rows = this.db
       .prepare(
-        "SELECT MAX(json_extract(data, '$.limited.until')) AS until FROM members WHERE json_extract(data, '$.provider') LIKE ?",
+        "SELECT data FROM members WHERE json_extract(data, '$.provider') LIKE ? AND json_extract(data, '$.archivedAt') IS NULL AND json_extract(data, '$.limited.until') > ?",
       )
-      .get(`alliance-${harness}-%`) as { until: number | null };
-    return until !== null && until > now ? until : null;
+      .all(`alliance-${harness}-%`, now) as { data: string }[];
+    let until: number | null = null;
+    for (const { data } of rows) {
+      const limited = (JSON.parse(data) as MemberRecord).limited;
+      if (!limited || (harness === "claude" && apartFromLimit(limited.account, asker?.claudeAccounts)))
+        continue;
+      if (until === null || limited.until > until) until = limited.until;
+    }
+    return until;
+  }
+  /** Records which accounts a member can run under; absent means unknown. Writes only a change. */
+  noteClaudeAccounts(id: string, accounts: string[] | undefined) {
+    const current = this.member(id);
+    if (!current || JSON.stringify(current.claudeAccounts) === JSON.stringify(accounts)) return;
+    this.saveMember({ ...current, claudeAccounts: accounts });
   }
   byLaunch(roomId: string, key: string): MemberRecord | null {
     const row = this.db.prepare("SELECT data FROM members WHERE roomId=? AND launchKey=?").get(roomId, key) as
@@ -454,6 +588,44 @@ export class RoomStore {
     const current = this.member(id);
     if (!current) throw new Error(`Unknown room member: ${id}`);
     this.saveMember({ ...current, ...change });
+  }
+  /** Remember a prompt the plugin sent to a member; only the latest few are kept. */
+  notePluginMessage(id: string, messageId: string, at: number) {
+    const member = this.member(id);
+    if (member)
+      this.updateMember(id, {
+        pluginMessages: [...(member.pluginMessages ?? []).slice(-31), { id: messageId, at }],
+      });
+  }
+  noteWakeMessage(id: string, messageId: string, source: WakeSource, at: number) {
+    const member = this.member(id);
+    if (member)
+      this.updateMember(id, {
+        wakeMessages: [...(member.wakeMessages ?? []).slice(-63), { id: messageId, at, source }],
+      });
+  }
+  noteTurnWake(id: string, turnId: string | null, time: number, promptId?: string) {
+    const member = this.member(id);
+    if (!member) return;
+    const sent = promptId ? member.wakeMessages?.find((m) => m.id === promptId) : undefined;
+    const marker: TurnWake = {
+      turnId,
+      time,
+      source: sent?.source ?? (promptId ? "native.plain" : "unknown"),
+      ...(promptId ? { promptId } : {}),
+    };
+    if (JSON.stringify(member.turnWake) === JSON.stringify(marker)) return;
+    this.updateMember(id, { turnWake: marker });
+    // Measurement failure must not fail a native turn or change its lifecycle.
+    try {
+      appendFileSync(
+        join(this.home, "wake-markers.jsonl"),
+        `${JSON.stringify({ agentId: id, provider: member.provider, ...marker })}\n`,
+        { mode: 0o600 },
+      );
+    } catch {
+      /* The latest marker remains available in status. */
+    }
   }
   saveOwnership(id: string, ownership: NonNullable<MemberRecord["ownership"]>, revision: number) {
     const result = this.db

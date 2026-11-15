@@ -13,7 +13,7 @@ export const APPROVAL_MS = 5 * 60000;
 const NOTICE_MS = 6 * 3600000;
 /** The denied member reads this as the result of the call it asked to run. */
 const DENIAL =
-  "Alliance denied this request after 5 minutes: nobody approves commands for Alliance members. Redo the step without anything that needs approval (for example, write into a fresh `mktemp -d` directory instead of running `rm -rf` with a glob) and continue your task.";
+  "Alliance denied this request after 5 minutes: nobody approves commands for Alliance members. Redo the step without anything that needs approval (for example, clean your scratch with `alliance-work scratch clean` instead of running `rm -rf` with a glob) and continue your task.";
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 type Agent = Awaited<ReturnType<PaseoApi["agents"]["list"]>>["entries"][number]["agent"];
 type Permission = NonNullable<Agent["pendingPermissions"]>[number];

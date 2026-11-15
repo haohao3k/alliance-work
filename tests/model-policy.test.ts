@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
@@ -9,11 +10,27 @@ import { RoomStore } from "../server/store";
 import {
   Difficulty,
   defaultModelPolicy,
+  GLOBAL_MODEL_POLICY,
   ModelPolicy,
   policyInstruction,
   upgradeModelPolicy,
 } from "../shared/model-policy";
 import { temporary } from "./temp";
+
+test("model policy CLI saves remain Human-only before reading a file or contacting the daemon", () => {
+  const result = spawnSync(
+    process.execPath,
+    ["scripts/cli.mjs", "models", "save", "--room", "fixture", "--file", "/nonexistent-model-policy.json"],
+    {
+      cwd: join(import.meta.dirname, ".."),
+      env: { PATH: process.env.PATH, PASEO_AGENT_ID: "fixture-agent" },
+      encoding: "utf8",
+    },
+  );
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /settings belong to the Human/);
+  assert.doesNotMatch(result.stderr, /ENOENT|No Alliance installation/);
+});
 
 const model = (id: string, efforts = ["low", "medium", "high", "xhigh"]): AgentModelDefinition => ({
   id,
@@ -28,8 +45,93 @@ const catalog: AgentModelDefinition[] = [
   "claude-opus-5-5",
   "claude-sonnet-5-5",
   "zai/glm-5.3",
-  "izno-vps/ds/deepseek-v4.1-flash",
 ].map((id) => model(id));
+
+test("Carbon cannot be selected by any role through AGY or backend-qualified Pi routes", () => {
+  const policy = defaultModelPolicy();
+  for (const role of ["hq", "supervisor", "lead", "peer", "lens"] as const)
+    for (const [harness, id] of [
+      ["agy", "gemini-4-carbon-medium"],
+      ["pi", "antigravity/gemini-4-carbon"],
+    ])
+      assert.throws(() => chooseModel(policy, role, harness, [model(id)], id, "medium"), /Carbon.*refused/);
+  const saved = {
+    ...policy,
+    routes: [
+      ...policy.routes,
+      ...["carbon", "argon"].map((name, index) => ({
+        role: "peer" as const,
+        harness: "agy" as const,
+        model: `gemini-4-${name}-medium`,
+        effort: "medium" as const,
+        priority: index + 1,
+        difficulties: [...Difficulty.options],
+      })),
+    ],
+  };
+  assert.equal(
+    chooseModel(saved, "peer", "agy", [model("gemini-4-carbon-medium"), model("gemini-4-argon-medium")])
+      .model,
+    "gemini-4-argon-medium",
+  );
+});
+
+test("Fable needs explicit frontier routes and a recorded owner rationale, including legacy policies", async () => {
+  const policy = defaultModelPolicy();
+  const fable = model("claude-fable-5-2");
+  const live = [...catalog, fable];
+  const route = {
+    role: "peer" as const,
+    harness: "claude" as const,
+    model: fable.id,
+    effort: "high" as const,
+    priority: 1,
+    difficulties: ["frontier" as const],
+  };
+  const frontier = { ...policy, routes: [...policy.routes, route] };
+  for (const role of ["hq", "supervisor", "lead", "peer"] as const)
+    assert.throws(() => chooseModel(frontier, role, "claude", live, fable.id, "high"), /Fable.*rationale/);
+  const enabled = {
+    ...frontier,
+    fable: { rationale: "Frontier diagnosis requires resolving an untested architecture premise" },
+  };
+  assert.equal(chooseModel(enabled, "peer", "claude", [fable], fable.id, "high", "frontier").model, fable.id);
+  assert.equal(chooseModel(enabled, "lead", "claude", live, fable.id, "high").model, fable.id);
+  assert.throws(
+    () => chooseModel(enabled, "lead", "claude", live, fable.id, "high", "standard"),
+    /Fable.*frontier/,
+  );
+  assert.throws(() => chooseModel(enabled, "peer", "claude", [fable]), /No allowed/);
+  assert.throws(
+    () => chooseModel(enabled, "peer", "claude", [fable], undefined, "high", "frontier"),
+    /No allowed/,
+  );
+  const legacy = {
+    ...enabled,
+    routes: [...policy.routes, { ...route, difficulties: [...Difficulty.options] }],
+  };
+  assert.throws(() => chooseModel(legacy, "peer", "claude", [fable], fable.id, "high"), /No allowed/);
+  // Old policies stay readable; new saves must narrow the Fable band rather than silently rewriting it.
+  assert.equal(ModelPolicy.safeParse(legacy).success, true);
+  const home = await temporary("alliance-fable-policy-");
+  const store = new RoomStore(home);
+  try {
+    assert.throws(() => store.saveModelPolicy(GLOBAL_MODEL_POLICY, legacy, 0), /Fable.*frontier/);
+    assert.throws(() => store.saveModelPolicy(GLOBAL_MODEL_POLICY, frontier, 0), /Fable.*rationale/);
+    const saved = store.saveModelPolicy(GLOBAL_MODEL_POLICY, enabled, 0);
+    assert.deepEqual(saved.policy, enabled);
+    assert.equal(
+      saved.policy.routes.some((r) => r.model === fable.id && r.difficulties.includes("standard")),
+      false,
+    );
+  } finally {
+    store.close();
+  }
+  assert.equal(
+    defaultModelPolicy().routes.some((r) => /fable|hydrogen/.test(r.model)),
+    false,
+  );
+});
 // AGY model IDs carry their only effort.
 const agy = ["low", "medium", "high"].map((effort) => model(`gemini-4-argon-${effort}`, [effort]));
 const ranked = (policy: ReturnType<typeof defaultModelPolicy>, role: "peer" | "lens") =>
@@ -46,8 +148,8 @@ test("release defaults give Peer and Lens separate lists in the Human's order", 
     "3 codex/gpt-6.1-sol high",
     "4 pi/antigravity/gemini-4-argon medium",
     "5 pi/antigravity/gemini-3.8-flash medium",
-    "6 pi/zai/glm-5.3 high",
-    "7 pi/izno-vps/ds/deepseek-v4.1-flash high",
+    "6 pi/antigravity/gemini-3.8-flash high",
+    "7 pi/zai/glm-5.3 high",
   ]);
   assert.deepEqual(ranked(policy, "lens"), [
     "1 claude/claude-opus-5-5 medium",
@@ -57,15 +159,55 @@ test("release defaults give Peer and Lens separate lists in the Human's order", 
   ]);
   for (const route of policy.routes) assert.deepEqual(route.difficulties, Difficulty.options);
   assert.equal(ModelPolicy.safeParse(policy).success, true);
-  const instruction = policyInstruction(policy, 0);
-  assert.match(
-    instruction,
-    /Peer:\n- 1\. claude\/claude-sonnet-5-5, high\n- 2\. claude\/claude-sonnet-5-5, medium\n/,
-  );
-  assert.match(
-    instruction,
-    /Lens:\n- 1\. claude\/claude-opus-5-5, medium\n- 2\. codex\/gpt-6-astra, medium\n/,
-  );
+});
+
+/** Route lines the prompt lists under "Peer:" or "Lens:", as "priority harness/model effort". */
+const listed = (text: string, role: "Peer" | "Lens") => {
+  const start = text.indexOf(`\n${role}:\n`);
+  if (start < 0) return [];
+  const found: string[] = [];
+  for (const line of text.slice(start + role.length + 3).split("\n")) {
+    const match = /^- (\d+)\. (\S+), (\w+)/.exec(line);
+    if (!match) break;
+    found.push(`${match[1]} ${match[2]} ${match[3]}`);
+  }
+  return found;
+};
+
+test("each role's policy text lists the allowlist it delegates from in the Human's order", () => {
+  const policy = defaultModelPolicy();
+  const want = (role: "peer" | "lens") => ranked(policy, role);
+  for (const role of [undefined, "hq", "lead", "peer"]) {
+    const text = policyInstruction(policy, 0, role);
+    assert.deepEqual(listed(text, "Peer"), want("peer"), `${role} Peer list`);
+    assert.deepEqual(listed(text, "Lens"), want("lens"), `${role} Lens list`);
+  }
+  // A Lens is read-only and chooses no model: it needs no route list.
+  const lens = policyInstruction(policy, 0, "lens");
+  assert.deepEqual([listed(lens, "Peer"), listed(lens, "Lens")], [[], []]);
+});
+
+test("choosing roles are told when each default route fits; a route the Human adds still lists", () => {
+  const policy = defaultModelPolicy();
+  policy.routes.push({
+    role: "peer",
+    harness: "pi",
+    model: "vendor/custom-model",
+    effort: "high",
+    priority: 9,
+    difficulties: ["routine"],
+  });
+  for (const role of [undefined, "supervisor", "peer"]) {
+    const text = policyInstruction(policy, 0, role);
+    const peer = text
+      .slice(text.indexOf("\nPeer:\n"))
+      .split("\n")
+      .filter((line) => /^- \d+\. /.test(line))
+      .slice(0, 8);
+    assert.ok(peer[7]?.includes("vendor/custom-model") && peer[7].includes("only routine"));
+    // Every release-default Peer route explains when to use it, so a new default cannot ship bare.
+    for (const line of peer.slice(0, 7)) assert.match(line, /\(.+\)$/, `${role}: ${line}`);
+  }
 });
 
 test("omitted worker models take the harness's first choice for that role", () => {
@@ -93,13 +235,9 @@ test("omitted worker models take the harness's first choice for that role", () =
   });
   assert.deepEqual(pick("peer", "pi"), { model: "zai/glm-5.3", thinkingOptionId: "high" });
   // A route missing from this host's catalog is skipped for the next one, never substituted.
-  assert.deepEqual(
-    pick(
-      "peer",
-      "pi",
-      catalog.filter((entry) => entry.id !== "zai/glm-5.3"),
-    ),
-    { model: "izno-vps/ds/deepseek-v4.1-flash", thinkingOptionId: "high" },
+  assert.throws(
+    () => pick("peer", "pi", catalog.filter((entry) => entry.id !== "zai/glm-5.3")),
+    /No allowed/,
   );
   assert.deepEqual(
     pick(
@@ -203,7 +341,7 @@ test("pre-0.1.18 saved routes apply to both Peer and Lens; reset returns a room 
       createdAt: "2026-10-12",
     });
     store.close();
-    // Exactly the shape the 0.1.17 HQ saved for ExampleApp: one route, no role.
+    // Exactly the shape the 0.1.17 HQ saved for ACME: one route, no role.
     const legacy = {
       leadEffort: "medium",
       routes: [
@@ -280,7 +418,7 @@ test("every role must cover every difficulty and keys are unique per role", () =
   assert.equal(ModelPolicy.safeParse(both).success, true);
   // ...but releases before 0.1.18 cannot read that list, so rollback checks for it first.
   assert.equal(sharesRouteAcrossRoles(both), true);
-  assert.equal(sharesRouteAcrossRoles(policy), false, "release defaults stay readable by 0.1.17");
+  assert.equal(sharesRouteAcrossRoles(policy), true, "Flash high is available to both worker roles");
 });
 
 test("Lead preferences permit deliberate overrides and fall back to available provider defaults", () => {
@@ -424,6 +562,9 @@ test("reset clears unreadable lists, never lowers the revision and can require t
         createdAt: "2026-10-21",
       });
     const policy = defaultModelPolicy();
+    policy.routes = policy.routes.filter(
+      (r) => !(r.role === "peer" && r.model === "antigravity/gemini-3.8-flash" && r.effort === "high"),
+    );
     store.saveModelPolicy(
       "shared",
       { ...policy, routes: [...policy.routes, { ...policy.routes[0], role: "lens" }] },
@@ -480,6 +621,41 @@ test("reset clears unreadable lists, never lowers the revision and can require t
     );
     assert.deepEqual({ ...copy(plain.removed?.id) }, { roomId: "plain", revision: 1, data: "{" });
     copies.close();
+  } finally {
+    store.close();
+  }
+});
+
+test("daemon policy inheritance preserves overrides and rejects stale inherited edits", async () => {
+  const home = await temporary("alliance-global-policy-");
+  let store = new RoomStore(home);
+  try {
+    for (const id of ["a", "b"])
+      store.addRoom({
+        id,
+        title: id,
+        cwd: `/fixture/${id}`,
+        workspaceId: id,
+        mission: "",
+        artifacts: `${home}/${id}`,
+        createdAt: "2026-11-08",
+      });
+    const before = store.modelPolicy("a");
+    const global = { ...defaultModelPolicy(), leadEffort: "high" as const };
+    store.saveModelPolicy(GLOBAL_MODEL_POLICY, global, 0);
+    assert.equal(store.modelPolicy("a").policy.leadEffort, "high");
+    assert.throws(() => store.saveModelPolicy("a", before.policy, before.revision), /changed elsewhere/);
+    store.saveModelPolicy("a", { ...global, leadEffort: "low" }, store.modelPolicy("a").revision);
+    store.saveModelPolicy(GLOBAL_MODEL_POLICY, { ...global, leadEffort: "xhigh" }, 1);
+    assert.equal(store.modelPolicy("a").policy.leadEffort, "low");
+    assert.equal(store.modelPolicy("b").policy.leadEffort, "xhigh");
+    store.close();
+    store = new RoomStore(home);
+    assert.equal(store.modelPolicy("b").policy.leadEffort, "xhigh");
+    store.resetModelPolicy("a", store.modelPolicy("a").revision);
+    assert.equal(store.modelPolicy("a").policy.leadEffort, "xhigh");
+    store.resetModelPolicy(GLOBAL_MODEL_POLICY, store.modelPolicy(GLOBAL_MODEL_POLICY).revision);
+    assert.deepEqual(store.modelPolicy("a").policy, defaultModelPolicy());
   } finally {
     store.close();
   }

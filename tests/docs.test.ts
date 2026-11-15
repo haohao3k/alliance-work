@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
+import { defaultModelPolicy } from "../shared/model-policy";
 
 const projectRoot = resolve(import.meta.dirname, "..");
 
@@ -53,4 +54,22 @@ test("links in the user docs and role texts reach an existing file and heading",
       }
   }
   assert.deepEqual(broken, []);
+});
+
+test("the quickstart's default model routes are the routes the release ships, in order", async () => {
+  const text = await readFile(join(projectRoot, "docs/quickstart.vi.md"), "utf8");
+  const policy = defaultModelPolicy();
+  for (const [row, role] of [
+    ["Peer", "peer"],
+    ["Lens", "lens"],
+  ] as const) {
+    const line = text.split("\n").find((candidate) => candidate.startsWith(`| ${row} |`));
+    assert.ok(line, `quickstart has no ${row} route row`);
+    const documented = [...line.matchAll(/`([^`\s]+) (\w+)`/g)].map((match) => `${match[1]} ${match[2]}`);
+    const shipped = policy.routes
+      .filter((route) => route.role === role)
+      .sort((a, b) => a.priority - b.priority)
+      .map((route) => `${route.harness}/${route.model} ${route.effort}`);
+    assert.deepEqual(documented, shipped, `${row} routes in docs/quickstart.vi.md`);
+  }
 });

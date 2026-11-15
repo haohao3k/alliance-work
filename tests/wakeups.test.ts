@@ -11,6 +11,7 @@ import { WAKE_RETENTION_MS, Wakeups } from "../server/wakeups";
 import type { WakeRecordValue } from "../shared/wakeups";
 import { temporary } from "./temp";
 
+// Synthetic regression fixtures use invented agent IDs and fixed test clocks.
 async function fixture() {
   const home = await temporary("alliance-wakeups-");
   const store = new RoomStore(home);
@@ -764,27 +765,27 @@ async function legacyHost(members: [string, string][]) {
 test("the first 0.1.19 load makes reminders older releases stored pull wake their owner once; stale ones end, obligation ones stay pull", async () => {
   const at = Date.parse;
   let now = at("2026-10-22T05:00:00Z");
-  // ryzen, 2026-10-22: Lead 42f1272c, idle since 17:00:54Z, had job reminders pending since
+  // primaryHost, 2026-10-22: Lead 0000000b, idle since 17:00:54Z, had job reminders pending since
   // 19:06Z and a health check due 20:00Z, stored pull by 0.1.18, so nothing ever woke it. Lead
-  // 7a062e96 still had its v0.1.10 adoption reminder from 10-15.
-  const ryzen = await legacyHost([
-    ["42f1272c", "lead"],
-    ["7a062e96", "lead"],
+  // 00000012 still had its v0.1.10 adoption reminder from 10-15.
+  const primaryHost = await legacyHost([
+    ["0000000b", "lead"],
+    ["00000012", "lead"],
   ]);
   // The full run's controller has exited.
-  ryzen.store.saveJob({
+  primaryHost.store.saveJob({
     key: "run-20261020-full-st",
     roomId: "r",
-    ownerId: "42f1272c",
+    ownerId: "0000000b",
     title: "Full run controller",
     pid: 2147483646,
     processIdentity: "Tue Oct 21 16:10:02 2026 S",
     recordedAt: "2026-10-21T16:10:02Z",
     revision: 2,
   });
-  ryzen.pull({
+  primaryHost.pull({
     key: "run-20261020-full-st",
-    ownerId: "42f1272c",
+    ownerId: "0000000b",
     trigger: { kind: "job", key: "run-20261020-full-st" },
     jobIdentity: "Tue Oct 21 16:10:02 2026 S",
     jobRevision: 2,
@@ -793,30 +794,30 @@ test("the first 0.1.19 load makes reminders older releases stored pull wake thei
     dueAt: at("2026-10-21T16:10:02Z"),
     updatedAt: at("2026-10-21T19:07:43Z"),
   });
-  ryzen.pull({
+  primaryHost.pull({
     key: "run-health-20261021T20",
-    ownerId: "42f1272c",
+    ownerId: "0000000b",
     trigger: { kind: "time", at: at("2026-10-21T20:00:00Z") },
     state: "pending",
     createdAt: at("2026-10-21T17:00:40Z"),
     dueAt: at("2026-10-21T20:00:00Z"),
     updatedAt: at("2026-10-21T20:00:06Z"),
   });
-  ryzen.pull({
+  primaryHost.pull({
     key: "alliance-v010-adoption",
-    ownerId: "7a062e96",
+    ownerId: "00000012",
     trigger: { kind: "time", at: at("2026-10-15T16:54:00Z") },
     state: "pending",
     createdAt: at("2026-10-15T16:54:00Z"),
     dueAt: at("2026-10-15T16:54:00Z"),
     updatedAt: at("2026-10-15T16:54:00Z"),
   });
-  // Mac mini: HQ fbbeb8af's reminder for its open obligation, pending since 13:32Z.
-  const macmini = await legacyHost([["fbbeb8af", "hq"]]);
-  macmini.store.saveObligation({
+  // synthetic host: HQ 0000001c's reminder for its open obligation, pending since 13:32Z.
+  const secondaryHost = await legacyHost([["0000001c", "hq"]]);
+  secondaryHost.store.saveObligation({
     key: "proj-output-20261021",
     roomId: "r",
-    ownerId: "fbbeb8af",
+    ownerId: "0000001c",
     assignment: "assignment.md",
     authority: "The Human's P1 decisions",
     nextAction: "Review the build output",
@@ -830,9 +831,9 @@ test("the first 0.1.19 load makes reminders older releases stored pull wake thei
     observations: [],
     receipt: null,
   });
-  macmini.pull({
+  secondaryHost.pull({
     key: "proj-output-review",
-    ownerId: "fbbeb8af",
+    ownerId: "0000001c",
     obligationKey: "proj-output-20261021",
     trigger: { kind: "time", at: at("2026-10-21T13:32:00Z") },
     state: "pending",
@@ -841,40 +842,40 @@ test("the first 0.1.19 load makes reminders older releases stored pull wake thei
     updatedAt: at("2026-10-21T13:32:30Z"),
   });
   try {
-    for (const host of [ryzen, macmini]) {
+    for (const host of [primaryHost, secondaryHost]) {
       const wake = new Wakeups(host.store, () => now); // the first 0.1.19 load
       for (let round = 0; round < 3; round++, now += 60000) await wake.tick(host.api);
     }
     assert.deepEqual(
-      ryzen.sent.map((s) => s.id),
-      ["42f1272c"],
+      primaryHost.sent.map((s) => s.id),
+      ["0000000b"],
       "the idle owner is woken once, its reminders in one batch",
     );
-    assert.match(ryzen.sent[0].text, /run-20261020-full-st[\s\S]*run-health/);
+    assert.match(primaryHost.sent[0].text, /run-20261020-full-st[\s\S]*run-health/);
     const state = (store: RoomStore, key: string) => {
       const w = store.wakeups().find((w) => w.key === key);
       return [w?.delivery, w?.state];
     };
-    assert.deepEqual(state(ryzen.store, "run-health-20261021T20"), ["idle", "delivered"]);
-    assert.deepEqual(state(ryzen.store, "alliance-v010-adoption"), ["pull", "canceled"]);
-    assert.deepEqual(macmini.sent, [], "an obligation reminder is never pushed");
-    assert.deepEqual(state(macmini.store, "proj-output-review"), ["pull", "pending"]);
+    assert.deepEqual(state(primaryHost.store, "run-health-20261021T20"), ["idle", "delivered"]);
+    assert.deepEqual(state(primaryHost.store, "alliance-v010-adoption"), ["pull", "canceled"]);
+    assert.deepEqual(secondaryHost.sent, [], "an obligation reminder is never pushed");
+    assert.deepEqual(state(secondaryHost.store, "proj-output-review"), ["pull", "pending"]);
     // Only once: a later load leaves a reminder the agent now asks to be pull.
-    const again = new Wakeups(ryzen.store, () => now);
+    const again = new Wakeups(primaryHost.store, () => now);
     again.add({
       key: "read-later",
       roomId: "r",
-      ownerId: "42f1272c",
+      ownerId: "0000000b",
       reason: "Compare the health results",
       trigger: { kind: "time", at: now },
       delivery: "pull",
     });
-    const reloaded = new Wakeups(ryzen.store, () => now);
-    await reloaded.tick(ryzen.api);
-    assert.deepEqual(state(ryzen.store, "read-later"), ["pull", "pending"]);
-    assert.equal(ryzen.sent.length, 1);
+    const reloaded = new Wakeups(primaryHost.store, () => now);
+    await reloaded.tick(primaryHost.api);
+    assert.deepEqual(state(primaryHost.store, "read-later"), ["pull", "pending"]);
+    assert.equal(primaryHost.sent.length, 1);
   } finally {
-    ryzen.store.close();
-    macmini.store.close();
+    primaryHost.store.close();
+    secondaryHost.store.close();
   }
 });

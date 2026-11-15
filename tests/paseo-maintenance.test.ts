@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { cp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join, relative } from "node:path";
@@ -14,8 +15,9 @@ import { temporary } from "./temp";
 
 test("native Paseo switches release roots and restores the previous plugin after failed activation", {
   skip: process.env.ALLIANCE_NATIVE_PASEO_TESTS !== "1",
-  // About 90 s on an idle host; three activations each typecheck, so a loaded host takes far longer.
-  timeout: 480000,
+  // About 150 s on an idle host; four activations each typecheck and one waits out Paseo's 30 s
+  // initialize deadline, so a loaded host takes far longer.
+  timeout: 600000,
 }, async (t) => {
   const dir = await temporary("alliance-paseo-maintenance-");
   const home = join(dir, "home"),
@@ -72,6 +74,18 @@ test("native Paseo switches release roots and restores the previous plugin after
   const api = createPaseoApi(client);
   try {
     await client.connect();
+    if (!process.env.ALLIANCE_TEST_DAEMON_CLI) {
+      const features = client.getLastServerInfoMessage()?.features as { idleAccountSwitch?: boolean };
+      assert.equal(features.idleAccountSwitch, true, "fresh native daemon advertises guarded retirement");
+      const native = client as unknown as {
+        retireIdleAgentRuntime(id: string, at: string): Promise<{ runtimeRetired?: boolean }>;
+      };
+      assert.equal(
+        (await native.retireIdleAgentRuntime("missing-agent", new Date().toISOString())).runtimeRetired,
+        false,
+        "an unknown session is not created, unarchived or reloaded",
+      );
+    }
     const cwd = join(dir, "auto-room");
     await mkdir(cwd);
     execFileSync("git", ["init", "-q", cwd]);
@@ -660,4 +674,69 @@ test("native Paseo switches release roots and restores the previous plugin after
   await verifyRuntime(paseoHome, candidate);
   assert.equal(await readFile(auth, "utf8"), "private fixture");
   assert.equal(await readFile(room, "utf8"), "Keep this assignment through release switches.");
+
+  // The candidate's own install, which an older CLI's update runs, collects the releases nothing
+  // needs: the superseded ones go, the current, previous and one a process is still using stay.
+  const releases = join(home, "releases");
+  const stale = join(releases, "v0.0.1-stale");
+  const busy = join(releases, "v0.0.2-busy");
+  for (const root of [stale, busy]) {
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "package.json"), JSON.stringify({ name: "alliance-work", version: "0.0.0" }));
+  }
+  const hold = spawn("sleep", ["120"], { cwd: busy, stdio: "ignore" });
+  try {
+    const printed = execFileSync(
+      process.execPath,
+      [
+        join(candidate, "scripts/cli.mjs"),
+        "install",
+        "--home",
+        home,
+        "--paseo-home",
+        paseoHome,
+        "--port",
+        String(port),
+        "--bin-dir",
+        options.binDir,
+        "--isolated-root",
+        options.isolatedRoot,
+        "--min-age-minutes",
+        "0",
+      ],
+      { encoding: "utf8", timeout: 240000 },
+    );
+    // The typecheck output precedes the JSON result.
+    const installed = JSON.parse(printed.slice(printed.lastIndexOf("\n{\n") + 1));
+    assert.deepEqual(installed.releasesRemoved.removed, ["v0.0.1-stale"]);
+    assert.equal(existsSync(stale), false);
+    assert.equal(existsSync(busy), true);
+    assert.equal((await installation(home)).root, `${candidate}/`);
+    await verifyRuntime(paseoHome, candidate);
+  } finally {
+    hold.kill();
+  }
+
+  // On a loaded host the plugin child can miss Paseo's 30 s initialize deadline once and load on
+  // the next reload (hostAlpha, 0.1.53). This release stalls its first load past the deadline.
+  const slow = join(dir, "slow release");
+  await cp(candidate, slow, {
+    recursive: true,
+    filter: (path) => relative(candidate, path) !== "node_modules",
+  });
+  await symlink(join(projectRoot, "node_modules"), join(slow, "node_modules"), "dir");
+  const firstLoad = join(dir, "slow-release-loaded");
+  await writeFile(
+    join(slow, "index.server.ts"),
+    `import { existsSync as stalled, writeFileSync as markLoaded } from "node:fs";
+if (!stalled(${JSON.stringify(firstLoad)})) {
+  markLoaded(${JSON.stringify(firstLoad)}, "");
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 35000);
+}
+` + (await readFile(join(slow, "index.server.ts"), "utf8")),
+  );
+  await activate({ ...options, root: slow });
+  assert.equal(existsSync(firstLoad), true, "the first load stalled");
+  assert.equal((await installation(home)).root, slow);
+  await verifyRuntime(paseoHome, slow);
 });

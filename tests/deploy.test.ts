@@ -114,7 +114,7 @@ test("the remote half hands the bundle to an installed launcher that understands
     await writeFile(join(bundled, "checksums.txt"), `${sum}  alliance-work-v9.8.7.tar.gz\n`);
     const older = spawnSync("sh", [script, bundled, "v9.8.7", "90", home, ...hold], {
       encoding: "utf8",
-      env: { PATH: "/usr/bin:/bin", HOME: home, INSTALLED: "0.1.18-ryzen.1" },
+      env: { PATH: "/usr/bin:/bin", HOME: home, INSTALLED: "0.1.18-host-alpha.1" },
     });
     assert.equal(older.status, 0, older.stderr);
     assert.ok(!older.stdout.includes("ARGS:"), older.stdout);
@@ -133,9 +133,9 @@ test("the remote half hands the bundle to an installed launcher that understands
 });
 
 test("deploy refuses unsafe host names and negative waits before contacting anything", async () => {
-  await assert.rejects(deploy({ hosts: ["ryzen; rm -rf /"] }), /Unsupported host/);
+  await assert.rejects(deploy({ hosts: ["host-alpha; rm -rf /"] }), /Unsupported host/);
   await assert.rejects(deploy({ hosts: [] }), /at least one --host/);
-  await assert.rejects(deploy({ hosts: ["ryzen"], waitIdle: -1 }), /wait-idle/);
+  await assert.rejects(deploy({ hosts: ["host-alpha"], waitIdle: -1 }), /wait-idle/);
   // --hold without a wait is refused, not ignored. Failing stubs stand in for gh and ssh in case
   // the refusal ever stops happening first.
   const stubs = await temporary("alliance-offline-");
@@ -151,7 +151,7 @@ test("deploy refuses unsafe host names and negative waits before contacting anyt
   const saved = process.env.PASEO_AGENT_ID;
   process.env.PASEO_AGENT_ID = "an-agent";
   try {
-    await assert.rejects(deploy({ hosts: ["ryzen"], waitIdle: 30 }), /--detach/);
+    await assert.rejects(deploy({ hosts: ["host-alpha"], waitIdle: 30 }), /--detach/);
   } finally {
     if (saved === undefined) delete process.env.PASEO_AGENT_ID;
     else process.env.PASEO_AGENT_ID = saved;

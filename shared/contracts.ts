@@ -2,6 +2,7 @@ import { defineRpc, defineSettings } from "@getpaseo/plugin";
 import { z } from "zod";
 import { AutonomyRecord } from "./autonomy";
 import { IntegrationPlan } from "./integration.mjs";
+import { KeepWarmPolicy, WarmState } from "./keepwarm";
 import { Difficulty, ModelPolicy } from "./model-policy";
 import { ObligationRecord } from "./obligations";
 import { WakeRecord } from "./wakeups";
@@ -40,6 +41,18 @@ export const Acceptance = z.object({
   product: ProductAcceptance.optional(),
 });
 export const Job = z.object({
+  settlementHistory: z.array(z.unknown()).optional(),
+  settlement: z
+    .object({
+      outcome: z.enum(["succeeded", "failed", "superseded", "unverified"]),
+      reason: z.string(),
+      evidence: z.string(),
+      digest: z.string(),
+      at: z.string(),
+      actorId: z.string().nullable(),
+    })
+    .optional(),
+  archivedAt: z.string().optional(),
   key: z.string(),
   roomId: z.string(),
   ownerId: z.string(),
@@ -54,6 +67,7 @@ export const Job = z.object({
   ownerStatus: z.string(),
 });
 export const Member = z.object({
+  warm: WarmState.optional(),
   id: z.string(),
   roomId: z.string(),
   role: Role,
@@ -68,6 +82,14 @@ export const Member = z.object({
   assignment: z.string(),
   lastOutcome: z.string().nullable(),
   lastTurnId: z.string().nullable(),
+  turnWake: z
+    .object({
+      turnId: z.string().nullable(),
+      time: z.number(),
+      source: z.string(),
+      promptId: z.string().optional(),
+    })
+    .optional(),
   resultPath: z.string().nullable(),
   decision: z.enum(["open", "accepted", "rejected"]),
   decisionEvidence: z.string().nullable(),
@@ -93,6 +115,17 @@ export const Member = z.object({
       notifiedAt: z.string().nullable(),
     })
     .optional(),
+  // Its provider is signed out: Alliance sends it nothing by itself until `until` (0: not held yet).
+  signIn: z
+    .object({
+      since: z.number(),
+      lastAt: z.number(),
+      failures: z.number().int(),
+      holds: z.number().int(),
+      until: z.number(),
+      reason: z.string(),
+    })
+    .optional(),
   // The last approval request Alliance denied for it: nobody approves commands for members.
   denied: z
     .object({ requestId: z.string(), tool: z.string(), command: z.string().nullable(), at: z.string() })
@@ -100,6 +133,8 @@ export const Member = z.object({
   lifecycle: z.object({
     state: z.enum(["archived", "archivable", "held", "awaiting-decision", "rejected"]),
     blockers: z.array(z.string()),
+    /** Overdue work only the Human can move; absent otherwise. */
+    needsHuman: z.object({ since: z.string(), ageHours: z.number(), reason: z.string() }).optional(),
   }),
 });
 export const roomList = defineRpc({
@@ -107,6 +142,19 @@ export const roomList = defineRpc({
   input: z.object({}),
   output: z.object({
     rooms: z.array(Room),
+    modelPolicyWarnings: z
+      .array(
+        z.object({
+          roomId: z.string(),
+          revision: z.number().int().optional(),
+          role: z.string().optional(),
+          harness: z.string().optional(),
+          model: z.string().optional(),
+          reason: z.string(),
+        }),
+      )
+      .optional(),
+    keepwarm: z.array(KeepWarmPolicy.extend({ roomId: z.string(), revision: z.number().int() })).optional(),
     members: z.array(Member),
     jobs: z.array(Job),
     autonomy: z.array(AutonomyRecord),
@@ -127,6 +175,15 @@ export const roomList = defineRpc({
         .nullable()
         .optional(),
     }),
+    /** Members still open, counted by why: `held` has one count per cause (a member may have several). */
+    lifecycleSummary: z
+      .object({
+        awaitingDecision: z.number(),
+        needsHuman: z.number(),
+        rejected: z.number(),
+        held: z.record(z.string(), z.number()),
+      })
+      .optional(),
   }),
 });
 export const roomCreate = defineRpc({
@@ -164,6 +221,21 @@ export const roomModelPolicy = defineRpc({
   // saved=false: the room follows the release defaults (never saved, or reset by the Human).
   output: z.object({ policy: ModelPolicy, revision: z.number().int(), saved: z.boolean() }),
 });
+export const roomKeepwarm = defineRpc({
+  name: "keepwarm.read",
+  input: z.object({ roomId: z.string() }),
+  output: KeepWarmPolicy.extend({ revision: z.number().int() }),
+});
+export const roomKeepwarmSave = defineRpc({
+  name: "keepwarm.save",
+  input: z.object({
+    roomId: z.string(),
+    enabled: z.boolean(),
+    actorId: z.string().nullable(),
+    maxPings: z.number().int().min(1).max(5).optional(),
+  }),
+  output: roomKeepwarm.output,
+});
 export const roomModelPolicySave = defineRpc({
   name: "models.save",
   input: z.object({ roomId: z.string(), policy: ModelPolicy, revision: z.number().int().nonnegative() }),
@@ -180,7 +252,12 @@ export const roomModelPolicyReset = defineRpc({
 });
 export const roomModelCatalog = defineRpc({
   name: "models.catalog",
-  input: z.object({ roomId: z.string(), harness: Harness, role: Role }),
+  input: z.object({
+    roomId: z.string(),
+    harness: Harness,
+    role: Role,
+    scope: z.enum(["project", "global"]).optional(),
+  }),
   output: z.object({
     models: z.array(z.object({ id: z.string(), label: z.string(), efforts: z.array(z.string()) })),
   }),
@@ -189,6 +266,10 @@ export const memberResume = defineRpc({
   name: "members.resume",
   input: z.object({ agentId: z.string(), prompt: z.string().min(1).max(100000) }),
   output: z.object({ sent: z.literal(true) }),
+});
+export const HumanDecisionSource = z.object({
+  messageId: z.string().trim().min(1).max(500),
+  timestamp: z.iso.datetime(),
 });
 export const memberDisposition = defineRpc({
   name: "members.disposition",
@@ -200,11 +281,25 @@ export const memberDisposition = defineRpc({
     product: ProductAcceptance.optional(),
     integration: IntegrationPlan.optional(),
     analysisRoot: z.string().min(1).optional(),
-    // null is the Human. Agents pass their PASEO_AGENT_ID; the plugin enforces the owner chain.
+    // null identifies no actor. Agents pass their PASEO_AGENT_ID; the plugin enforces the owner chain.
     // Absent only from CLIs older than 0.1.16, which the plugin refuses with the current command.
     actorId: z.string().min(1).nullable().optional(),
+    /** HQ attests Human authorization using an exact message in its native transcript. */
+    forHuman: z.boolean().optional(),
+    source: HumanDecisionSource.optional(),
+    /** accept: keep the agent open after acceptance (a keep by the same decider is otherwise lifted). */
+    keep: z.boolean().optional(),
+    /** reject: the rework prompt delivered to the child with the rejection. */
+    rework: z.string().trim().min(1).max(100000).optional(),
   }),
-  output: z.object({ saved: z.literal(true) }),
+  output: z.object({
+    saved: z.literal(true),
+    authorizedBy: z.literal("Human").optional(),
+    source: HumanDecisionSource.optional(),
+    keepLifted: z.literal(true).optional(),
+    settledWakeups: z.array(z.string()).optional(),
+    rework: z.object({ sent: z.boolean(), error: z.string().optional() }).optional(),
+  }),
 });
 export const profileStatus = defineRpc({
   name: "profiles.status",
@@ -246,7 +341,15 @@ export const memberOwner = defineRpc({
 });
 export const memberKeep = defineRpc({
   name: "members.keep",
-  input: z.object({ agentId: z.string(), keep: z.boolean(), actorId: z.string().min(1).nullable() }),
+  input: z.object({
+    agentId: z.string(),
+    keep: z.boolean(),
+    actorId: z.string().min(1).nullable(),
+    /** Why the agent stays open; shown wherever the keep holds its archive. */
+    reason: z.string().trim().min(1).max(500).optional(),
+    /** Lifetime of the keep; the plugin applies 24 hours when omitted. */
+    hours: z.number().positive().max(720).optional(),
+  }),
   output: z.object({ saved: z.literal(true) }),
 });
 export const policyRead = defineRpc({
@@ -264,4 +367,48 @@ export const policyAck = defineRpc({
   name: "policy.ack",
   input: z.object({ agentId: z.string(), digest: z.string().regex(/^[a-f0-9]{64}$/) }),
   output: z.object({ saved: z.literal(true) }),
+});
+
+export const jobSettle = defineRpc({
+  name: "jobs.settle",
+  input: z.object({
+    key: z.string(),
+    revision: z.number().int().positive(),
+    outcome: z.enum(["succeeded", "failed", "superseded", "unverified"]),
+    reason: z.string().trim().min(1),
+    evidence: z.string().min(1),
+    actorId: z.string().nullable(),
+  }),
+  output: z.object({ saved: z.literal(true) }),
+});
+export const jobArchive = defineRpc({
+  name: "jobs.archive",
+  input: z.object({
+    key: z.string(),
+    revision: z.number().int().positive(),
+    actorId: z.string().nullable(),
+    archive: z.boolean(),
+  }),
+  output: z.object({ saved: z.literal(true) }),
+});
+
+export const maintenanceStatus = defineRpc({
+  name: "maintenance.status",
+  input: z.object({}),
+  output: z.object({
+    durablePause: z.literal(true),
+    hold: z.unknown().nullable(),
+    humanDecisionAttribution: z.literal(true).optional(),
+  }),
+});
+
+export const maintenanceReconcile = defineRpc({
+  name: "maintenance.reconcile",
+  input: z.object({ holdId: z.string() }),
+  output: z.object({
+    restored: z.array(z.string()),
+    alreadyRestored: z.boolean(),
+    members: z.array(Member),
+    autonomy: z.array(AutonomyRecord),
+  }),
 });

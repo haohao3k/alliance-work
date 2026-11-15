@@ -3,6 +3,7 @@ import type { RoleName } from "../shared/contracts";
 import {
   allowedModel,
   isEconomicalOwnerModel,
+  isFableModel,
   type ModelPolicyValue,
   refusedModel,
   type TaskDifficulty,
@@ -25,8 +26,18 @@ export function chooseModel(
   const id = requested?.id ?? model;
   if (model && !requested) throw new Error(`Model ${model} is unavailable in the ${harness} ${role} catalog`);
   if (id && !allowedModel(harness, id)) throw new Error(refusedModel(id));
+  if (id && isFableModel(id)) {
+    if (!policy.fable?.rationale.trim())
+      throw new Error("Fable requires a recorded owner rationale in the room model policy.");
+    if (difficulty && difficulty !== "frontier")
+      throw new Error("Fable is only available for frontier work.");
+  }
   // Models the rules refuse are never chosen; a route naming one is passed over like a missing one.
-  const available = selectable.filter((entry) => allowedModel(harness, entry.id));
+  const available = selectable.filter(
+    (entry) =>
+      allowedModel(harness, entry.id) &&
+      (!isFableModel(entry.id) || (id === entry.id && !!policy.fable?.rationale.trim())),
+  );
 
   if (role === "lead" || role === "hq" || role === "supervisor") {
     const lead = requested ?? available.find((entry) => isEconomicalOwnerModel(harness, entry.id));
@@ -58,7 +69,9 @@ export function chooseModel(
           route.harness === harness &&
           (!id || route.model === id) &&
           (!effort || route.effort === effort) &&
-          (!band || route.difficulties.includes(band)),
+          (!band || route.difficulties.includes(band)) &&
+          (!isFableModel(route.model) ||
+            (route.difficulties.length === 1 && route.difficulties[0] === "frontier")),
       )
       .sort(
         (a, b) =>
@@ -83,7 +96,7 @@ export function chooseModel(
             entry.id === route.model && entry.thinkingOptions?.some((option) => option.id === route.effort),
         );
         const note = !allowedModel(route.harness, route.model)
-          ? " (refused: AGY runs only Gemini models)"
+          ? ` (refused: ${refusedModel(route.model)})`
           : live
             ? ""
             : " (not in the live catalog)";

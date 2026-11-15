@@ -1,15 +1,22 @@
 import { type PluginSurfaceProps, useRpc } from "@getpaseo/plugin/client";
 import { Modal, ScrollView } from "@getpaseo/plugin/client/react-native";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Pressable, Text, View } from "react-native";
+import { projectClaudeAccountRead, projectClaudeAccountSelect } from "../shared/claude-account-contracts";
 import {
   roomModelCatalog,
   roomModelPolicy,
   roomModelPolicyReset,
   roomModelPolicySave,
 } from "../shared/contracts";
-import { Difficulty, defaultModelPolicy, Effort, type ModelPolicyValue } from "../shared/model-policy";
+import {
+  Difficulty,
+  defaultModelPolicy,
+  Effort,
+  GLOBAL_MODEL_POLICY,
+  type ModelPolicyValue,
+} from "../shared/model-policy";
 
 type Colors = PluginSurfaceProps["theme"]["colors"];
 function Action({
@@ -48,8 +55,80 @@ function Action({
   );
 }
 
+function ProjectClaudeAccount({
+  roomId,
+  hostId,
+  colors: c,
+}: {
+  roomId: string;
+  hostId: string;
+  colors: Colors;
+}) {
+  const read = useRpc(projectClaudeAccountRead);
+  const select = useRpc(projectClaudeAccountSelect);
+  const queries = useQueryClient();
+  const key = ["alliance-project-claude-account", hostId, roomId];
+  const state = useQuery({ queryKey: key, queryFn: () => read({ roomId }), retry: false });
+  const project = state.data;
+  const save = useMutation({
+    mutationFn: (account: "inherit" | "5x" | "20x") => {
+      if (!project) throw new Error("Load this project's Claude account before saving.");
+      return select({ roomId, account, revision: project.revision });
+    },
+    onSuccess: async (saved) => {
+      queries.setQueryData(key, saved);
+      await Promise.all([
+        queries.invalidateQueries({
+          queryKey: ["alliance-model-catalog", hostId, roomId, "project", "claude"],
+        }),
+        queries.invalidateQueries({ queryKey: ["alliance-claude-accounts", hostId] }),
+      ]);
+    },
+    onError: () => void state.refetch(),
+  });
+  const hint = { color: c.foregroundMuted, fontSize: 12 };
+  return (
+    <View style={{ gap: 6 }}>
+      <Text style={{ color: c.foreground, fontWeight: "600" }}>Claude account</Text>
+      <Text style={hint}>
+        Applies to every Claude role in this project. Inherit uses the host's role and default account
+        settings. Running sessions switch when safely idle.
+      </Text>
+      {state.isPending && <Text style={hint}>Loading Claude account…</Text>}
+      {project && (
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+          {(["inherit", "5x", "20x"] as const).map((account) => {
+            const available = account === "inherit" || project.accounts.includes(account);
+            return (
+              <Action
+                key={account}
+                label={
+                  account === "inherit"
+                    ? "Inherit"
+                    : `Claude ${account}${available ? "" : " · not provisioned"}`
+                }
+                colors={c}
+                selected={project.account === account}
+                disabled={save.isPending || !available || project.account === account}
+                onPress={() => save.mutate(account)}
+              />
+            );
+          })}
+        </View>
+      )}
+      {(save.error ?? state.error) && (
+        <Text accessibilityRole="alert" style={{ color: c.statusDanger, fontSize: 12 }}>
+          {(save.error ?? state.error)?.message}
+        </Text>
+      )}
+      {state.isError && <Action label="Retry" colors={c} onPress={() => void state.refetch()} />}
+    </View>
+  );
+}
+
 function Editor({
   roomId,
+  targetId,
   initial,
   revision,
   saved,
@@ -59,6 +138,7 @@ function Editor({
   reload,
 }: {
   roomId: string;
+  targetId: string;
   initial: ModelPolicyValue;
   revision: number;
   saved: boolean;
@@ -71,16 +151,24 @@ function Editor({
   const [harness, setHarness] = useState<"codex" | "claude" | "pi" | "agy">("codex");
   const [role, setRole] = useState<"peer" | "lens">("peer");
   const [model, setModel] = useState("");
+  const [efforts, setEfforts] = useState<string[]>([]);
   const catalogRpc = useRpc(roomModelCatalog);
   const saveRpc = useRpc(roomModelPolicySave);
   const resetRpc = useRpc(roomModelPolicyReset);
+  const scope = targetId === GLOBAL_MODEL_POLICY ? "global" : "project";
   const catalog = useQuery({
-    queryKey: ["alliance-model-catalog", hostId, roomId, harness, role],
-    queryFn: () => catalogRpc({ roomId, harness, role }),
+    queryKey: ["alliance-model-catalog", hostId, roomId, scope, harness, role],
+    queryFn: () => catalogRpc({ roomId, harness, role, scope }),
     retry: false,
   });
-  const save = useMutation({ mutationFn: () => saveRpc({ roomId, revision, policy }), onSuccess: onSaved });
-  const reset = useMutation({ mutationFn: () => resetRpc({ roomId, revision }), onSuccess: onSaved });
+  const save = useMutation({
+    mutationFn: () => saveRpc({ roomId: targetId, revision, policy }),
+    onSuccess: onSaved,
+  });
+  const reset = useMutation({
+    mutationFn: () => resetRpc({ roomId: targetId, revision }),
+    onSuccess: onSaved,
+  });
   const busy = save.isPending || reset.isPending;
   const hint = { color: c.foregroundMuted, fontSize: 12 };
   const row = { flexDirection: "row" as const, flexWrap: "wrap" as const, gap: 6 };
@@ -140,8 +228,8 @@ function Editor({
       </Text>
       <Text style={hint}>
         {saved
-          ? `Saved for this room (revision ${revision}). Release defaults no longer apply here until reset.`
-          : "Release defaults (not saved for this room). Saving freezes this room's list."}
+          ? `Saved override (revision ${revision}).`
+          : "Inherited defaults. Saving creates an override at the selected scope."}
       </Text>
       <View style={row}>
         {(["peer", "lens"] as const).map((value) => (
@@ -153,6 +241,7 @@ function Editor({
             onPress={() => {
               setRole(value);
               setModel("");
+              setEfforts([]);
             }}
           />
         ))}
@@ -229,6 +318,7 @@ function Editor({
             onPress={() => {
               setHarness(value);
               setModel("");
+              setEfforts([]);
             }}
           />
         ))}
@@ -249,7 +339,10 @@ function Editor({
             label={item.id}
             colors={c}
             selected={model === item.id}
-            onPress={() => setModel(item.id)}
+            onPress={() => {
+              setModel(item.id);
+              setEfforts([]);
+            }}
           />
         ))}
       </ScrollView>
@@ -260,40 +353,50 @@ function Editor({
             .map((value) => (
               <Action
                 key={value}
-                label={`Add ${value}`}
+                label={value}
                 colors={c}
-                disabled={save.isPending}
-                onPress={() => {
-                  const existing = policy.routes.findIndex(
-                    (route) =>
-                      route.role === role &&
-                      route.harness === harness &&
-                      route.model === model &&
-                      route.effort === value,
-                  );
-                  const last = Math.max(
-                    0,
-                    ...policy.routes.filter((route) => route.role === role).map((route) => route.priority),
-                  );
-                  if (existing >= 0) update(existing, { difficulties: [...Difficulty.options] });
-                  else
-                    setPolicy({
-                      ...policy,
-                      routes: [
-                        ...policy.routes,
-                        {
-                          role,
-                          harness,
-                          model,
-                          effort: Effort.parse(value),
-                          priority: Math.min(99, last + 1),
-                          difficulties: [...Difficulty.options],
-                        },
-                      ],
-                    });
-                }}
+                selected={efforts.includes(value)}
+                disabled={busy}
+                onPress={() =>
+                  setEfforts(
+                    efforts.includes(value) ? efforts.filter((v) => v !== value) : [...efforts, value],
+                  )
+                }
               />
             ))}
+          <Action
+            label={`Add selected (${efforts.length})`}
+            colors={c}
+            disabled={busy || !efforts.length}
+            onPress={() => {
+              const last = Math.max(
+                0,
+                ...policy.routes.filter((r) => r.role === role).map((r) => r.priority),
+              );
+              const additions = picked.efforts.filter(
+                (e) =>
+                  efforts.includes(e) &&
+                  !policy.routes.some(
+                    (r) => r.role === role && r.harness === harness && r.model === model && r.effort === e,
+                  ),
+              );
+              setPolicy({
+                ...policy,
+                routes: [
+                  ...policy.routes,
+                  ...additions.map((e, i) => ({
+                    role,
+                    harness,
+                    model,
+                    effort: Effort.parse(e),
+                    priority: Math.min(99, last + i + 1),
+                    difficulties: [...Difficulty.options],
+                  })),
+                ],
+              });
+              setEfforts([]);
+            }}
+          />
         </View>
       )}
       {picked && !picked.efforts.some((value) => Effort.safeParse(value).success) && (
@@ -325,8 +428,14 @@ function Editor({
         <Action label="Reload saved settings" colors={c} disabled={busy} onPress={reload} />
         {saved && (
           <Action
-            label={reset.isPending ? "Resetting…" : "Follow release defaults"}
-            accessibleLabel="Delete this room's saved lists so it follows the release defaults"
+            label={
+              reset.isPending
+                ? "Resetting…"
+                : targetId === GLOBAL_MODEL_POLICY
+                  ? "Follow release defaults"
+                  : "Inherit global settings"
+            }
+            accessibleLabel="Remove this override and inherit defaults"
             colors={c}
             disabled={busy}
             onPress={() => reset.mutate()}
@@ -350,10 +459,12 @@ export function ModelSettings({
   hostId: string;
   onClose: () => void;
 }) {
+  const [scope, setScope] = useState<"project" | "global">("project");
+  const targetId = scope === "global" ? GLOBAL_MODEL_POLICY : roomId;
   const read = useRpc(roomModelPolicy);
   const policy = useQuery({
-    queryKey: ["alliance-model-policy", hostId, roomId],
-    queryFn: () => read({ roomId }),
+    queryKey: ["alliance-model-policy", hostId, targetId],
+    queryFn: () => read({ roomId: targetId }),
     refetchOnWindowFocus: false,
   });
   const [generation, setGeneration] = useState(0);
@@ -366,6 +477,26 @@ export function ModelSettings({
       }}
     >
       <Modal.Content contentContainerStyle={{ padding: 16, gap: 12 }}>
+        <View style={{ flexDirection: "row", gap: 8 }}>
+          <Action
+            label="This project"
+            colors={theme.colors}
+            selected={scope === "project"}
+            onPress={() => setScope("project")}
+          />
+          <Action
+            label="Global · this daemon"
+            colors={theme.colors}
+            selected={scope === "global"}
+            onPress={() => setScope("global")}
+          />
+        </View>
+        <Text style={{ color: theme.colors.foregroundMuted }}>
+          Global settings apply to all inheriting projects on this machine. Project overrides take precedence.
+        </Text>
+        {scope === "project" && (
+          <ProjectClaudeAccount roomId={roomId} hostId={hostId} colors={theme.colors} />
+        )}
         {policy.isPending && (
           <Text style={{ color: theme.colors.foregroundMuted }}>Loading room policy…</Text>
         )}
@@ -376,8 +507,9 @@ export function ModelSettings({
         )}
         {policy.data && (
           <Editor
-            key={`${policy.data.revision}/${generation}`}
+            key={`${targetId}/${policy.data.revision}/${generation}`}
             roomId={roomId}
+            targetId={targetId}
             initial={policy.data.policy}
             revision={policy.data.revision}
             saved={policy.data.saved}

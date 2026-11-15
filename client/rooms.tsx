@@ -1,19 +1,27 @@
 import { type PluginSurfaceProps, usePaseo, useRpc } from "@getpaseo/plugin/client";
 import { Icon, Modal, ScrollView, TextInput } from "@getpaseo/plugin/client/react-native";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 import { directoryList, roomCreate, roomList } from "../shared/contracts";
-import { activityState, relativeTime } from "../shared/monitor";
+import { activityState } from "../shared/monitor";
 import { acceptanceLabel } from "../shared/operations";
+import {
+  filterRoomBoard,
+  indexRoomBoard,
+  needsAttention,
+  projectIsExpanded,
+  roomJobPage,
+  type SessionFilter,
+} from "../shared/room-board";
 import { ClaudeAccountSettings } from "./claude-accounts";
+import { ElapsedTime } from "./elapsed-time";
 import { McpSettings } from "./mcp-settings";
 import { ModelSettings } from "./model-settings";
 import { SkillSettings } from "./skill-settings";
 
 type Props = PluginSurfaceProps;
 type Colors = Props["theme"]["colors"];
-type Filter = "all" | "working" | "attention" | "idle";
 
 function Button({
   label,
@@ -43,7 +51,7 @@ function Button({
         flexDirection: "row",
         alignItems: "center",
         gap: 6,
-        minHeight: 40,
+        minHeight: 44,
         paddingHorizontal: 12,
         borderRadius: 10,
         borderWidth: 1,
@@ -216,7 +224,7 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
   const queryKey = ["alliance-rooms", host.id];
   const data = useQuery({ queryKey, queryFn: () => list({}), refetchInterval: 5000 });
   const [project, setProject] = useState<string | null>(null);
-  const [filter, setFilter] = useState<Filter>("all");
+  const [filter, setFilter] = useState<SessionFilter>("all");
   const [search, setSearch] = useState("");
   const [archived, setArchived] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -227,73 +235,35 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
   const [expandedObligations, setExpandedObligations] = useState<Set<string>>(new Set());
   const [expandedRooms, setExpandedRooms] = useState<Set<string>>(new Set());
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(new Set());
+  const [expandedResponsibilities, setExpandedResponsibilities] = useState<Set<string>>(new Set());
+  const [jobLimits, setJobLimits] = useState<Record<string, number>>({});
   const [mcpRoom, setMcpRoom] = useState<{ cwd: string; title: string } | null>(null);
   const [skillsRoom, setSkillsRoom] = useState<{ cwd: string; title: string } | null>(null);
   const [modelRoom, setModelRoom] = useState<{ id: string; title: string } | null>(null);
-  const [now, setNow] = useState(Date.now());
   const [panelWidth, setPanelWidth] = useState(0);
   useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 10000);
+    let refresh: ReturnType<typeof setTimeout> | undefined;
     const unsubscribe = paseo.agents.subscribe(() => {
-      void cache.invalidateQueries({ queryKey: ["alliance-rooms", host.id] });
+      // Streaming agents emit bursts. Coalesce them without postponing forever or canceling a read.
+      if (refresh) return;
+      refresh = setTimeout(() => {
+        refresh = undefined;
+        void cache.invalidateQueries({ queryKey: ["alliance-rooms", host.id] }, { cancelRefetch: false });
+      }, 1000);
     });
     return () => {
-      clearInterval(timer);
+      clearTimeout(refresh);
       unsubscribe();
     };
   }, [paseo, cache, host.id]);
 
-  const rooms = data.data?.rooms ?? [];
-  const jobs = data.data?.jobs ?? [];
-  const wakeups = data.data?.wakeups ?? [];
-  const members = (data.data?.members ?? []).filter((member) => archived || !member.archived);
-  const needsAttention = (member: (typeof members)[number]) =>
-    Boolean(
-      activityState(member).group === "attention" ||
-        member.ownerStatus === "needs-owner" ||
-        member.error ||
-        member.silence ||
-        member.denied ||
-        (member.selectedModel && member.runtimeModel && member.selectedModel !== member.runtimeModel),
-    );
-  const counts = {
-    all: members.length,
-    working: members.filter((member) => activityState(member).group === "working").length,
-    attention: members.filter(needsAttention).length,
-    idle: members.filter((member) => activityState(member).group === "idle").length,
-  };
-  const openObligations = (data.data?.obligations ?? []).filter((item) => item.state === "open");
-  const hasResponsibility = (roomId: string) =>
-    openObligations.some((item) => item.roomId === roomId) ||
-    jobs.some((item) => item.roomId === roomId) ||
-    wakeups.some(
-      (item) => item.roomId === roomId && !["acknowledged", "canceled", "expired"].includes(item.state),
-    );
+  const board = useMemo(() => indexRoomBoard(data.data, archived), [data.data, archived]);
+  const { rooms, members, counts, openObligations } = board;
   const needle = search.trim().toLowerCase();
-  const groups = rooms
-    .filter((room) => !project || project === room.id)
-    .map((room) => ({
-      room,
-      members: members
-        .filter(
-          (member) =>
-            member.roomId === room.id &&
-            (filter === "all" ||
-              (filter === "attention" ? needsAttention(member) : activityState(member).group === filter)) &&
-            (!needle ||
-              `${room.title} ${room.cwd} ${member.title} ${member.role} ${member.model ?? ""}`
-                .toLowerCase()
-                .includes(needle)),
-        )
-        .sort((a, b) => activityState(a).order - activityState(b).order || a.title.localeCompare(b.title)),
-    }))
-    .filter(
-      ({ room, members: rows }) =>
-        rows.length ||
-        (hasResponsibility(room.id) &&
-          (!needle || `${room.title} ${room.cwd}`.toLowerCase().includes(needle))) ||
-        (filter === "all" && (!needle || `${room.title} ${room.cwd}`.toLowerCase().includes(needle))),
-    );
+  const groups = useMemo(
+    () => filterRoomBoard(board, { project, filter, search }),
+    [board, project, filter, search],
+  );
   const visibleRoomIds = new Set(groups.map(({ room }) => room.id));
   const hiddenObligations = openObligations.filter((item) => !visibleRoomIds.has(item.roomId)).length;
   const muted = { color: c.foregroundMuted, fontSize: 12, lineHeight: 18 };
@@ -372,8 +342,18 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
               onChangeText={setSearch}
               autoCapitalize="none"
               autoCorrect={false}
-              style={{ flex: 1, minWidth: 0, minHeight: 36, color: c.foreground, fontSize: 12 }}
+              style={{ flex: 1, minWidth: 0, minHeight: 44, color: c.foreground, fontSize: 12 }}
             />
+            {!!search && (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Clear search"
+                onPress={() => setSearch("")}
+                style={{ minWidth: 44, minHeight: 44, alignItems: "center", justifyContent: "center" }}
+              >
+                <Icon name="X" size={16} color={c.foregroundMuted} />
+              </Pressable>
+            )}
           </View>
           <Button
             label="Refresh"
@@ -452,21 +432,34 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
         {!!rooms.length && !groups.length && (
           <Text style={muted}>No projects or sessions match these filters.</Text>
         )}
-        {groups.map(({ room, members: rows }) => {
-          const projectExpanded = expandedProjects.has(room.id);
-          const roomJobs = jobs.filter((job) => job.roomId === room.id);
-          const roomObligations = openObligations.filter((item) => item.roomId === room.id);
-          const roomWakeups = wakeups.filter(
-            (item) =>
-              item.roomId === room.id && !["acknowledged", "canceled", "expired"].includes(item.state),
-          );
-          const attention = members.filter(
-            (member) => member.roomId === room.id && needsAttention(member),
-          ).length;
+        {groups.map((group) => {
+          const {
+            room,
+            members: rows,
+            jobs: roomJobs,
+            obligations: roomObligations,
+            wakeups: roomWakeups,
+            attention,
+          } = group;
+          const projectExpanded = projectIsExpanded(expandedProjects.has(room.id), {
+            focused: project === room.id,
+            filter,
+            search,
+          });
+          const responsibilitiesExpanded =
+            (filter === "all" && !needle) || expandedResponsibilities.has(room.id);
+          const jobPage = roomJobPage(roomJobs, jobLimits[room.id] ?? 10);
           const runningJobs = roomJobs.filter((job) => job.state === "running").length;
-          const exitedJobs = roomJobs.filter((job) => job.state === "exited").length;
+          const exitedJobs = roomJobs.filter(
+            (job) =>
+              job.state === "exited" &&
+              !job.archivedAt &&
+              (!job.settlement || job.settlement.outcome === "unverified"),
+          ).length;
           const unknownJobs = roomJobs.filter((job) => job.state === "unknown").length;
-          const unownedJobs = roomJobs.filter((job) => job.ownerStatus === "needs-owner").length;
+          const unownedJobs = roomJobs.filter(
+            (job) => !job.archivedAt && job.ownerStatus === "needs-owner",
+          ).length;
           const unownedObligations = roomObligations.filter(
             (item) => item.ownerStatus === "needs-owner",
           ).length;
@@ -493,6 +486,7 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
                   accessibilityRole="button"
                   accessibilityLabel={`${projectExpanded ? "Collapse" : "Expand"} project ${room.title}`}
                   accessibilityState={{ expanded: projectExpanded }}
+                  disabled={filter !== "all" || Boolean(needle) || project === room.id}
                   onPress={() =>
                     setExpandedProjects((current) => {
                       const next = new Set(current);
@@ -507,6 +501,7 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
                     flexDirection: "row",
                     alignItems: "center",
                     gap: 10,
+                    minHeight: 44,
                     paddingVertical: 4,
                   }}
                 >
@@ -567,118 +562,145 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
               </View>
               {projectExpanded && (
                 <>
-                  {openObligations
-                    .filter((o) => o.roomId === room.id)
-                    .map((o) => {
-                      const detailKey = `${room.id}:${o.key}`;
-                      const detailsOpen = expandedObligations.has(detailKey);
-                      return (
+                  {(filter !== "all" || Boolean(needle)) &&
+                    roomObligations.length + roomWakeups.length + roomJobs.length > 0 && (
+                      <View style={{ padding: 12 }}>
+                        <Button
+                          label={
+                            responsibilitiesExpanded
+                              ? "Hide project responsibilities"
+                              : "Show project responsibilities"
+                          }
+                          icon={responsibilitiesExpanded ? "ChevronDown" : "ChevronRight"}
+                          colors={c}
+                          onPress={() =>
+                            setExpandedResponsibilities((current) => {
+                              const next = new Set(current);
+                              if (next.has(room.id)) next.delete(room.id);
+                              else next.add(room.id);
+                              return next;
+                            })
+                          }
+                        />
+                      </View>
+                    )}
+                  {(responsibilitiesExpanded ? roomObligations : []).map((o) => {
+                    const detailKey = `${room.id}:${o.key}`;
+                    const detailsOpen = expandedObligations.has(detailKey);
+                    return (
+                      <View
+                        key={o.key}
+                        style={{
+                          paddingHorizontal: 16,
+                          paddingVertical: 12,
+                          gap: 5,
+                          borderLeftWidth: 3,
+                          borderLeftColor: c.statusWarning,
+                          borderBottomWidth: 1,
+                          borderBottomColor: c.border,
+                        }}
+                      >
                         <View
-                          key={o.key}
-                          style={{
-                            paddingHorizontal: 16,
-                            paddingVertical: 12,
-                            gap: 5,
-                            borderLeftWidth: 3,
-                            borderLeftColor: c.statusWarning,
-                            borderBottomWidth: 1,
-                            borderBottomColor: c.border,
-                          }}
+                          style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 }}
                         >
-                          <View
-                            style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 }}
-                          >
-                            <Text style={{ ...muted, color: c.statusWarning }}>
-                              {o.ownerStatus === "needs-owner"
-                                ? "Needs owner"
-                                : o.blockedOn.length
-                                  ? "Waiting"
-                                  : "Open obligation"}
-                            </Text>
-                            <Text selectable style={{ ...muted, flex: 1, minWidth: 100 }}>
-                              Owner: {o.ownerLabel}
-                            </Text>
-                            <Pressable
-                              accessibilityRole="button"
-                              accessibilityLabel={`${detailsOpen ? "Hide" : "Show"} obligation details: ${o.key}`}
-                              accessibilityState={{ expanded: detailsOpen }}
-                              onPress={() =>
-                                setExpandedObligations((current) => {
-                                  const next = new Set(current);
-                                  if (next.has(detailKey)) next.delete(detailKey);
-                                  else next.add(detailKey);
-                                  return next;
-                                })
-                              }
-                              style={{ paddingVertical: 5, paddingHorizontal: 4 }}
-                            >
-                              <Text style={{ ...muted, color: c.accent }}>
-                                {detailsOpen ? "Less detail ↑" : "Details ↓"}
-                              </Text>
-                            </Pressable>
-                          </View>
-                          <Text selectable style={cell}>
-                            {o.nextAction}
+                          <Text style={{ ...muted, color: c.statusWarning }}>
+                            {o.ownerStatus === "needs-owner"
+                              ? "Needs owner"
+                              : o.blockedOn.length
+                                ? "Waiting"
+                                : "Open obligation"}
                           </Text>
-                          {detailsOpen && (
-                            <View style={{ gap: 4, paddingTop: 4 }}>
-                              <Text selectable style={muted}>
-                                Obligation: {o.key} · revision {o.revision} · owner {o.ownerStatus}
-                              </Text>
-                              {o.blockedOn.map((reason) => (
-                                <Text key={reason} selectable style={muted}>
-                                  {reason}
-                                </Text>
-                              ))}
-                            </View>
-                          )}
+                          <Text selectable style={{ ...muted, flex: 1, minWidth: 100 }}>
+                            Owner: {o.ownerLabel}
+                          </Text>
+                          <Pressable
+                            accessibilityRole="button"
+                            accessibilityLabel={`${detailsOpen ? "Hide" : "Show"} obligation details: ${o.key}`}
+                            accessibilityState={{ expanded: detailsOpen }}
+                            onPress={() =>
+                              setExpandedObligations((current) => {
+                                const next = new Set(current);
+                                if (next.has(detailKey)) next.delete(detailKey);
+                                else next.add(detailKey);
+                                return next;
+                              })
+                            }
+                            style={{ paddingVertical: 5, paddingHorizontal: 4 }}
+                          >
+                            <Text style={{ ...muted, color: c.accent }}>
+                              {detailsOpen ? "Less detail ↑" : "Details ↓"}
+                            </Text>
+                          </Pressable>
                         </View>
-                      );
-                    })}
-                  {wakeups
-                    .filter(
-                      (w) =>
-                        w.roomId === room.id && !["acknowledged", "canceled", "expired"].includes(w.state),
-                    )
-                    .map((w) => (
-                      <View key={w.key} style={{ padding: 14, gap: 4, backgroundColor: c.surface1 }}>
-                        <Text style={cell}>
-                          Wakeup · {w.state} · {w.reason}
+                        <Text selectable style={cell}>
+                          {o.nextAction}
                         </Text>
-                        <Text selectable style={muted}>
-                          Owner: {members.find((m) => m.id === w.ownerId)?.title ?? w.ownerId} ·{" "}
-                          {w.delivery === "pull" ? "Read at next task boundary" : "Idle delivery enabled"}
-                        </Text>
-                        <Text selectable style={muted}>
-                          {w.key} · revision {w.revision}
-                          {w.note ? ` · ${w.note}` : ""}
-                        </Text>
+                        {detailsOpen && (
+                          <View style={{ gap: 4, paddingTop: 4 }}>
+                            <Text selectable style={muted}>
+                              Obligation: {o.key} · revision {o.revision} · owner {o.ownerStatus}
+                            </Text>
+                            {o.blockedOn.map((reason) => (
+                              <Text key={reason} selectable style={muted}>
+                                {reason}
+                              </Text>
+                            ))}
+                          </View>
+                        )}
                       </View>
-                    ))}
-                  {jobs
-                    .filter((job) => job.roomId === room.id)
-                    .map((job) => (
-                      <View key={job.key} style={{ padding: 14, gap: 4, backgroundColor: c.surface1 }}>
-                        <Text style={cell}>
-                          {job.title} ·{" "}
-                          {job.state === "exited"
-                            ? "Process exited · result unverified"
-                            : job.state === "running"
-                              ? "Process running"
-                              : "Process state unknown"}
-                        </Text>
-                        <Text
-                          selectable
-                          style={{
-                            ...muted,
-                            color: job.ownerStatus === "needs-owner" ? c.statusWarning : c.foregroundMuted,
-                          }}
-                        >
-                          Owner: {job.ownerLabel}
-                          {job.ownerStatus === "needs-owner" ? " · needs reassignment" : ""} · PID {job.pid}
-                        </Text>
-                      </View>
-                    ))}
+                    );
+                  })}
+                  {(responsibilitiesExpanded ? roomWakeups : []).map((w) => (
+                    <View key={w.key} style={{ padding: 14, gap: 4, backgroundColor: c.surface1 }}>
+                      <Text style={cell}>
+                        Wakeup · {w.state} · {w.reason}
+                      </Text>
+                      <Text selectable style={muted}>
+                        Owner: {members.find((m) => m.id === w.ownerId)?.title ?? w.ownerId} ·{" "}
+                        {w.delivery === "pull" ? "Read at next task boundary" : "Idle delivery enabled"}
+                      </Text>
+                      <Text selectable style={muted}>
+                        {w.key} · revision {w.revision}
+                        {w.note ? ` · ${w.note}` : ""}
+                      </Text>
+                    </View>
+                  ))}
+                  {(responsibilitiesExpanded ? jobPage.visible : []).map((job) => (
+                    <View key={job.key} style={{ padding: 14, gap: 4, backgroundColor: c.surface1 }}>
+                      <Text style={cell}>
+                        {job.title} ·{" "}
+                        {job.state === "exited"
+                          ? `Process exited · ${job.settlement?.outcome ?? "unverified"}${job.archivedAt ? " · archived" : ""}`
+                          : job.state === "running"
+                            ? "Process running"
+                            : "Process state unknown"}
+                      </Text>
+                      <Text
+                        selectable
+                        style={{
+                          ...muted,
+                          color: job.ownerStatus === "needs-owner" ? c.statusWarning : c.foregroundMuted,
+                        }}
+                      >
+                        Owner: {job.ownerLabel}
+                        {job.ownerStatus === "needs-owner" ? " · needs reassignment" : ""} · PID {job.pid}
+                      </Text>
+                    </View>
+                  ))}
+                  {responsibilitiesExpanded && jobPage.remaining > 0 && (
+                    <View style={{ padding: 12 }}>
+                      <Button
+                        label={`Show ${Math.min(20, jobPage.remaining)} more jobs · ${jobPage.remaining} remaining`}
+                        colors={c}
+                        onPress={() =>
+                          setJobLimits((current) => ({
+                            ...current,
+                            [room.id]: (current[room.id] ?? 10) + 20,
+                          }))
+                        }
+                      />
+                    </View>
+                  )}
                   {rows.length > 0 && (
                     <Pressable
                       accessibilityRole="button"
@@ -738,7 +760,7 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
                       <Text style={{ ...muted, width: 144 }}>MODEL</Text>
                       <Text style={{ ...muted, width: 105 }}>STATUS</Text>
                       <Text style={{ ...muted, width: 58, textAlign: "right" }}>UPDATED</Text>
-                      <View style={{ width: 64 }} />
+                      <View style={{ width: 84 }} />
                     </View>
                   )}
                   {visibleRows.map((member) => {
@@ -749,6 +771,7 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
                         key={member.id}
                         style={{
                           flexDirection: "row",
+                          flexWrap: compact ? "wrap" : "nowrap",
                           alignItems: "center",
                           gap: compact ? 8 : 12,
                           paddingHorizontal: 14,
@@ -757,7 +780,9 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
                           borderColor: c.border,
                         }}
                       >
-                        <View style={{ flex: 1, minWidth: 0, gap: 4 }}>
+                        <View
+                          style={{ flex: 1, minWidth: 0, flexBasis: compact ? "100%" : undefined, gap: 4 }}
+                        >
                           <Text numberOfLines={1} style={cell}>
                             {member.title}
                           </Text>
@@ -804,7 +829,7 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
                               Last decision: {member.lastAcceptance.decision}{" "}
                               {member.lastAcceptance.kind || "scope unspecified"} ·{" "}
                               {member.lastAcceptance.target || member.lastAcceptance.candidate.slice(0, 12)} ·{" "}
-                              {relativeTime(member.lastAcceptance.at, now)} ago
+                              <ElapsedTime timestamp={member.lastAcceptance.at} /> ago
                             </Text>
                           )}
                           {member.error && (
@@ -814,14 +839,27 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
                           )}
                           {member.silence && (
                             <Text numberOfLines={1} style={{ color: c.statusWarning, fontSize: 11 }}>
-                              No activity for {relativeTime(member.silence.since, now)} in its running turn
+                              No activity for <ElapsedTime timestamp={member.silence.since} /> in its running
+                              turn
                               {member.silence.key ? " · owner notified" : ""}
+                            </Text>
+                          )}
+                          {member.signIn && member.signIn.until > Date.now() && (
+                            <Text numberOfLines={3} style={{ color: c.statusWarning, fontSize: 11 }}>
+                              {member.signIn.reason}
+                            </Text>
+                          )}
+                          {member.lifecycle.needsHuman && (
+                            <Text numberOfLines={2} style={{ color: c.statusWarning, fontSize: 11 }}>
+                              Needs the Human: undecided for{" "}
+                              <ElapsedTime timestamp={member.lifecycle.needsHuman.since} /> ·{" "}
+                              {member.lifecycle.needsHuman.reason}
                             </Text>
                           )}
                           {member.denied && (
                             <Text numberOfLines={1} style={muted}>
                               Alliance denied its {member.denied.tool} approval request{" "}
-                              {relativeTime(member.denied.at, now)} ago
+                              <ElapsedTime timestamp={member.denied.at} /> ago
                             </Text>
                           )}
                           {member.selectedModel &&
@@ -876,15 +914,19 @@ export function Rooms({ theme, host, layout, navigation }: Props) {
                             {state.label}
                           </Text>
                         </View>
-                        {!compact && (
-                          <Text
-                            style={{ ...muted, width: 58, textAlign: "right", fontVariant: ["tabular-nums"] }}
-                          >
-                            {relativeTime(member.updatedAt, now)}
-                          </Text>
-                        )}
+                        <Text
+                          style={{
+                            ...muted,
+                            width: compact ? undefined : 58,
+                            textAlign: "right",
+                            fontVariant: ["tabular-nums"],
+                          }}
+                        >
+                          {compact ? "Updated " : ""}
+                          <ElapsedTime timestamp={member.updatedAt} />
+                        </Text>
                         {navigation && (
-                          <View style={{ width: 64 }}>
+                          <View style={{ width: 84, marginLeft: compact ? "auto" : 0 }}>
                             <Button
                               label="Open"
                               icon="ArrowUpRight"

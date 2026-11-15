@@ -1,11 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { PaseoApi } from "@getpaseo/client";
 import { type AutonomyState, pauseKind } from "../shared/autonomy";
+import { pluginNotice } from "../shared/keepwarm";
 import { blockedOn } from "../shared/obligations";
-import { harnessOf, responsibleOwner } from "../shared/operations";
+import { responsibleOwner } from "../shared/operations";
 import { asking } from "../shared/wakeups";
 import { availableOwner, STALE_DECISION_MS } from "./lifecycle";
-import { newTurn, type RoomStore } from "./store";
+import { providerSignIn } from "./provider-signin";
+import { newTurn, type RoomStore, signInHeld } from "./store";
 import { type CliCommand, cliLine, decidedTurn, refusedSend, type Wakeups } from "./wakeups";
 
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -21,8 +23,6 @@ const unitMs = (word: string) => {
 };
 /** Quota waits in a row before the assignment is blocked for its owner instead. */
 const QUOTA_WAITS = 3;
-/** The owner hears of a quota wait only when it is at least this long. */
-const QUOTA_NOTICE_MS = 5 * 60000;
 const QUOTA_REASON = "Provider quota; retry after ";
 /** A child created this recently that has not started its first turn will still hand back. */
 const FIRST_TURN_MS = 10 * 60000;
@@ -33,14 +33,14 @@ const LOST_TURN_MS = 5 * 60000;
 /** Continuation turns in a row without a checkpoint before the last one's final message goes to the owner. */
 const UNCHECKED_CONTINUATIONS = 2;
 /**
- * Claude prints a reset within a day as its minute alone ("resets 9:40pm"), and every notice until
+ * Providers print a reset within a day as its minute alone ("resets 9:40pm"), and every notice until
  * the reset's second inside that minute still says so; a printed time at most this far past is that
  * reset, not tomorrow's. The notice is recorded as it is printed, so a later one is tomorrow's.
  */
 const RESET_MINUTE_MS = 5 * 60000;
 const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
-/** The wall clock of an IANA zone; throws for an unknown zone. */
-function wallClock(zone: string) {
+/** The wall clock of an IANA zone (the host's when absent); throws for an unknown zone. */
+function wallClock(zone?: string) {
   const format = new Intl.DateTimeFormat("en-US", {
     timeZone: zone,
     hourCycle: "h23",
@@ -64,6 +64,62 @@ function wallClock(zone: string) {
   return { local, at };
 }
 /**
+ * The limit sentences providers print as their own message. Each must start the message and end at
+ * the CLI's own separator (" · …", ".") or the line, so prose such as "You've hit your GitHub API
+ * rate limit" never matches, nor do warnings ("You've used 80%…") or capacity 429s ("… not your
+ * usage limit"), which waiting out does not fit. A window limit lifts by the clock; a budget (spend
+ * cap, credits, an admin's allowance) only when someone raises it, whatever time the text names.
+ * A bare "usage limit" is a window here: Codex prints it with its reset ("try again at …"), Claude
+ * for a budget without one, and the printed time is what decides the wait. The Claude wording, the
+ * typographic apostrophe, the legacy "Claude AI usage limit reached|<epoch>" and the budget
+ * sentences come from zerosub (github.com/kapybara-org/zerosub @ 954d699, server/limits.ts); the
+ * 5-hour, session, weekly, "reached your Fable limit" and "Login expired" forms were seen on the fleet.
+ */
+const APOSTROPHE = "['’]";
+const END = String.raw`(?=\s*(?:·|\.|$))`;
+/**
+ * What a limit names, up to three tokens: a capitalised word (a model, whatever its name), a version,
+ * or a lowercase scope word. A new model's limit is still a limit; "GitHub API rate limit" is not.
+ */
+const LIMIT_SCOPE = String.raw`(?:(?:[A-Z][\w.-]*|\d[\d.]*|5-hour|7-day|session|weekly|daily|monthly|usage) ){0,3}`;
+const LIMITS: ReadonlyArray<{ pattern: RegExp; kind: "window" | "budget" }> = [
+  {
+    pattern: new RegExp(`^You${APOSTROPHE}ve (?:hit|reached) your ${LIMIT_SCOPE}limit${END}`),
+    kind: "window",
+  },
+  { pattern: /^Claude AI usage limit reached\|\d{9,}/, kind: "window" },
+  { pattern: /^The usage limit has been reached\b/i, kind: "window" },
+  {
+    pattern: new RegExp(
+      `^You${APOSTROPHE}ve (?:hit|reached) your (?:usage credit limit|team${APOSTROPHE}s shared budget|(?:monthly|individual) spend limit|individual usage limit|(?:org|channel)${APOSTROPHE}s monthly (?:usage|spend) limit)${END}`,
+      "i",
+    ),
+    kind: "budget",
+  },
+  {
+    pattern: new RegExp(`^You${APOSTROPHE}re out of (?:usage credits|extra usage)${END}`, "i"),
+    kind: "budget",
+  },
+  { pattern: /^Your org is out of usage\s*·/i, kind: "budget" },
+  {
+    pattern: new RegExp(
+      `^Your seat type doesn${APOSTROPHE}t include (?:usage credits|extra usage|usage)\\b`,
+      "i",
+    ),
+    kind: "budget",
+  },
+  { pattern: /^Your usage allocation has been disabled by your admin/i, kind: "budget" },
+  { pattern: new RegExp(`^Your group${APOSTROPHE}s usage limit is set to \\$0`, "i"), kind: "budget" },
+  { pattern: /^Fable(?: [^·\n]{1,40})? requires usage credits\./, kind: "budget" },
+  { pattern: /^Your workspace is out of credits\b/i, kind: "budget" },
+  { pattern: /^You hit your spend cap\b/i, kind: "budget" },
+];
+/** Whether a message opens with a provider's limit sentence, and which kind of limit it is. */
+export function limitKind(text: string | undefined) {
+  const line = text?.trim().split("\n", 1)[0];
+  return line ? LIMITS.find(({ pattern }) => pattern.test(line))?.kind : undefined;
+}
+/**
  * When a provider quota named by a failure lifts, plus a minute: at most 7 days ahead, 30 minutes
  * for a quota or usage limit that gives no time. null when the failure is not a quota, including a
  * rate limit that names no time (an ordinary retry). Seen in the fleet: "Resets in 4h7m1s" (AGY),
@@ -74,12 +130,14 @@ function wallClock(zone: string) {
  * OpenAI says "Please try again in 1.898s".
  */
 export function quotaReset(error: string | undefined, now: number) {
+  const kind = limitKind(error);
   if (
     !error ||
-    !/quota|rate.?limit|usage limit|hit your|resets? (?:in|after)|try again (?:at|in)/i.test(error)
+    (!kind && !/quota|rate.?limit|usage limit|hit your|resets? (?:in|after)|try again (?:at|in)/i.test(error))
   )
     return null;
   let at = Number.NaN;
+  const epoch = /usage limit reached\|(\d{9,})/i.exec(error)?.[1];
   const span = /(?:resets?|try again) (?:in|after)\s*((?:\d+(?:\.\d+)?\s*[a-z]+[\s,]*(?:and\s+)?)+)/i.exec(
     error,
   )?.[1];
@@ -87,17 +145,20 @@ export function quotaReset(error: string | undefined, now: number) {
   const clock =
     /resets (?:([A-Z][a-z]{2}) (\d{1,2}), (?:(\d{4}), )?)?(\d{1,2})(?::(\d{2}))?([ap]m) \(([\w+/-]+)\)/.exec(
       error,
+    ) ??
+    /try again at\s+(?:([A-Z][a-z]{2}) (\d{1,2})(?:st|nd|rd|th)?, (\d{4}) )?(\d{1,2}):(\d{2})\s*([ap]m)\b/i.exec(
+      error,
     );
-  if (span) {
+  if (epoch) at = Number(epoch) * 1000;
+  else if (span) {
     for (const [, n, word] of span.matchAll(/(\d+(?:\.\d+)?)\s*([a-z]+)/gi))
       if (unitMs(word)) at = (Number.isFinite(at) ? at : now) + Number(n) * unitMs(word);
-  } else if (date) at = Date.parse(date.replace(/\b(\d{1,2})(?:st|nd|rd|th)\b/, "$1"));
-  else if (clock) {
+  } else if (clock) {
     const [, month, day, year, hour, minute = "0", half, zone] = clock;
     try {
       const wall = wallClock(zone);
       const today = wall.local(now);
-      const h = (Number(hour) % 12) + (half === "pm" ? 12 : 0);
+      const h = (Number(hour) % 12) + (half.toLowerCase() === "pm" ? 12 : 0);
       if (!month) {
         // That clock time nearest after the notice, or the printed minute just past (see above).
         for (const day of [today.day - 1, today.day, today.day + 1]) {
@@ -115,26 +176,27 @@ export function quotaReset(error: string | undefined, now: number) {
     } catch {
       /* An unknown zone states no time we can read. */
     }
-  }
+  } else if (date) at = Date.parse(date.replace(/\b(\d{1,2})(?:st|nd|rd|th)\b/, "$1"));
   // Claude's "Server is temporarily limiting requests (not your usage limit)" is a brief retry.
-  if (!Number.isFinite(at) && !/quota|(?<!not your )usage limit/i.test(error)) return null;
+  if (!Number.isFinite(at) && !kind && !/quota|(?<!not your )usage limit/i.test(error)) return null;
   const due = Number.isFinite(at) ? at + 60000 : now + 30 * 60000;
   return Math.min(Math.max(due, now + 60000), now + 7 * 86400000);
 }
 /**
  * Claude Code answers a request the provider refused with a notice of its own as the turn's final
  * message, and Paseo (0.11.2 and 0.12.0) reports that turn completed. Its limits read "You've hit
- * your session limit · resets 9:40pm (Asia/Ho_Chi_Minh)" (or weekly, Opus, Sonnet, Fable 5, spend
- * limit); its API errors "API Error: …", "Failed to authenticate. API Error: 401 …", "There's an
- * issue with the selected model (…)" and, for a role home without a login, "Not logged in · Please
- * run /login". Returns the notice, or undefined for any other message.
+ * your session limit · resets 9:40pm (Asia/Ho_Chi_Minh)" (or 5-hour, weekly, a model's, spend
+ * limit; see LIMITS); its API errors "API Error: …", "Failed to authenticate. API Error: 401 …", "There's an
+ * issue with the selected model (…)" and, for a role home without a login or with an expired one,
+ * "Not logged in · Please run /login", "Login expired · Please run /login". Returns the notice, or undefined for any other message.
  */
 export function providerNotice(text: string | undefined) {
   const notice = text?.trim();
   return notice &&
-    /^(?:You've hit your |API Error\b|Failed to authenticate\b|There's an issue with the selected model \(|Not logged in · Please run \/login)/.test(
-      notice,
-    )
+    (limitKind(notice) ||
+      /^(?:API Error\b|Failed to authenticate\b|There's an issue with the selected model \(|(?:Not logged in|Login expired|Login reached its time limit) · Please run \/login)/.test(
+        notice,
+      ))
     ? notice
     : undefined;
 }
@@ -297,6 +359,7 @@ export class Autonomy {
         .some(
           (w) =>
             w.ownerId === id &&
+            !pluginNotice(w.key) &&
             w.delivery === "idle" &&
             ["scheduled", "pending", "dispatching"].includes(w.state) &&
             !(w.trigger.kind === "turn" && lost(w.trigger.agentId)) &&
@@ -446,7 +509,14 @@ export class Autonomy {
    * `error` is the failure text, or the provider notice the turn ended on; a provider limit is
    * waited out until its reset. `promptId` is the message that started the turn, when known.
    */
-  ended(id: string, turnId: string | null, outcome: string, error?: string, promptId?: string) {
+  ended(
+    id: string,
+    turnId: string | null,
+    outcome: string,
+    error?: string,
+    promptId?: string,
+    observedEndedAt?: number,
+  ) {
     const r = this.get(id);
     if (!r || (r.turnId && r.turnId !== turnId)) return;
     if (r.outcome === outcome && r.turnId === turnId) return;
@@ -468,7 +538,7 @@ export class Autonomy {
     // A wake batch's turn that failed did not finish: it is retried, or goes to the owner, like
     // any other. A turn the agent started itself is not retried.
     const kept = standing || (pushed && (autonomous || outcome !== "failed"));
-    const reset = outcome === "failed" ? quotaReset(error, now) : null;
+    const reset = outcome === "failed" ? quotaReset(error, observedEndedAt ?? now) : null;
     // Such a turn that is canceled, or fails into a retry or its owner's review, ends as new work:
     // it no longer keeps the handback it found (carrying), so the member records it.
     const renewed = pushed && (outcome === "canceled" || (outcome === "failed" && !kept && reset === null));
@@ -503,7 +573,10 @@ export class Autonomy {
         reason = `Turn failed${error ? `: ${error.split("\n", 1)[0].slice(0, 300)}` : ""}`;
       } else {
         phase = r.retries >= r.maxRetries ? "blocked" : "active";
-        if (phase === "blocked") reason = "Retry budget exhausted";
+        if (phase === "blocked")
+          reason = providerSignIn(error)
+            ? "Retry budget exhausted: the provider is signed out; sign in on this host, then autonomy start"
+            : "Retry budget exhausted";
       }
     } else if (outcome === "failed") {
       dueAt = now + 30000 * 2 ** r.retries;
@@ -561,32 +634,6 @@ export class Autonomy {
       ["review", "blocked"].includes(phase)
     )
       this.wakes.failedBatch(id, promptId, error, r.maxRetries);
-    // Once per run of quota waits, and only for a wait worth knowing about.
-    if (quotaRetry && quotaWaits === 1 && dueAt - now >= QUOTA_NOTICE_MS)
-      this.quotaNotice(id, Math.max(dueAt, held ?? 0));
-  }
-  /** The nearest live owner hears once per provider limit that this agent waits for it. */
-  private quotaNotice(id: string, retryAt: number) {
-    const member = this.store.member(id);
-    const owner = availableOwner(this.store, id);
-    if (!member || !owner) return;
-    // Its other members waiting on the same limit add nothing new.
-    const harness = harnessOf(member.provider);
-    const key = `quota-${sha256(`${owner}:${harness}:${retryAt}`).slice(0, 32)}`;
-    if (this.wakes.list().some((w) => w.key === key)) return;
-    try {
-      this.wakes.add({
-        key,
-        roomId: member.roomId,
-        ownerId: owner,
-        reason: `${member.role} ${id} hit a provider limit. Until ${new Date(retryAt).toISOString()} Alliance prompts no ${harness ?? "such"} member on this host, then retries it without using its budget; reassign the work only if it cannot wait.`,
-        trigger: { kind: "time", at: this.now() },
-        delivery: "idle",
-        expiresAt: retryAt,
-      });
-    } catch {
-      /* A cross-room owner may not be authorized; the assignment's reason still names the pause. */
-    }
   }
   tick(api: PaseoApi) {
     if (this.stopped) return Promise.resolve();
@@ -607,7 +654,7 @@ export class Autonomy {
   private async reconcile(api: PaseoApi) {
     for (const member of this.store.members()) {
       if (this.stopped) return;
-      if (member.archivedAt || this.reconciled.has(member.id)) continue;
+      if (member.archivedAt || member.warm?.pending || this.reconciled.has(member.id)) continue;
       const r = this.get(member.id);
       if (r && r.phase !== "archived") continue; // Read every round below.
       const live = await api.agents
@@ -633,7 +680,12 @@ export class Autonomy {
     // Members given an owner later, or recorded before assignments existed, get a record here.
     const managed = new Set(this.list().map((r) => r.agentId));
     for (const member of this.store.members())
-      if (!managed.has(member.id) && !member.archivedAt && availableOwner(this.store, member.id))
+      if (
+        !managed.has(member.id) &&
+        !member.archivedAt &&
+        !member.warm?.pending &&
+        availableOwner(this.store, member.id)
+      )
         try {
           this.ensure(member.id);
         } catch (error) {
@@ -643,6 +695,7 @@ export class Autonomy {
       try {
         if (this.stopped) return;
         let r = this.get(initial.agentId) ?? initial;
+        if (this.store.member(r.agentId)?.warm?.pending) continue;
         if (r.phase === "archived") continue;
         if (r.delivery === "dispatching") {
           this.save(r, {
@@ -669,7 +722,14 @@ export class Autonomy {
         }
         // Hooks are best effort. Retained turn records recover missed scheduler callbacks.
         if (member.lastOutcome && member.lastTurnId === r.turnId && !r.outcome) {
-          this.ended(r.agentId, r.turnId, member.lastOutcome, live.agent.lastError);
+          this.ended(
+            r.agentId,
+            r.turnId,
+            member.lastOutcome,
+            live.agent.lastError,
+            undefined,
+            member.lastTurnEndedAt,
+          );
           r = this.get(r.agentId) ?? r;
         }
         if (live.agent.pendingPermissions?.length) continue;
@@ -739,6 +799,8 @@ export class Autonomy {
         if (r.phase === "waiting" && !quota && !obligation?.conditions.length) continue;
         // Nothing reaches a member whose provider limit has not lifted yet.
         if (this.store.heldUntil(r.agentId, this.now()) !== null) continue;
+        // Nor one whose provider is signed out: it would only fail again.
+        if (signInHeld(member, this.now())) continue;
         // Only known failed runs may recover from error/closed. Never resurrect a canceled or archived agent.
         const retry = r.outcome === "failed";
         if (
@@ -757,6 +819,12 @@ export class Autonomy {
           continue;
         }
         const messageId = randomUUID();
+        this.store.noteWakeMessage(
+          r.agentId,
+          messageId,
+          retry ? "alliance.retry" : "alliance.continue",
+          this.now(),
+        );
         const claimed = this.save(r, {
           phase: r.handbackOnly ? r.phase : "active",
           delivery: "dispatching",

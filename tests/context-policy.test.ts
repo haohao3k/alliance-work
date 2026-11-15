@@ -26,6 +26,17 @@ test("Claude's launch overrides a stale window and disabled compaction without d
   assert.equal(original.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "1000000");
 });
 
+test("Claude's explicit pilot window leaves Codex and Pi at their own budgets", () => {
+  const policy = { claudeWindow: 232000 };
+  const claude = contextPolicy("claude", [], {}, policy);
+  assert.equal(claude.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "232000");
+  assert.equal(contextPolicy("claude", [], {}).env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "300000");
+  const codex = contextPolicy("codex", [], {}, policy);
+  assert(codex.args.includes("model_auto_compact_token_limit=300000"));
+  assert(!codex.args.includes("model_auto_compact_token_limit=232000"));
+  assert.equal(contextPolicy("pi", [], {}, policy).env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, undefined);
+});
+
 test("Pi native compaction fires below 300k for extension providers and preserves smaller windows", async () => {
   const cwd = await temporary("alliance-context-");
   const settingsManager = SettingsManager.inMemory({

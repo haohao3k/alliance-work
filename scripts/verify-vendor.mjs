@@ -93,9 +93,21 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       `${adapted.adaptations.length} adapted playbooks / ${adapted.files.length} raw files verified against ${adapted.revision}`,
     );
   const agy = JSON.parse(readFileSync(join(defaultRoot, "server/agy-native/provenance.json"), "utf8"));
-  for (const file of agy.files) {
-    if (digest(readFileSync(join(defaultRoot, file.path))) !== file.sha256)
-      throw new Error(`Vendored AGY driver changed: ${file.path}`);
+  const adaptations = agy.adaptations ?? [];
+  if (new Set(adaptations.map((entry) => entry.path)).size !== adaptations.length)
+    throw new Error("Duplicate AGY driver adaptation");
+  for (const entry of adaptations) {
+    if (!agy.files.some((file) => file.path === entry.path) || !entry.reason)
+      throw new Error(`Unmapped AGY driver adaptation: ${entry.path}`);
   }
-  console.log(`AGY native driver verified against ${agy.package}@${agy.version}`);
+  for (const file of agy.files) {
+    const adaptation = adaptations.find((entry) => entry.path === file.path);
+    if (digest(readFileSync(join(defaultRoot, adaptation?.upstreamPath ?? file.path))) !== file.sha256)
+      throw new Error(`Vendored AGY driver changed: ${file.path}`);
+    if (adaptation && digest(readFileSync(join(defaultRoot, file.path))) !== adaptation.sha256)
+      throw new Error(`Adapted AGY driver changed: ${file.path}`);
+  }
+  console.log(
+    `AGY native driver verified against ${agy.package}@${agy.version}; ${adaptations.length} local adaptations`,
+  );
 }

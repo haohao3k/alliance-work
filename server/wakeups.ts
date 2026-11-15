@@ -1,12 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { PaseoApi } from "@getpaseo/client";
 import { pauseKind } from "../shared/autonomy";
+import { warmCompanion as holdable, pluginNotice, warmKey } from "../shared/keepwarm";
 import { blockedOn } from "../shared/obligations";
 import { deliverable, responsibleOwner } from "../shared/operations";
 import { defaultDelivery, type WakeRecordValue as Wake, WakeInput } from "../shared/wakeups";
+import { queueQuotaNotice, quotaContact, quotaContacts, quotaNoticeKey } from "./claude-limit";
 import { observeJob } from "./jobs.mjs";
+import { keepBlocker } from "./keep";
+import { KeepWarm } from "./keepwarm";
 import { availableOwner, decisionChain } from "./lifecycle";
-import type { MemberRecord, RoomStore } from "./store";
+import { type MemberRecord, type RoomStore, signInHeld } from "./store";
 
 const terminal = new Set(["acknowledged", "canceled", "expired"]);
 /** Acknowledged, canceled or expired: kept only for audit and never sent again. */
@@ -53,6 +57,10 @@ const loadFailed = (error: unknown) =>
   /is not available|does not exist|initiali[sz]e timed out|(?:failed|unable) to (?:load|resume)|could not (?:load|resume)/i.test(
     error.message,
   );
+/** Waits of one owner for about the same time are one wait. */
+const SAME_WAIT_MS = 10 * 60000;
+/** The longest reason a reminder may carry (WakeInput's limit), also when reasons are joined. */
+const REASON_MAX = 2000;
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 /** Its owner chain or the Human accepted or rejected this turn (a decision without a turn is older). */
 export const decidedTurn = (member: Pick<MemberRecord, "decision" | "decisionTurnId">, turnId: string) =>
@@ -70,6 +78,7 @@ export const cliLine = ({ command, managed }: CliCommand) =>
 
 /** Durable notifications. Their expiry/acknowledgement never closes an obligation. */
 export class Wakeups {
+  readonly keepwarm: KeepWarm;
   private running: Promise<void> | undefined;
   private stopped = false;
   /** Closed owners whose session failed to load on our last send, and when. */
@@ -79,8 +88,11 @@ export class Wakeups {
   constructor(
     private store: RoomStore,
     private now: () => number = Date.now,
+    quota?: ConstructorParameters<typeof KeepWarm>[2],
   ) {
-    if (store.migration() < PULL_MIGRATION)
+    this.keepwarm = new KeepWarm(store, now, quota);
+    // A store a newer release marked is read-only here; its migrations belong to that release.
+    if (!store.readOnly && store.migration() < PULL_MIGRATION)
       store.atomic(() => {
         this.migratePull();
         store.setMigration(PULL_MIGRATION);
@@ -180,6 +192,8 @@ export class Wakeups {
         throw new Error("Wakeup key already names different work");
       return prior;
     }
+    const same = this.awaited(input);
+    if (same) return same;
     if (this.list().filter((w) => !terminal.has(w.state)).length >= ACTIVE_LIMIT)
       throw new Error(`Active wakeup limit reached (${ACTIVE_LIMIT} unfinished records)`);
     const now = this.now();
@@ -221,6 +235,45 @@ export class Wakeups {
     this.store.saveWakeup(record);
     return record;
   }
+  /**
+   * The owner's reminder, not yet sent, that already waits for what this one asks: the same tracked
+   * job, the same turn of a child, or a temporary time wait due within ten minutes. It is returned
+   * instead of adding another (a reworded wait would wake the owner twice). A reason it does not hold
+   * yet is appended (while it fits), and asked for sooner, it is brought forward so the owner is never
+   * woken later than it last asked.
+   */
+  private awaited(input: ReturnType<typeof WakeInput.parse> & Pick<Wake, "delivery">) {
+    const { trigger } = input;
+    const dueAt = trigger.kind === "time" ? Math.max(trigger.at, this.now() + (input.delayMs ?? 0)) : 0;
+    if (input.obligationKey || input.delivery !== "idle" || input.everyMs) return undefined;
+    const w = this.list().find(
+      (v) =>
+        v.ownerId === input.ownerId &&
+        v.roomId === input.roomId &&
+        v.delivery === "idle" &&
+        !v.obligationKey &&
+        !v.everyMs &&
+        ["scheduled", "pending"].includes(v.state) &&
+        this.current(v) &&
+        (trigger.kind === "job"
+          ? v.trigger.kind === "job" && v.trigger.key === trigger.key
+          : trigger.kind === "turn"
+            ? v.trigger.kind === "turn" &&
+              v.trigger.agentId === trigger.agentId &&
+              v.trigger.turnId === trigger.turnId
+            : input.untilDecision === true &&
+              v.untilDecision === true &&
+              v.trigger.kind === "time" &&
+              v.state === "scheduled" &&
+              Math.abs(v.dueAt - dueAt) <= SAME_WAIT_MS),
+    );
+    if (!w) return undefined;
+    // The owner's new wording joins the reminder, so waking up it still names every reason it asked for.
+    const joined = w.reason.includes(input.reason) ? w.reason : `${w.reason}\nAlso: ${input.reason}`;
+    const reason = joined.length <= REASON_MAX ? joined : w.reason;
+    const sooner = trigger.kind === "time" && dueAt < w.dueAt;
+    return reason === w.reason && !sooner ? w : this.save(w, { reason, ...(sooner ? { dueAt } : {}) });
+  }
   private save(w: Wake, change: Partial<Wake>) {
     const next = { ...w, ...change, revision: w.revision + 1, updatedAt: this.now() };
     this.store.saveWakeup(next, w.revision);
@@ -235,7 +288,13 @@ export class Wakeups {
     if (w.trigger.kind !== "turn") return null;
     const { agentId, turnId } = w.trigger;
     const child = this.store.member(agentId);
-    if (!child || child.lastTurnId !== turnId || child.archivedAt || child.keep) return null;
+    if (
+      !child ||
+      child.lastTurnId !== turnId ||
+      child.archivedAt ||
+      keepBlocker(this.store, child, this.now())
+    )
+      return null;
     if (decidedTurn(child, turnId) || !this.handedBack(agentId, turnId)) return null;
     return decisionChain(this.store, agentId).includes(w.ownerId) ? child : null;
   }
@@ -436,6 +495,9 @@ export class Wakeups {
    * mark's time, or null.
    */
   private markBatch(ownerId: string, batch: Wake[]) {
+    // Warm receipts carry the native turn separately, including owners with no autonomy record.
+    // They must never change the assignment's wake turn or handback generation.
+    if (batch.some((w) => warmKey(w.key))) return null;
     const r = this.store.autonomyOf(ownerId);
     if (!r || r.phase === "active" || r.phase === "archived") return null;
     const at = this.now();
@@ -513,6 +575,24 @@ export class Wakeups {
       )
         this.save(w, { state: "canceled", note: "Temporary wait ended at owner decision" });
   }
+  /**
+   * The owner's acceptance leaves its reminders that already fired and were never acknowledged: a
+   * delivered `wait`, an `hq` item nobody pulled. They only hold its archive, so they are canceled
+   * and their keys returned. Kept: obligation reminders; anything not yet due (a future intent, and
+   * a job reminder fires only once its job exited, so a running job stays guarded); repeats with runs
+   * left; reviews of a child's turn (the round closes those once decided); sends of unknown outcome.
+   */
+  settleAccepted(ownerId: string) {
+    const keys: string[] = [];
+    for (const w of this.list()) {
+      if (w.ownerId !== ownerId || w.obligationKey || w.trigger.kind === "turn") continue;
+      if (w.state !== "delivered" && w.state !== "pending") continue;
+      if (w.everyMs && w.runs < w.maxRuns) continue;
+      this.save(w, { state: "canceled", note: "Settled at the owner's acceptance; nothing left to act on" });
+      keys.push(w.key);
+    }
+    return keys;
+  }
   /** The owner's pending pull reminders, one short line each, for prompts that reach it anyway. */
   pullList(ownerId: string) {
     const items = this.list().filter(
@@ -525,16 +605,70 @@ export class Wakeups {
     return `Also pending for you, not delivered by this message (read with wakeups take --owner ${ownerId}):\n${lines.join("\n")}`;
   }
   private async round(api?: PaseoApi) {
+    if (this.store.readOnly) return;
     this.prune();
+    for (const member of this.store.members())
+      if (member.limited && member.limited.until > this.now())
+        queueQuotaNotice(this.store, this, member.id, this.now());
     for (const initial of this.list()) {
       let w = initial;
       if (terminal.has(w.state)) continue;
       if (w.state === "dispatching") {
         this.save(w, {
-          state: "uncertain",
-          note: "Dispatch interrupted; inspect owner history before ack/cancel",
+          state: warmKey(w.key) ? "expired" : "uncertain",
+          note: warmKey(w.key)
+            ? "Interrupted keepwarm; never replayed"
+            : "Dispatch interrupted; inspect owner history before ack/cancel",
         });
         continue;
+      }
+      // A quota notice follows a runnable authority when its original recipient becomes held.
+      // Re-read native availability before choosing: an error/unavailable HQ cannot act on advice.
+      if (w.key.startsWith("quota-limit-") && ["scheduled", "pending"].includes(w.state)) {
+        const reporters = this.store
+          .members()
+          .filter(
+            (m) =>
+              !m.archivedAt &&
+              m.limited &&
+              m.limited.until > this.now() &&
+              quotaNoticeKey(m, this.store) === w.key,
+          );
+        if (reporters.length) {
+          const available = new Set<string>();
+          if (api) {
+            for (const id of new Set(reporters.flatMap((m) => quotaContacts(this.store, m)))) {
+              const m = this.store.member(id);
+              if (!m || m.archivedAt) continue;
+              const live = await api.agents
+                .ref(id)
+                .refresh()
+                .catch(() => null);
+              if (live && deliverable(live.agent)) available.add(m.id);
+            }
+          }
+          // Native reads may race an explicit cancel or ownership change.
+          if (this.store.wakeup(w.key)?.revision !== w.revision) continue;
+          const owner = reporters
+            .map((reporter) =>
+              quotaContact(this.store, reporter, this.now(), api ? (id) => available.has(id) : undefined),
+            )
+            .find((id) => id !== null);
+          if (!owner) {
+            if (w.note !== "Quota advice needs Human") this.save(w, { note: "Quota advice needs Human" });
+            continue;
+          }
+          const recipient = this.store.member(owner);
+          if (!recipient) continue;
+          if (owner !== w.ownerId || w.note === "Quota advice needs Human")
+            w = this.save(w, {
+              ownerId: owner,
+              roomId: recipient.roomId,
+              dueAt: Math.min(w.dueAt, this.now()),
+              lastSentAt: owner === w.ownerId ? w.lastSentAt : null,
+              note: null,
+            });
+        }
       }
       // An archived owner never takes its reminders; obligation reminders move only with handoff.
       if (!w.obligationKey && this.store.member(w.ownerId)?.archivedAt) {
@@ -604,6 +738,24 @@ export class Wakeups {
       else if (w.note === JOB_CHANGED || w.note === OWNER_CHANGED) this.save(w, { note: null });
     }
     if (!api || this.stopped) return;
+    await this.keepwarm.recover(api);
+    for (const id of await this.keepwarm.prepare(api)) {
+      if (this.stopped) return;
+      if (this.list().some((w) => w.ownerId === id && warmKey(w.key) && !terminal.has(w.state))) continue;
+      const member = this.store.member(id);
+      if (!member) continue;
+      const dueAt = this.now();
+      const w = this.add({
+        key: `warm-${id}-${dueAt}`,
+        roomId: member.roomId,
+        ownerId: id,
+        trigger: { kind: "time", at: dueAt },
+        delivery: "idle",
+        expiresAt: dueAt + 10 * 60000,
+        reason: "Keep-warm; reply with one word, do not call tools.",
+      });
+      this.save(w, { state: "pending" });
+    }
     for (const owner of new Set(
       this.list()
         .filter((w) => w.state === "pending" && w.delivery === "idle" && !w.note)
@@ -614,6 +766,7 @@ export class Wakeups {
         this.held(owner) ||
         // A provider limit holds every member of the owner's harness on this host until it lifts.
         this.store.heldUntil(owner, this.now()) !== null ||
+        signInHeld(this.store.member(owner), this.now()) ||
         this.list().some(
           (w) => w.ownerId === owner && w.lastSentAt !== null && this.now() - w.lastSentAt < 60000,
         )
@@ -640,7 +793,7 @@ export class Wakeups {
       const closed = live.agent.status === "closed";
       if (closed && this.now() - (this.unloadable.get(owner) ?? Number.NEGATIVE_INFINITY) < UNLOADABLE_MS)
         continue;
-      const batch = this.list()
+      let batch = this.list()
         .filter(
           (w) =>
             w.ownerId === owner &&
@@ -651,16 +804,40 @@ export class Wakeups {
             !w.note &&
             this.current(w),
         )
+        // Notices ride after real work, so they never crowd it out of a full batch.
+        .sort((a, b) => Number(/^quota-/.test(a.key)) - Number(/^quota-/.test(b.key)))
         .slice(0, 8);
       if (!batch.length) continue;
+      const warm = batch.some((w) => warmKey(w.key));
+      if (warm) {
+        const member = this.store.member(owner);
+        if (
+          !member ||
+          !this.keepwarm.liveEligible(member, live.agent) ||
+          batch.some((w) => !warmKey(w.key) && !holdable(w))
+        ) {
+          for (const w of batch.filter((w) => warmKey(w.key)))
+            this.save(w, { state: "expired", note: "Keepwarm eligibility changed" });
+          batch = batch.filter((w) => !warmKey(w.key));
+          if (!batch.length) continue;
+        }
+      }
+      const warming = batch.some((w) => warmKey(w.key));
+      const contextTokens = live.agent.lastUsage?.contextWindowUsedTokens;
+      if (warming && contextTokens === undefined) continue;
       const messageId = randomUUID();
       // Persist one batch claim before native send. Never retry an ambiguous send automatically.
       const claimed = this.store.claimWakeups(batch, messageId, this.now());
       if (!claimed) continue;
+      this.store.notePluginMessage(owner, messageId, this.now());
+      if (warming && contextTokens !== undefined) this.keepwarm.claim(owner, messageId, contextTokens);
+      if (!warming) this.store.noteWakeMessage(owner, messageId, "alliance.wakeup", this.now());
       // Plugin notices lapse by themselves; a review of a handback closes with its decision.
-      const notice = (w: Wake) => /^(?:quota|silent|permission)-/.test(w.key);
+      const notice = (w: Wake) => pluginNotice(w.key);
       const review = (w: Wake) =>
-        w.trigger.kind === "turn" && this.handedBack(w.trigger.agentId, w.trigger.turnId);
+        w.trigger.kind === "turn" &&
+        decisionChain(this.store, w.trigger.agentId).includes(w.ownerId) &&
+        this.handedBack(w.trigger.agentId, w.trigger.turnId);
       const items = claimed.map(
         (w) =>
           `[${w.key}] ${w.reason}\nTrigger: ${JSON.stringify(w.trigger)}; revision: ${w.revision + 1}\n${review(w) ? "Decide: accept, reject, rework or defer." : notice(w) ? "No ack needed; it lapses by itself." : "Act, then ack."}`,
@@ -675,7 +852,16 @@ export class Wakeups {
       const marked = this.markBatch(owner, claimed);
       try {
         await ref.send(
-          `Alliance wakeups for owner ${owner}:\n${items.join("\n\n")}${pull ? `\n\n${pull}` : ""}\n\nInspect the room's durable assignment/results before acting; a process exit or finished turn is not acceptance.${decide}${ack} To wait for something, run alliance-work wait and end your turn; never sleep or poll.\n\n${cliLine(this.cli())}`,
+          warming
+            ? `Keep-warm: reply with one word; do not call any tools.${
+                claimed.some((w) => !warmKey(w.key))
+                  ? `\nInformational notices (no action or ack):\n${claimed
+                      .filter((w) => !warmKey(w.key))
+                      .map((w) => `[${w.key}] ${w.reason}`)
+                      .join("\n")}`
+                  : ""
+              }`
+            : `Alliance wakeups for owner ${owner}:\n${items.join("\n\n")}${pull ? `\n\n${pull}` : ""}\n\nInspect the room's durable assignment/results before acting; a process exit or finished turn is not acceptance.${decide}${ack} To wait for something, run alliance-work wait and end your turn; never sleep or poll.\n\n${cliLine(this.cli())}`,
           { messageId, activeTurnBehavior: "steer" },
         );
         for (const w of claimed) {
@@ -701,25 +887,33 @@ export class Wakeups {
           ));
         if (unloaded) this.unloadable.set(owner, this.now());
         const refused = refusedSend(error) || unloaded;
+        if (warming && refused) this.keepwarm.refused(owner, messageId);
         if (refused && marked !== null) this.unmarkBatch(owner, marked);
         for (const claimedWake of claimed) {
           const w = this.store.wakeup(claimedWake.key);
           if (w?.state !== "dispatching" || w.messageId !== messageId) continue;
           this.save(
             w,
-            refused
+            warmKey(w.key)
               ? {
-                  state: "scheduled",
-                  dueAt: this.now(),
-                  runs: w.runs - 1,
-                  messageId: null,
-                  failure: undefined,
-                  note: `${unloaded ? "Owner session did not load" : "Delivery refused"} (${(error as Error).message.slice(0, 200)}); retrying`,
+                  state: "expired",
+                  note: refused
+                    ? "Keepwarm refused; budget and cooldown retained"
+                    : "Keepwarm delivery unknown; never replayed",
                 }
-              : {
-                  state: "uncertain",
-                  note: "Native delivery outcome unknown; inspect history before ack/cancel",
-                },
+              : refused
+                ? {
+                    state: "scheduled",
+                    dueAt: this.now(),
+                    runs: w.runs - 1,
+                    messageId: null,
+                    failure: undefined,
+                    note: `${unloaded ? "Owner session did not load" : "Delivery refused"} (${(error as Error).message.slice(0, 200)}); retrying`,
+                  }
+                : {
+                    state: "uncertain",
+                    note: "Native delivery outcome unknown; inspect history before ack/cancel",
+                  },
           );
         }
       }

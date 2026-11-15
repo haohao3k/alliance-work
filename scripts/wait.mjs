@@ -62,9 +62,14 @@ export async function registerWait(
     if (!Number.isFinite(due)) throw new Error("--at takes an ISO time");
     trigger = { kind: "time", at: Math.max(0, due) };
   } else {
-    const count = Number(minutes);
+    let count = Number(minutes);
     if (!(Number.isSafeInteger(count) && count > 0))
       throw new Error("--minutes takes whole minutes (1 or more)");
+    if (count > 55 && count <= 75) {
+      say(`Wait: using 55 minutes for requested ${count} minutes to keep the cache warm.`);
+      count = 55;
+    } else if (count >= 76)
+      say("Warning: cache expires after 60 minutes; use --minutes 45 or less, or accept a cache rebuild.");
     trigger = { kind: "time", at: Date.now() + count * 60000 };
     // Counted from the first call: the same request in the same turn of the owner is one reminder.
     const turn =
@@ -87,6 +92,9 @@ export async function registerWait(
       delivery: "idle",
       ...(trigger.kind === "time" ? { untilDecision: true } : {}),
     }));
+  // The plugin returns the reminder already waiting for the same job, turn or time; that one stands.
+  if (record.key !== key) say(`Already waiting on ${record.key} for this; nothing new registered.`);
+  key = record.key;
   if (!waking.has(record.state))
     throw new Error(
       `${key} was already ${record.state} (${record.note ?? "no note"}); nothing new was registered. Act on it, or wait with another --reason.`,

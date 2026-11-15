@@ -37,13 +37,21 @@ Document commands where users operate them: README for first use, docs/operation
 and auth, docs/quickstart.vi.md for the room workflow. Keep facts in one place. No source/test-only
 result proves an end-to-end model handback.
 
-## Public edition
+## Private and public editions
 
-This checkout publishes selected, reviewed changes to `haohao3k/alliance-work`.
-Verify the destination and public visibility before pushing. Never merge private history,
-copy local credentials, or publish personal host configuration. New third-party assets need
-explicit redistribution rights and retained notices. Existing tags are immutable.
-Keep the private source checkout independent; no force push or mirror operation.
+This checkout is the public edition, `haohao3k/alliance-work`. Installer, update, deploy and
+release defaults must target that repository and require public visibility (`private=false`).
+Verify the destination repository and visibility before pushing or publishing.
+
+The separate private edition is canonical for internal work and may release independently.
+A private release does not authorize a public release. Public updates need an explicitly approved,
+reviewed candidate based on public history: never mirror or merge private history, tags or assets.
+Exclude personal helpers, host data, internal integration notes and playbooks whose redistribution
+rights are unestablished. Keep the existing public vendor bundle pinned; optional skill overrides
+must work when no override manifest or resources are distributed.
+
+Published tags are immutable. The two repositories can release on separate schedules; a private
+release does not authorize any change to the public repository.
 
 ## Required secret scan before push
 

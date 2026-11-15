@@ -1,29 +1,36 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { constants, renameSync, writeFileSync } from "node:fs";
+import { constants, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { access, lstat, mkdir, readdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { createPaseoApi, type PaseoApi } from "@getpaseo/client";
-import { DaemonClient } from "@getpaseo/client/internal/daemon-client";
+import type { PaseoApi } from "@getpaseo/client";
 import type { RpcInput } from "@getpaseo/plugin";
 import type { PluginHookAgent, PluginTurnOutcome } from "@getpaseo/plugin/server";
 import type { AgentTimelineItem } from "@getpaseo/protocol/agent-types";
+import { z } from "zod";
 import { Evidence, validateAnalysisEvidence, validateEvidence } from "../server/evidence.mjs";
 import { skillCatalog } from "../server/project-skills.mjs";
+import { AutonomyRecord } from "../shared/autonomy";
 import {
   Acceptance,
+  HumanDecisionSource,
+  Member,
   type memberLaunch,
   ProductAcceptance,
   type RoleName,
   type RoomRecord,
 } from "../shared/contracts";
-import { policyInstruction, type TaskDifficulty } from "../shared/model-policy";
+import { modelPolicyWarnings, policyInstruction, type TaskDifficulty } from "../shared/model-policy";
 import { agentTitle, namingInstruction, workspaceTitle } from "../shared/naming";
 import { deliverable, ownerState, responsibleOwner } from "../shared/operations";
 import { Autonomy, providerNotice, quotaReset } from "./autonomy";
 import { effectiveSkills } from "./bundled-skills.mjs";
+import { announceAccountLimit } from "./claude-limit";
+import { ClaudeProjectCatalog } from "./claude-project-catalog.mjs";
+import { currentClaudeAccount } from "./claude-runtime.mjs";
+import { ClaudeSwitch, type IdleRetirement } from "./claude-switch";
 import {
   buildIntegrationProof,
   integrationStamp,
@@ -31,12 +38,29 @@ import {
   validateIntegrationProof,
 } from "./integration.mjs";
 import { observeJob, processIdentity } from "./jobs.mjs";
-import { acceptedContributors, authorizeDecision, Lifecycle, type LiveState } from "./lifecycle";
+import { KEEP_DEFAULT_HOURS, KEEP_MAX_HOURS } from "./keep";
+import type { WarmAgent } from "./keepwarm";
+import {
+  acceptedContributors,
+  authorizeDecision,
+  Lifecycle,
+  type LiveState,
+  summarizeLifecycle,
+} from "./lifecycle";
 import { Liveness } from "./liveness";
+import { registerControlAliases } from "./maintenance-control.mjs";
+import {
+  heldTask,
+  maintenanceHeld,
+  maintenanceMessageIds,
+  readMaintenanceHold,
+  saveMaintenanceHold,
+} from "./maintenance-hold.mjs";
 import { lockState } from "./maintenance-lock.mjs";
 import { chooseModel } from "./model-policy";
 import { Obligations } from "./obligations";
 import { verifyProfile } from "./profile-integrity.mjs";
+import { providerSignIn, SignIn } from "./provider-signin";
 import { scopedMcpServers } from "./scoped-mcp.mjs";
 import {
   type MemberRecord,
@@ -63,6 +87,8 @@ interface Manifest {
   profiles: Record<string, Profile>;
 }
 const execute = promisify(execFile);
+const turnGeneration = (member: MemberRecord | null | undefined) =>
+  member?.warm?.pending?.startedAt ?? member?.turnStartedAt;
 /** Bound native requests and process/file probes without dropping or reordering records. */
 async function mapStatus<T, R>(items: T[], read: (item: T) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length);
@@ -97,6 +123,50 @@ async function writeAtomic(path: string, text: string) {
   await writeFile(temporary, text, { mode: 0o600, flag: "wx" });
   await rename(temporary, path);
 }
+async function readbackWithin<T>(read: Promise<T>) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      read,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Native turn readback timed out")), 10000);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+/** One scheduler round can inspect the same history page for terminal and input provenance. */
+function sharedReadbacks(api: PaseoApi): PaseoApi {
+  type Page = ReturnType<ReturnType<PaseoApi["agents"]["ref"]>["timeline"]["refetch"]>;
+  const pages = new Map<string, Page>();
+  return {
+    ...api,
+    agents: {
+      ...api.agents,
+      ref: (agent) => {
+        const ref = api.agents.ref(agent);
+        const timeline: typeof ref.timeline = {
+          ...ref.timeline,
+          refetch: (options) => {
+            const key = JSON.stringify([typeof agent === "string" ? agent : agent.id, options]);
+            let page = pages.get(key);
+            if (!page) {
+              page = ref.timeline.refetch(options);
+              pages.set(key, page);
+            }
+            return page;
+          },
+        };
+        return new Proxy(ref, {
+          get: (target, key, receiver) =>
+            key === "timeline" ? timeline : Reflect.get(target, key, receiver),
+        });
+      },
+    },
+  };
+}
 async function gitRoot(cwd: string) {
   try {
     return resolve(
@@ -126,10 +196,27 @@ const usable = (path: string, mode: number) =>
 /** What the daemon reported when the scheduler last (re)connected. */
 export type DaemonInfo = { version: string | null; agentMessageProvenance: boolean };
 /** The scheduler's own daemon connection. */
-export type SchedulerClient = PaseoApi & { close(): Promise<void> };
+export type SchedulerClient = PaseoApi & {
+  close(): Promise<void>;
+  retireIdle?: IdleRetirement;
+  stopForAccountSwitch?: (id: string) => Promise<void>;
+};
 export type ConnectDaemon = (home: string, seen: (daemon: DaemonInfo) => void) => Promise<SchedulerClient>;
+/**
+ * The scheduler's daemon client comes from the host, not from this bundle: the specifier is
+ * computed so esbuild leaves it, and Paseo's plugin process has already loaded the same
+ * @getpaseo/client. Bundling it adds ~8.5 MB that Paseo compiles on every load and each plugin
+ * child holds in memory.
+ */
+const hostModule = <T>(specifier: string): Promise<T> => import(specifier);
 /** Connects to this installation's daemon and reports its server info after every (re)connect. */
 const connectDaemon: ConnectDaemon = async (home, seen) => {
+  const [{ createPaseoApi }, { DaemonClient }] = await Promise.all([
+    hostModule<typeof import("@getpaseo/client")>("@getpaseo/client"),
+    hostModule<typeof import("@getpaseo/client/internal/daemon-client")>(
+      "@getpaseo/client/internal/daemon-client",
+    ),
+  ]);
   const installed = JSON.parse(await readFile(join(home, "installation.json"), "utf8"));
   if (installed.home !== home) throw new Error("Installation home mismatch");
   const config = JSON.parse(await readFile(join(installed.paseoHome, "config.json"), "utf8"));
@@ -168,7 +255,22 @@ const connectDaemon: ConnectDaemon = async (home, seen) => {
     await close().catch(() => undefined);
     throw error;
   }
-  return { ...api, close };
+  const native = client as typeof client & {
+    retireIdleAgentRuntime?: (agentId: string, updatedAt: string) => Promise<{ runtimeRetired?: boolean }>;
+  };
+  const supportsIdleSwitch =
+    (client.getLastServerInfoMessage()?.features as { idleAccountSwitch?: boolean })?.idleAccountSwitch ===
+    true;
+  return {
+    ...api,
+    close,
+    stopForAccountSwitch: async (id) => client.cancelAgent(id),
+    retireIdle:
+      supportsIdleSwitch && native.retireIdleAgentRuntime
+        ? async (id, updatedAt) =>
+            (await native.retireIdleAgentRuntime!(id, updatedAt)).runtimeRetired === true
+        : undefined,
+  };
 };
 /**
  * How native sends treat a running receiver on this daemon. Paseo 0.12 marks agent messages
@@ -190,14 +292,22 @@ export class AllianceRuntime {
   autonomy!: Autonomy;
   lifecycle!: Lifecycle;
   liveness!: Liveness;
+  private signInTracker?: SignIn;
+  get signIn() {
+    this.signInTracker ??= new SignIn(this.store, this.wakeups);
+    return this.signInTracker;
+  }
+  claudeSwitch!: ClaudeSwitch;
   wakeupHealth: { checkedAt: string | null; error: string | null } = { checkedAt: null, error: null };
   /** The daemon the scheduler last connected to; null until it first connects. */
   daemon: DaemonInfo | null = null;
   private wakeTimer?: ReturnType<typeof setTimeout>;
   private wakeClient?: SchedulerClient;
   private wakeRound?: Promise<void>;
+  private idleReadbacks = new Map<string, Partial<Record<"turn" | "input" | "warm", string>>>();
   private closing = false;
   private manifest!: Manifest;
+  private readonly claudeProjectCatalog = new ClaudeProjectCatalog();
   private cli: CliCommand = { command: "alliance-work", managed: false };
   private roomWrite: Promise<unknown> = Promise.resolve();
   constructor(
@@ -211,6 +321,7 @@ export class AllianceRuntime {
     this.manifest = JSON.parse(await readFile(join(this.home, "profiles.json"), "utf8"));
     if (this.manifest.home !== this.home) throw new Error("Alliance manifest belongs to another home");
     this.store = new RoomStore(this.home);
+    this.claudeSwitch = new ClaudeSwitch(this.home, this.store);
     this.wakeups = new Wakeups(this.store);
     this.obligations = new Obligations(this.store);
     this.autonomy = new Autonomy(this.store, this.wakeups);
@@ -254,13 +365,18 @@ export class AllianceRuntime {
     if (this.wakeTimer || this.wakeRound || this.closing) return this.wakeRound;
     const round = async () => {
       try {
+        // Every sweep writes. A store a newer release marked is only read until Alliance is updated.
+        if (this.store.readOnly) {
+          this.wakeupHealth = { checkedAt: new Date().toISOString(), error: this.store.readOnly.message };
+          return;
+        }
         this.cli = await this.cliCommand().catch(() => this.cli);
         await this.wakeups.tick();
         this.wakeupHealth = { checkedAt: new Date().toISOString(), error: null };
         // An update waiting for idleness holds this lock; starting turns would starve it. A lock
         // left by a dead or pre-reboot process is ignored so the scheduler cannot stall forever.
         const lock = await lockState(this.home).catch(() => ({ held: false, stale: false }));
-        const maintenance = lock.held;
+        const maintenance = lock.held || (await maintenanceHeld(this.home));
         if (maintenance)
           this.wakeupHealth.error = "Maintenance lock held; scheduled prompts paused until it clears";
         else if (lock.stale)
@@ -269,6 +385,9 @@ export class AllianceRuntime {
           !maintenance &&
           // Also connect once without work: new agents are told how sends behave on this daemon.
           (!this.daemon ||
+            this.store
+              .members()
+              .some((member) => !member.archivedAt && member.provider.startsWith("alliance-claude-")) ||
             this.store.members().some((member) => member.turnReadbackPending) ||
             this.autonomy.list().some((r) => r.phase !== "archived") ||
             this.wakeups.list().some((w) => w.state === "pending" && w.delivery === "idle") ||
@@ -278,19 +397,31 @@ export class AllianceRuntime {
             this.daemon = daemon;
           });
           if (!this.closing) {
+            const client = this.wakeClient;
+            const readback = sharedReadbacks(client);
+            await this.claudeSwitch.sweep(this.wakeClient, this.wakeClient.retireIdle);
             for (const member of this.store.members())
               if (member.turnReadbackPending)
-                await this.reconcileTurnReadback(member.id, this.wakeClient).catch(() => {
-                  this.wakeupHealth.error = "Native turn handback awaits readback; retained for retry";
+                await this.pollReadback(member.id, client, "turn", () =>
+                  this.reconcileTurnReadback(member.id, readback),
+                ).catch((error: Error) => {
+                  this.wakeupHealth.error = `Native turn handback awaits readback; retained for retry: ${error.message}`;
+                });
+              else if (member.warm?.pending)
+                await this.pollReadback(member.id, client, "warm", () =>
+                  this.reconcileWarmInput(member.id, readback),
+                ).catch((error: Error) => {
+                  this.wakeupHealth.error = `Keepwarm native input unknown; retained for retry: ${error.message}`;
                 });
             for (const r of this.autonomy.list())
               if (
                 (!r.outcome && this.autonomy.carrying(r.agentId)) ||
                 this.store.member(r.agentId)?.turnInputPending
               )
-                await this.reconcileTurnInput(r.agentId, this.wakeClient).catch(() => {
-                  this.wakeupHealth.error =
-                    "Native turn input unknown; inspect the carried handback before deciding";
+                await this.pollReadback(r.agentId, client, "input", () =>
+                  this.reconcileTurnInput(r.agentId, readback),
+                ).catch((error: Error) => {
+                  this.wakeupHealth.error = `Native turn input unknown; inspect the carried handback before deciding: ${error.message}`;
                 });
             await this.autonomy.tick(this.wakeClient).catch(() => {
               this.wakeupHealth.error = "Autonomy sweep incomplete; inspect assignments and native status";
@@ -324,6 +455,174 @@ export class AllianceRuntime {
     };
     run();
     return this.wakeRound;
+  }
+  /** Timeline reads load provider runtimes. Quiet scheduler polls only need native metadata. */
+  private async pollReadback(
+    id: string,
+    paseo: PaseoApi,
+    kind: "turn" | "input" | "warm",
+    read: () => Promise<void>,
+  ) {
+    const archived = () => this.store.member(id)?.archivedAt || this.autonomy.get(id)?.phase === "archived";
+    if (archived()) {
+      this.idleReadbacks.delete(id);
+      return;
+    }
+    const native = (await readbackWithin(paseo.agents.ref(id).refresh()))?.agent;
+    if (archived() || native?.archivedAt) {
+      this.idleReadbacks.delete(id);
+      return;
+    }
+    if (!native || !Number.isFinite(Date.parse(native.updatedAt)))
+      throw new Error(`Native metadata unavailable for ${id}; no history read attempted`);
+    const member = this.store.member(id);
+    if (!member) return;
+    const pending = member.turnReadbackPending;
+    const state = this.autonomy.get(id);
+    const fingerprint = JSON.stringify([
+      // Idle collection changes residency, not the work. Both payloads retain activity stamps.
+      native.status === "closed" ? "idle" : native.status,
+      native.updatedAt,
+      (native as { lastActivityAt?: string }).lastActivityAt,
+      native.lastUserMessageAt,
+      native.activeTurn,
+      native.providerUnavailable,
+      turnGeneration(member),
+      member.lastTurnId,
+      pending && [pending.turnId, pending.startedAt, pending.endedAt, pending.outcome, pending.awaitEndEvent],
+      member.turnInputPending,
+      member.warm?.pending,
+      state?.revision,
+    ]);
+    const inactive = !native.activeTurn && ["idle", "closed", "stopped", "error"].includes(native.status);
+    if (inactive && this.idleReadbacks.get(id)?.[kind] === fingerprint) {
+      if (pending && Date.now() - pending.endedAt >= 3600000)
+        this.wakeupHealth.error = `Native turn handback for ${id} pending for ${Math.floor((Date.now() - pending.endedAt) / 3600000)}h without progress: ${pending.error}. Inspect the native chat; custody retained until new activity or explicit readback.`;
+      return;
+    }
+    if (!inactive) this.idleReadbacks.delete(id);
+    try {
+      await read();
+    } finally {
+      // Cache attempts, including unreadable history, only after reaching the read. Receipt IDs
+      // change on retries; the semantic generation above distinguishes new work from the retry.
+      if (inactive && !archived())
+        this.idleReadbacks.set(id, { ...this.idleReadbacks.get(id), [kind]: fingerprint });
+    }
+  }
+  async reconcileMaintenance(holdId: string, paseo: PaseoApi) {
+    const hold = await readMaintenanceHold(this.home);
+    if (!hold || hold.id !== holdId || hold.phase === "complete")
+      throw new Error("No matching active maintenance hold");
+    const snapshot = z
+      .object({
+        responsibilities: z.object({
+          members: z.array(Member),
+          autonomy: z.array(AutonomyRecord),
+        }),
+      })
+      .parse(hold.snapshot).responsibilities;
+    const ids = new Set(hold.targets.map((task) => task.id));
+    const members = snapshot.members.filter((member) => ids.has(member.id));
+    const autonomy = snapshot.autonomy.filter((record) => ids.has(record.agentId));
+    if (hold.reconciledAt) return { restored: [...ids], alreadyRestored: true, members, autonomy };
+    for (const before of members) {
+      const current = this.store.member(before.id);
+      if (
+        !current ||
+        current.provider !== before.provider ||
+        current.assignment !== before.assignment ||
+        current.roomId !== before.roomId ||
+        current.parentId !== before.parentId ||
+        (current.ownership?.revision ?? 0) !== before.ownerRevision ||
+        current.archivedAt
+      )
+        throw new Error(`Held task custody changed: ${before.id}; inspect maintenance ledger`);
+    }
+    for (const before of members) {
+      const current = this.store.member(before.id);
+      if (current && current.decision !== "open" && current.decision !== before.decision)
+        throw new Error(`Product decision changed during maintenance: ${before.id}`);
+      if (current?.decisionEvidence && current.decisionEvidence !== before.decisionEvidence)
+        throw new Error(`Product decision evidence changed during maintenance: ${before.id}`);
+    }
+    for (const before of autonomy) {
+      const current = this.store.autonomyOf(before.agentId);
+      if (
+        current &&
+        (current.maxRetries !== before.maxRetries ||
+          current.maxContinuations !== before.maxContinuations ||
+          current.autoArchive !== before.autoArchive ||
+          current.obligationKey !== before.obligationKey)
+      )
+        throw new Error(`Task budget or binding changed during maintenance: ${before.agentId}`);
+    }
+    for (const task of hold.targets) {
+      const reference = paseo.agents.ref(task.id);
+      const page = await reference.timeline.refetch({
+        direction: "tail",
+        limit: 100,
+        projection: "canonical",
+      });
+      if (page.error || page.gap || page.staleCursor)
+        throw new Error(`Maintenance control provenance unavailable: ${task.id}`);
+      const native = await reference.refresh();
+      registerControlAliases(hold, task, page, native?.agent);
+    }
+    hold.reconcileAudit = members.map((before) => ({
+      id: before.id,
+      originalMember: before,
+      observedMember: this.store.member(before.id),
+      originalAutonomy: autonomy.find((r) => r.agentId === before.id),
+      observedAutonomy: this.store.autonomyOf(before.id),
+    }));
+    await saveMaintenanceHold(this.home, hold);
+    this.store.atomic(() => {
+      for (const before of autonomy) {
+        const current = this.store.autonomyOf(before.agentId);
+        if (!current) throw new Error(`Held autonomy state disappeared: ${before.agentId}`);
+        this.store.saveAutonomy({ ...before, revision: current.revision + 1 }, current.revision);
+      }
+      for (const before of members)
+        this.store.updateMember(before.id, {
+          decision: before.decision,
+          decisionEvidence: before.decisionEvidence,
+          decisionBy: before.decisionBy === "Human" ? null : before.decisionBy,
+          decisionScope: before.decisionScope ?? undefined,
+          lastOutcome: before.lastOutcome,
+          lastTurnId: before.lastTurnId,
+          resultPath: before.resultPath,
+        });
+    });
+    hold.reconciledAt = new Date().toISOString();
+    await saveMaintenanceHold(this.home, hold);
+    return { restored: [...ids], alreadyRestored: false, members, autonomy };
+  }
+  async claudeAccountSessions() {
+    const connection = await this.connect(this.home, (daemon) => {
+      this.daemon = daemon;
+    });
+    try {
+      return await this.claudeSwitch.sweep(connection, connection.retireIdle);
+    } finally {
+      await connection.close();
+    }
+  }
+  async switchClaudeNow(id: string, selected: string) {
+    const connection = await this.connect(this.home, (daemon) => {
+      this.daemon = daemon;
+    });
+    try {
+      return await this.claudeSwitch.switchNow(
+        connection,
+        id,
+        selected,
+        connection.retireIdle,
+        connection.stopForAccountSwitch,
+      );
+    } finally {
+      await connection.close();
+    }
   }
   async profile(provider: string) {
     const identity = allianceProvider(provider);
@@ -361,9 +660,22 @@ export class AllianceRuntime {
       })),
     };
   }
-  async modelCatalog(roomId: string, harness: string, role: RoleName, paseo: PaseoApi) {
+  async modelCatalog(
+    roomId: string,
+    harness: string,
+    role: RoleName,
+    paseo: PaseoApi,
+    scope: "project" | "global" = "project",
+  ) {
     const room = this.store.room(roomId);
-    const result = await paseo.providers.listModels(`alliance-${harness}-${role}`, { cwd: room.cwd });
+    const provider = `alliance-${harness}-${role}`;
+    if (harness === "claude" && scope === "project") {
+      const models = await this.claudeProjectCatalog.list(this.manifest.root, this.home, room.id, role, () =>
+        this.profile(provider),
+      );
+      if (models) return models;
+    }
+    const result = await paseo.providers.listModels(provider, { cwd: room.cwd });
     if (result.error || !result.models) throw new Error(result.error || "Provider model catalog unavailable");
     return result.models;
   }
@@ -465,7 +777,7 @@ export class AllianceRuntime {
     const { policy, revision } = this.store.modelPolicy(room.id);
     const skills = skillCatalog(await effectiveSkills(cwd, profile));
     const sending = sendingRule(this.daemon);
-    return `${await readFile(join(profile.home, "root-instructions.md"), "utf8")}\n\n# Current Alliance room\nRoom: ${room.id}\nTitle: ${room.title}\nMission: ${room.mission || "Follow the Human's assignment in this conversation."}\nProject: ${room.cwd}\n${namingInstruction(room.title, profile.role)}\nDurable assignments and candidates: ${room.artifacts}\nOnly the enabled skills listed below are selected for this runtime.\nDelegate on this host using native Paseo create_agent. Its provider value is alias/model, for example alliance-codex-peer/gpt-6.1-sol. For another host, use Paseo CLI with an explicit --host and remote workspace. Cross-role aliases are distinct providers: pass settings.modeId explicitly from the target provider catalog, within the assignment permission limits. Consult list_providers for valid modes, model IDs and effort IDs; pass the selected effort explicitly.\n\n${policyInstruction(policy, revision)}\n\n${skills}\n\n${cliLine(await this.cliCommand())} Use its verify/accept commands to bind evidence to the candidate. Run --help for exact arguments.${sending ? `\n\n${sending}` : ""}`;
+    return `${await readFile(join(profile.home, "root-instructions.md"), "utf8")}\n\n# Current Alliance room\nRoom: ${room.id}\nTitle: ${room.title}\nMission: ${room.mission || "Follow the Human's assignment in this conversation."}\nProject: ${room.cwd}\n${namingInstruction(room.title, profile.role)}\nDurable assignments and candidate reports/manifests: ${room.artifacts}\nOnly the enabled skills listed below are selected for this runtime.\n${profile.role === "lens" ? "" : "Delegate on this host using native Paseo create_agent. Its provider value is alias/model, for example alliance-codex-peer/gpt-6.1-sol. For another host, use Paseo CLI with an explicit --host and remote workspace. Cross-role aliases are distinct providers: pass settings.modeId explicitly from the target provider catalog, within the assignment permission limits. Consult list_providers for valid modes, model IDs and effort IDs; pass the selected effort explicitly.\n"}\n${policyInstruction(policy, revision, profile.role)}\n\n${skills}\n\n${cliLine(await this.cliCommand())} Use its verify/accept commands to bind evidence to the candidate. Run --help for exact arguments.${sending ? `\n\n${sending}` : ""}`;
   }
   async bind(agent: PluginHookAgent) {
     const identity = allianceProvider(agent.provider);
@@ -573,7 +885,7 @@ export class AllianceRuntime {
         // Paseo leaves an omitted mode to the fresh harness, whose default may be read-only.
         modeId: input.mode ?? (input.harness === "codex" ? "auto" : undefined),
       },
-      prompt: `${input.prompt}\n\nDurable assignment: ${assignment}. Keep results in ${room.artifacts}/candidates. To hand back, run alliance-work autonomy checkpoint --phase review --reason TEXT (blocked for a decision) and end your turn; send no separate handback prompt. To wait for something, run alliance-work wait and end your turn; never sleep or poll.`,
+      prompt: `${input.prompt}\n\nDurable assignment: ${assignment}. Keep reports, manifests and hashes in ${room.artifacts}/candidates; large data stays in your scratch ($TMPDIR), its path and sha256 in the manifest. To hand back, run alliance-work autonomy checkpoint --phase review --reason TEXT (blocked for a decision) and end your turn; send no separate handback prompt. To wait for something, run alliance-work wait and end your turn; never sleep or poll.`,
     });
     return { agentId: id };
   }
@@ -767,13 +1079,40 @@ export class AllianceRuntime {
       ]),
     );
     const lifecycles = await mapStatus(members, (member) =>
-      this.lifecycle.describe(member, live.get(member.id) as LiveState, live).catch((error: Error) => ({
-        state: "held" as const,
-        blockers: [`lifecycle unknown: ${error.message}`],
-      })),
+      this.lifecycle
+        .describe(member, live.get(member.id) as LiveState, live, paseo)
+        .catch((error: Error) => ({
+          state: "held" as const,
+          blockers: [`lifecycle unknown: ${error.message}`],
+        })),
     );
     return {
       rooms: this.store.rooms(),
+      modelPolicyWarnings: this.store.rooms().flatMap(
+        (
+          room,
+        ): {
+          roomId: string;
+          reason: string;
+          revision?: number;
+          role?: string;
+          harness?: string;
+          model?: string;
+        }[] => {
+          try {
+            const { policy, revision } = this.store.modelPolicy(room.id);
+            return modelPolicyWarnings(policy).map((warning) => ({ roomId: room.id, revision, ...warning }));
+          } catch {
+            return [
+              {
+                roomId: room.id,
+                reason: "Saved model policy is unreadable; inspect Models or reset the saved list.",
+              },
+            ];
+          }
+        },
+      ),
+      keepwarm: this.store.rooms().map((room) => ({ roomId: room.id, ...this.store.keepwarm(room.id) })),
       members: members.map((member, index) => ({
         ...member,
         ...ownerState(responsibleOwner(member), members),
@@ -783,7 +1122,7 @@ export class AllianceRuntime {
         policyAcknowledged: member.policyAck?.digest === digests.get(member.provider),
         lastAcceptance: latest.get(member.id) ?? null,
         lastTurnId: member.lastTurnId ?? null,
-        decisionBy: member.decisionBy === undefined ? undefined : (member.decisionBy ?? "Human"),
+        decisionBy: member.decisionBy ?? undefined,
         decisionScope: member.decisionScope ?? null,
         lifecycle: lifecycles[index],
       })),
@@ -791,6 +1130,7 @@ export class AllianceRuntime {
       wakeups: this.wakeups.list(),
       obligations: this.obligations.list().map((o) => ({ ...o, ...ownerState(o.ownerId, members) })),
       wakeupHealth: { ...this.wakeupHealth, daemon: this.daemon },
+      lifecycleSummary: summarizeLifecycle(lifecycles),
       jobs: await mapStatus(this.store.jobs(), async (job) => ({
         ...(await observeJob(job)),
         ...ownerState(job.ownerId, members),
@@ -811,11 +1151,13 @@ export class AllianceRuntime {
     if (!deliverable(live.agent))
       throw new Error("Recipient must be idle or closed, and unarchived; no prompt sent");
     const pull = this.wakeups.pullList(id);
+    const messageId = randomUUID();
+    this.store.noteWakeMessage(id, messageId, "alliance.resume", Date.now());
     await agent
       .send(
         `${prompt}\n\nResume the existing assignment ${member.assignment || "in this conversation"}. Check prior results before repeating side effects.${pull ? `\n\n${pull}` : ""}`,
         // A turn that starts between the readback and this send is steered, not interrupted.
-        { messageId: randomUUID(), activeTurnBehavior: "steer" },
+        { messageId, activeTurnBehavior: "steer" },
       )
       .catch((error: unknown) => {
         // A provider that cannot be steered (AGY on Paseo 0.11) refuses it and receives nothing.
@@ -1056,6 +1398,7 @@ export class AllianceRuntime {
     if (startedAt === undefined)
       throw new Error("Native turn input boundary unknown; retry after native readback");
     const maintenance = new Set([
+      ...(await maintenanceMessageIds(this.home, id)),
       ...(r.wakeMessages ?? []),
       ...this.wakeups.list().flatMap((w) => (w.ownerId === id && w.messageId ? [w.messageId] : [])),
     ]);
@@ -1070,11 +1413,66 @@ export class AllianceRuntime {
     if (input.promptId) this.autonomy.prompted(id, turnId, input.promptId);
     if (input.cursor) this.store.updateMember(id, { turnInputCursor: input.cursor });
   }
+  /** Native start precedes canonical prompt recording; reconcile real input before the next sweep. */
+  async reconcileWarmInput(id: string, paseo: PaseoApi) {
+    const member = this.store.member(id);
+    const pending = member?.warm?.pending;
+    if (!pending?.turnId || pending.startedAt === undefined) return;
+    const input = await this.readTurnInput(
+      id,
+      pending.turnId,
+      pending.startedAt,
+      new Set(member?.warm?.messageIds ?? []),
+      paseo,
+    );
+    if (input.promptId && this.promoteWarmTurn(id, pending.turnId, pending.startedAt))
+      this.autonomy.prompted(id, pending.turnId, input.promptId);
+  }
+  private async prepareWarmControl(id: string, paseo: PaseoApi) {
+    await this.reconcileWarmInput(id, paseo);
+    if (this.store.member(id)?.warm?.pending)
+      throw new Error("Keepwarm input is still pending; cannot change the previous turn's assignment");
+  }
+  async startAutonomy(id: string, options: Parameters<Autonomy["start"]>[1], paseo: PaseoApi) {
+    await this.prepareWarmControl(id, paseo);
+    return this.autonomy.start(id, options);
+  }
+  async checkpoint(
+    id: string,
+    phase: Parameters<Autonomy["checkpoint"]>[1],
+    reason: string,
+    turnId: string | undefined,
+    paseo: PaseoApi,
+  ) {
+    await this.prepareWarmControl(id, paseo);
+    return this.autonomy.checkpoint(id, phase, reason, turnId);
+  }
+  private promoteWarmTurn(id: string, turnId: string | null, generation: number | undefined) {
+    const member = this.store.member(id);
+    const warm = member?.warm;
+    if (!member || !warm?.pending || warm.pending.startedAt !== generation || warm.pending.turnId !== turnId)
+      return false;
+    this.store.updateMember(id, {
+      turnStartedAt: generation,
+      turnInputCursor: undefined,
+      warm: { ...warm, pending: undefined },
+    });
+    if (generation !== undefined) this.store.noteTurnWake(id, turnId, generation);
+    this.autonomy.started(id, turnId);
+    if (!this.autonomy.carrying(id))
+      this.store.updateMember(id, {
+        ...newTurn(turnId),
+        turnReadbackPending: member.turnReadbackPending,
+      });
+    return true;
+  }
   async startTurn(agent: PluginHookAgent, turnId: string | null, paseo?: PaseoApi) {
+    if (await heldTask(this.home, agent.id)) return;
+    this.idleReadbacks.delete(agent.id);
     let turnStartedAt = Date.now();
     await this.bind(agent);
     const previous = this.autonomy.get(agent.id);
-    const previousStartedAt = this.store.member(agent.id)?.turnStartedAt;
+    const previousStartedAt = turnGeneration(this.store.member(agent.id));
     const duplicate = Boolean(turnId && previous?.turnId === turnId && !previous.outcome);
     let newGeneration = false;
     if (duplicate && !paseo) return;
@@ -1089,7 +1487,7 @@ export class AllianceRuntime {
       if (
         current?.revision !== previous?.revision ||
         current?.turnId !== previous?.turnId ||
-        this.store.member(agent.id)?.turnStartedAt !== previousStartedAt
+        turnGeneration(this.store.member(agent.id)) !== previousStartedAt
       )
         return;
       const native = live?.agent.activeTurn;
@@ -1110,17 +1508,55 @@ export class AllianceRuntime {
       // Native start precedes canonical prompt recording, even if this hook was delivered late.
       if (native?.turnId === turnId && Number.isFinite(since)) turnStartedAt = since;
     }
+    const warm = this.store.member(agent.id)?.warm;
+    if (warm?.pending) {
+      // Native start precedes prompt recording. Defer work inference until canonical input proves
+      // whether this was our ping or a real prompt that raced its send. Persist across reloads.
+      this.store.updateMember(agent.id, {
+        warm: { ...warm, pending: { ...warm.pending, turnId, startedAt: turnStartedAt } },
+      });
+      return;
+    }
     this.store.updateMember(agent.id, {
       turnStartedAt,
       turnInputCursor: undefined,
       turnReadbackPending: undefined,
     });
+    this.store.noteTurnWake(agent.id, turnId, turnStartedAt);
     this.autonomy.started(agent.id, turnId, newGeneration);
     // A turn the plugin's wake batch or the agent itself started keeps the phase it found, and the
     // handback before it stands with its decision, unless the turn checkpoints (autonomy.checkpoint).
-    if (this.autonomy.carrying(agent.id)) return;
-    // Any other turn is new work: the previous decision no longer applies.
-    this.store.updateMember(agent.id, newTurn(turnId));
+    if (!this.autonomy.carrying(agent.id)) {
+      // Any other turn is new work: the previous decision no longer applies.
+      this.store.updateMember(agent.id, newTurn(turnId));
+    }
+    if (paseo && turnId) {
+      // A single bounded read can identify an already-recorded initial prompt. End readback
+      // refines an unknown marker when the canonical input arrives after the start hook.
+      try {
+        const page = await paseo.agents
+          .ref(agent.id)
+          .timeline.refetch({ direction: "tail", limit: 100, projection: "canonical" });
+        if (page.error || page.gap || page.staleCursor || page.hasOlder) return;
+        const currentWake = this.store.member(agent.id);
+        if (currentWake?.turnStartedAt !== turnStartedAt || currentWake.turnWake?.turnId !== turnId) return;
+        const entry = page.entries.find(
+          (entry) =>
+            entry.turnId === turnId &&
+            Date.parse(entry.timestamp) >= turnStartedAt &&
+            entry.item.type === "user_message",
+        );
+        if (entry?.item.type === "user_message")
+          this.store.noteTurnWake(
+            agent.id,
+            turnId,
+            turnStartedAt,
+            entry.item.clientMessageId ?? entry.item.messageId,
+          );
+      } catch {
+        /* Measurement never changes native start acceptance. */
+      }
+    }
   }
   /** Paseo 0.15 omits hook history. Read only messages attributed to the observed turn generation. */
   private async turnMessages(
@@ -1150,11 +1586,13 @@ export class AllianceRuntime {
           break;
         }
         if (timestamp > endedAt) continue;
-        if (!entry.turnId && (entry.item.type === "user_message" || entry.item.type === "assistant_message"))
-          throw new Error("Native turn history message has no turn identity");
+        const safetyInput =
+          entry.item.type === "user_message" ||
+          entry.item.type === "assistant_message" ||
+          entry.item.type === "tool_call";
+        if (!entry.turnId && safetyInput) throw new Error("Native turn history message has no turn identity");
         if (entry.turnId !== turnId) continue;
-        if (entry.item.type === "user_message" || entry.item.type === "assistant_message")
-          messages.unshift(entry.item);
+        if (safetyInput) messages.unshift(entry.item);
       }
       if (boundary || !page.hasOlder) return messages;
       if (!page.startCursor || (cursor && page.startCursor.seq >= cursor.seq))
@@ -1165,9 +1603,10 @@ export class AllianceRuntime {
   }
   async reconcileTurnReadback(id: string, paseo: PaseoApi) {
     const member = this.store.member(id);
+    if (member?.archivedAt || this.autonomy.get(id)?.phase === "archived") return;
     const pending = member?.turnReadbackPending;
     if (!pending) return;
-    if (pending.startedAt !== member.turnStartedAt) return;
+    if (pending.startedAt !== turnGeneration(member)) return;
     if (pending.awaitEndEvent) throw new Error(pending.error);
     await this.endTurn(pending.agent, pending.turnId, pending.outcome, undefined, paseo, pending);
   }
@@ -1179,12 +1618,55 @@ export class AllianceRuntime {
     paseo?: PaseoApi,
     retry?: TurnReadbackReceipt,
   ) {
-    const endedAt = retry?.endedAt ?? Date.now();
+    if (await heldTask(this.home, agent.id)) return;
+    // A prompt the provider refused before any turn began (signed out) has no turn to read back or
+    // record. It only counts toward holding the member; the daemon may repeat it every few seconds.
+    if (!turnId && outcome.kind === "failed" && providerSignIn(outcome.error.message)) {
+      this.signIn.failed(agent.id, outcome.error.message);
+      return;
+    }
+    const observedEndAt = retry?.endedAt ?? Date.now();
     const before = this.store.member(agent.id);
+    if (before?.archivedAt) return;
+    if (!retry) this.idleReadbacks.delete(agent.id);
     await this.bind(agent);
     const observed = before ?? this.store.member(agent.id);
-    const generation = retry ? retry.startedAt : observed?.turnStartedAt;
+    const generation = retry ? retry.startedAt : turnGeneration(observed);
+    const failureId = createHash("sha256")
+      .update(`${agent.id}:${turnId}:${generation}:failed-unreadable`)
+      .digest("hex")
+      .slice(0, 24);
+    const failurePath = observed
+      ? join(this.store.room(observed.roomId).artifacts, "turns", `${failureId}.json`)
+      : undefined;
+    if (
+      !retry &&
+      timeline === undefined &&
+      outcome.kind === "failed" &&
+      turnId &&
+      observed &&
+      !observed.turnReadbackPending &&
+      ((observed.lastTurnId === turnId &&
+        observed.lastOutcome === "failed" &&
+        observed.limited &&
+        observed.resultPath) ||
+        (this.autonomy.get(agent.id)?.turnId === turnId &&
+          this.autonomy.get(agent.id)?.outcome === "failed" &&
+          failurePath &&
+          (await usable(failurePath, constants.R_OK))))
+    )
+      return;
+    const previous = observed?.turnReadbackPending;
+    const endedAt =
+      retry?.endedAt ??
+      (previous?.turnId === turnId && previous.startedAt === generation && !previous.awaitEndEvent
+        ? previous.endedAt
+        : observed?.lastTurnId === turnId && observed.lastOutcome === "failed" && observed.limited
+          ? observed.lastTurnEndedAt
+          : undefined) ??
+      observedEndAt;
     let readbackId: string | undefined;
+    let nativeAgent: WarmAgent | undefined;
     const ownsReadback = () =>
       !readbackId || this.store.member(agent.id)?.turnReadbackPending?.id === readbackId;
     const clearReadback = () => {
@@ -1192,7 +1674,7 @@ export class AllianceRuntime {
     };
     if (timeline === undefined) {
       if (retry && this.store.member(agent.id)?.turnReadbackPending?.id !== retry.id) return;
-      if (this.store.member(agent.id)?.turnStartedAt !== generation) return;
+      if (turnGeneration(this.store.member(agent.id)) !== generation) return;
       const pending: TurnReadbackReceipt = {
         id: randomUUID(),
         agent,
@@ -1204,11 +1686,23 @@ export class AllianceRuntime {
       };
       readbackId = pending.id;
       this.store.updateMember(agent.id, { turnReadbackPending: pending });
+      const currentGeneration = () => {
+        const current = this.store.member(agent.id);
+        return (
+          turnGeneration(current) === generation &&
+          !current?.archivedAt &&
+          current?.lastTurnId === observed?.lastTurnId &&
+          current?.turnReadbackPending?.id === pending.id
+        );
+      };
+      let limit: { error: string; promptId?: string; account?: string } | undefined;
       try {
         if (!paseo || !turnId || generation === undefined)
           throw new Error("Native turn history needs the observed turn identity and start");
-        const snapshot = await paseo.agents.ref(agent.id).refresh();
+        const snapshot = await readbackWithin(paseo.agents.ref(agent.id).refresh());
         if (!snapshot) throw new Error("Native agent unavailable during turn readback");
+        if (snapshot.agent.archivedAt) return;
+        nativeAgent = snapshot.agent;
         if (
           snapshot.agent.activeTurn ||
           ["running", "starting", "initializing"].includes(snapshot.agent.status)
@@ -1216,22 +1710,109 @@ export class AllianceRuntime {
           pending.awaitEndEvent = true;
           throw new Error("Completion observed an active native turn; awaiting its own end event");
         }
-        timeline = await this.turnMessages(agent.id, turnId, generation, endedAt, paseo);
+        if (
+          snapshot.agent.providerUnavailable ||
+          !["idle", "error", "closed"].includes(snapshot.agent.status)
+        )
+          throw new Error("Native turn inactivity could not be verified; retry after native readback");
+        if (!currentGeneration()) return;
+        const until = outcome.kind === "failed" ? quotaReset(outcome.error.message, endedAt) : null;
+        if (until !== null && outcome.kind === "failed") {
+          const account =
+            allianceProvider(agent.provider)?.harness === "claude"
+              ? ((await currentClaudeAccount(this.home, agent.id)) ?? undefined)
+              : undefined;
+          if (!currentGeneration()) return;
+          const state = this.autonomy.get(agent.id);
+          if ((state?.turnId ?? observed?.lastTurnId) !== turnId) return;
+          limit = { error: outcome.error.message, promptId: state?.workPromptId, account };
+        }
+        timeline = await readbackWithin(this.turnMessages(agent.id, turnId, generation, endedAt, paseo));
       } catch (error) {
         pending.error = error instanceof Error ? error.message : "history read failed";
         if (this.store.member(agent.id)?.turnReadbackPending?.id === pending.id)
           this.store.updateMember(agent.id, { turnReadbackPending: pending });
+        const current = this.store.member(agent.id);
+        if (limit && current && failurePath && currentGeneration()) {
+          // No successful handback was verified; partial effects may still exist. Preserve the
+          // unreadable failure receipt so its custody survives the retry and a later start.
+          await writeAtomic(
+            failurePath,
+            `${JSON.stringify({ agentId: agent.id, turnId, outcome, final: null, readback: { status: "failed-unreadable", receipt: pending } }, null, 2)}\n`,
+          );
+          if (!currentGeneration()) return;
+          this.finishTurn(
+            agent.id,
+            turnId,
+            "failed",
+            limit.error,
+            failurePath,
+            endedAt,
+            limit.promptId,
+            limit.account,
+          );
+          clearReadback();
+          await announceAccountLimit(this.store, this.wakeups, this.home, agent.id, endedAt);
+          return;
+        }
         this.wakeupHealth.error = `Turn handback pending: ${pending.error}`;
         throw error;
       }
       // A late end hook or history request must not overwrite a new turn, including reused ordinals.
       const live = this.store.member(agent.id);
       if (
-        live?.turnStartedAt !== generation ||
+        turnGeneration(live) !== generation ||
         live?.lastTurnId !== observed?.lastTurnId ||
         live?.turnReadbackPending?.id !== pending.id
       )
         return;
+    }
+    if (!nativeAgent && paseo) {
+      try {
+        nativeAgent = (await paseo.agents.ref(agent.id).refresh())?.agent;
+      } catch {
+        /* Missing native usage cannot supply a keepwarm baseline. */
+      }
+    }
+    const warmMember = this.store.member(agent.id);
+    if (!warmMember || turnGeneration(warmMember) !== generation || !ownsReadback()) return;
+    if (warmMember.warm?.pending?.turnId !== undefined && warmMember.warm.pending.turnId !== turnId) return;
+    const warmInputs = timeline.filter((item) => item.type === "user_message");
+    let warmComplete = false;
+    try {
+      warmComplete = this.wakeups?.keepwarm.complete(agent.id, timeline, nativeAgent, endedAt) ?? false;
+    } catch (error) {
+      this.wakeupHealth.error = `Keepwarm completion failed: ${error instanceof Error ? error.message : String(error)}`;
+      console.error(this.wakeupHealth.error);
+    }
+    // Optional cache accounting must not turn a proven maintenance prompt into real work on error.
+    if (
+      warmComplete ||
+      (warmInputs.length > 0 &&
+        warmInputs.every((item) =>
+          warmMember.warm?.messageIds.includes(item.clientMessageId ?? item.messageId ?? ""),
+        ))
+    ) {
+      clearReadback();
+      return;
+    }
+    const warmPending = warmMember.warm?.pending;
+    if (warmPending && warmPending.startedAt === generation && warmPending.turnId === turnId) {
+      if (!timeline.some((item) => item.type === "user_message")) {
+        const pending: TurnReadbackReceipt = {
+          id: readbackId ?? randomUUID(),
+          agent,
+          turnId,
+          outcome,
+          startedAt: generation,
+          endedAt,
+          error: "Keepwarm prompt identity unknown; native readback required",
+        };
+        this.store.updateMember(agent.id, { turnReadbackPending: pending });
+        throw new Error(pending.error);
+      }
+      // A real prompt won the race, or was steered into the ping. It retains ordinary authority.
+      this.promoteWarmTurn(agent.id, turnId, generation);
     }
     let inputUnknown = false;
     if (paseo)
@@ -1241,7 +1822,7 @@ export class AllianceRuntime {
       });
     const member = this.store.member(agent.id);
     if (!member) return;
-    if (member.turnStartedAt !== generation || !ownsReadback()) return;
+    if (turnGeneration(member) !== generation || !ownsReadback()) return;
     const room = this.store.room(member.roomId);
     const eventId = createHash("sha256")
       .update(
@@ -1256,6 +1837,14 @@ export class AllianceRuntime {
     // still need the separate attribution check, especially for promptless autonomous turns.
     const start = timeline.findLastIndex((item) => item.type === "user_message");
     const prompt = timeline[start];
+    const firstPrompt = timeline.find((item) => item.type === "user_message");
+    if (firstPrompt?.type === "user_message" && generation !== undefined)
+      this.store.noteTurnWake(
+        agent.id,
+        turnId,
+        generation,
+        firstPrompt.clientMessageId ?? firstPrompt.messageId,
+      );
     const own = timeline.findLast(
       (item, index): item is Extract<AgentTimelineItem, { type: "assistant_message" }> =>
         index > start && item.type === "assistant_message",
@@ -1318,6 +1907,7 @@ export class AllianceRuntime {
         promptId,
         maintenance: [
           ...new Set([
+            ...(await maintenanceMessageIds(this.home, agent.id)),
             ...(this.autonomy.get(agent.id)?.wakeMessages ?? []),
             ...this.wakeups
               .list()
@@ -1339,11 +1929,23 @@ export class AllianceRuntime {
       clearReadback();
       return;
     }
+    // The account a provider limit ran on, read while its process is still verifiably this one.
+    // Without proof the limit records none and keeps holding the whole harness.
+    const account = notice ? ((await currentClaudeAccount(this.home, agent.id)) ?? undefined) : undefined;
     const latest = this.store.member(agent.id);
     if (latest?.turnStartedAt !== generation || latest?.lastTurnId !== member.lastTurnId || !ownsReadback())
       return;
-    this.finishTurn(agent.id, turnId, kind, error, path, endedAt, promptId);
+    if (this.finishTurn(agent.id, turnId, kind, error, path, endedAt, promptId, account)) {
+      try {
+        this.wakeups?.keepwarm.baseline(agent.id, nativeAgent, endedAt);
+      } catch (error) {
+        this.wakeupHealth.error = `Keepwarm baseline failed: ${error instanceof Error ? error.message : String(error)}`;
+        console.error(this.wakeupHealth.error);
+      }
+    }
     clearReadback();
+    if (this.store.member(agent.id)?.limited)
+      await announceAccountLimit(this.store, this.wakeups, this.home, agent.id, endedAt);
   }
   private finishTurn(
     id: string,
@@ -1353,6 +1955,7 @@ export class AllianceRuntime {
     path: string,
     now: number,
     promptId?: string,
+    account?: string,
   ) {
     const current = this.store.member(id);
     // A turn that kept the phase and recorded no checkpoint leaves the member's handback standing:
@@ -1360,23 +1963,44 @@ export class AllianceRuntime {
     // only if it ends as such (autonomy.ended).
     const carried = this.autonomy.carrying(id) && this.autonomy.get(id)?.turnId === turnId;
     if (carried || !current?.lastTurnId || current.lastTurnId === turnId) {
+      if (kind === "completed" && current)
+        this.store.updateMember(id, {
+          lastSuccessfulTurn: { endedAt: now, provider: current.provider, model: current.launchModel },
+        });
       const result = { lastOutcome: kind, resultPath: path, lastTurnEndedAt: now };
       if (!carried) this.store.updateMember(id, result);
-      this.autonomy.ended(id, turnId, kind, error, promptId);
+      this.autonomy.ended(id, turnId, kind, error, promptId, now);
+      if (kind === "completed") this.signIn.recovered(id);
+      else if (kind === "failed" && providerSignIn(error)) this.signIn.failed(id, error ?? "");
       if (carried && !this.autonomy.carrying(id))
         this.store.updateMember(id, { ...newTurn(turnId), ...result });
       // Recorded after the assignment saw the limit that held its harness before this turn.
       const until = quotaReset(error, now);
       this.store.updateMember(id, {
-        limited: until === null ? undefined : { until, messageId: promptId ?? null },
+        limited: until === null ? undefined : { until, messageId: promptId ?? null, account },
       });
+      return true;
     }
+    return false;
   }
-  /** Keep an agent open regardless of acceptance. Its owner chain, the Human or itself may set it. */
-  keep(id: string, keep: boolean, actorId: string | null) {
+  /**
+   * Keep an agent open past its acceptance. Its owner chain, the Human or itself may set it. It lapses
+   * after `hours` (default a day) or when its keeper is archived; an acceptance by the same decider
+   * lifts it unless that acceptance asks to keep.
+   */
+  keep(id: string, keep: boolean, actorId: string | null, options: { reason?: string; hours?: number } = {}) {
     if (actorId !== id) authorizeDecision(this.store, id, actorId);
+    const now = Date.now();
+    const hours = Math.min(options.hours ?? KEEP_DEFAULT_HOURS, KEEP_MAX_HOURS);
     this.store.updateMember(id, {
-      keep: keep ? { by: actorId ?? "Human", at: new Date().toISOString() } : undefined,
+      keep: keep
+        ? {
+            by: actorId ?? "Human",
+            at: new Date(now).toISOString(),
+            ...(options.reason ? { reason: options.reason } : {}),
+            until: new Date(now + hours * 3600000).toISOString(),
+          }
+        : undefined,
     });
     return { saved: true as const };
   }
@@ -1390,6 +2014,12 @@ export class AllianceRuntime {
     paseo?: PaseoApi,
     integrationPlan?: unknown,
     analysisRoot?: string,
+    options: {
+      keep?: boolean;
+      rework?: string;
+      forHuman?: boolean;
+      source?: z.infer<typeof HumanDecisionSource>;
+    } = {},
   ) {
     // CLIs before 0.1.16 never say who decides. Treating that as the Human would let any agent
     // holding an old release path accept itself, so refuse and name the current command.
@@ -1400,17 +2030,40 @@ export class AllianceRuntime {
     const member = this.store.member(id);
     if (!member) throw new Error("Unknown Alliance member");
     authorizeDecision(this.store, id, actorId);
+    if (options.rework && decision !== "rejected")
+      throw new Error("Rework is sent with a rejection (reject --rework); an accepted handback has none");
+    if (options.keep && decision !== "accepted") throw new Error("--keep applies to accept only");
+    if (options.source && !options.forHuman) throw new Error("--source requires --for-human");
+    if (options.forHuman && !options.source) throw new Error("--for-human requires a native message source");
+    const assertHQ = () => {
+      if (!options.forHuman) return;
+      const hq = actorId ? this.store.member(actorId) : null;
+      if (hq?.role !== "hq" || hq.archivedAt || hq.roomId !== member.roomId)
+        throw new Error("Only a live HQ in this room may attest a Human decision");
+    };
+    assertHQ();
     // A decision covers the turn the owner reviewed. Work still running is not reviewable yet, but a
     // turn that only keeps the phase leaves the handback it found standing (autonomy.carrying).
     const turn = member.lastTurnId ?? null;
+    const generation = member.turnStartedAt ?? null;
+    const resultPath = member.resultPath ?? null;
+    if (resultPath) await noLinks(resultPath);
+    const resultHash = resultPath
+      ? createHash("sha256")
+          .update(await readFile(resultPath))
+          .digest("hex")
+      : null;
     const midTurn = async () => {
       if (this.store.member(id)?.turnReadbackPending)
         throw new Error("Native turn handback awaits readback; retry after history recovers");
       if (!paseo) {
+        if (this.store.member(id)?.warm?.pending)
+          throw new Error("Keepwarm native input awaits reconciliation");
         if (this.store.member(id)?.turnInputPending)
           throw new Error("Native turn input awaits reconciliation");
         return false;
       }
+      if (this.store.member(id)?.warm?.pending) await this.reconcileWarmInput(id, paseo);
       let live: Awaited<ReturnType<ReturnType<PaseoApi["agents"]["ref"]>["refresh"]>>;
       try {
         live = await paseo.agents.ref(id).refresh();
@@ -1432,10 +2085,14 @@ export class AllianceRuntime {
       return (
         (running && !this.autonomy.carrying(id)) ||
         (current?.lastTurnId ?? null) !== turn ||
+        (current?.turnStartedAt ?? null) !== generation ||
         current?.resultPath !== member.resultPath
       );
     };
     if (await midTurn()) throw new Error("Agent is mid-turn; decide after it hands back");
+    const source = options.forHuman
+      ? await this.humanDecisionSource(actorId as string, options.source, paseo)
+      : undefined;
     const room = this.store.room(member.roomId);
     if (analysisRoot && (decision !== "accepted" || claim !== undefined || integrationPlan !== undefined))
       throw new Error("Analysis root is for technical analysis acceptance only, never product acceptance");
@@ -1487,7 +2144,12 @@ export class AllianceRuntime {
       {
         agentId: id,
         decision,
-        decidedBy: actorId ?? "Human",
+        decidedBy: actorId,
+        turnId: turn,
+        turnStartedAt: generation,
+        resultPath,
+        resultHash,
+        ...(source ? { authorizedBy: "Human", source } : {}),
         candidate,
         evidence,
         analysisRoot,
@@ -1506,22 +2168,40 @@ export class AllianceRuntime {
       await validateEvidence(evidence, member.cwd ?? room.cwd, candidate);
       if (integration) await validateIntegrationProof(integration, report);
     }
+    if (
+      source &&
+      JSON.stringify(await this.humanDecisionSource(actorId as string, options.source, paseo)) !==
+        JSON.stringify(source)
+    )
+      throw new Error("Human decision source changed during review; inspect the native chat again");
     // Authority or the turn may have changed while evidence was validated. Recheck, then write
     // with no await in between so a later turn that is new work clears this decision.
     if (await midTurn()) throw new Error("Agent started a new turn; review it before deciding");
     if (product && report && verificationArtifact)
       validateIntegrationCurrentSync(report, integration, [verificationArtifact], this.manifest.root);
     authorizeDecision(this.store, id, actorId);
+    assertHQ();
     assertContributors();
     if (
       (this.store.member(id)?.lastTurnId ?? null) !== turn ||
+      (this.store.member(id)?.turnStartedAt ?? null) !== generation ||
       this.store.member(id)?.resultPath !== member.resultPath
     )
       throw new Error("Agent started a new turn; review it before deciding");
+    if (resultPath && createHash("sha256").update(readFileSync(resultPath)).digest("hex") !== resultHash)
+      throw new Error("Handback changed during review; read it again before deciding");
     // Publish only after all checks. No failed review is visible as a historical acceptance.
     const temporary = `${path}.${randomUUID()}.tmp`;
     writeFileSync(temporary, record, { mode: 0o600, flag: "wx" });
     renameSync(temporary, path);
+    // The keep this decider set before deciding was a step of the review, not a standing request.
+    // Someone else's keep (the Human's included) and one set later are theirs to lift.
+    const keep = this.store.member(id)?.keep;
+    const decider = actorId ?? "Human";
+    const lifted =
+      decision === "accepted" && !options.keep && keep && keep.by === decider && decider !== "Human"
+        ? Date.parse(keep.at) <= Date.parse(at)
+        : false;
     this.store.updateMember(id, {
       decision,
       decisionEvidence: path,
@@ -1536,10 +2216,115 @@ export class AllianceRuntime {
             dispositionDigest: createHash("sha256").update(record).digest("hex"),
           }
         : undefined,
+      ...(lifted ? { keep: undefined } : {}),
+      // `accept --keep` keeps an agent that has no keep of its own yet.
+      ...(decision === "accepted" && options.keep && !keep
+        ? {
+            keep: {
+              by: decider,
+              at,
+              reason: "kept at acceptance (accept --keep)",
+              until: new Date(Date.parse(at) + KEEP_DEFAULT_HOURS * 3600000).toISOString(),
+            },
+          }
+        : {}),
     });
     this.wakeups.decided(id);
+    const settled = decision === "accepted" ? this.wakeups.settleAccepted(id) : [];
     this.autonomy.decided(id);
-    return { saved: true as const };
+    const delivered =
+      decision === "rejected" && options.rework
+        ? await this.sendRework(id, actorId, evidence, options.rework, paseo)
+        : undefined;
+    return {
+      saved: true as const,
+      ...(source
+        ? {
+            authorizedBy: "Human" as const,
+            source: { messageId: source.messageId, timestamp: source.timestamp },
+          }
+        : {}),
+      ...(lifted ? { keepLifted: true as const } : {}),
+      ...(settled.length ? { settledWakeups: settled } : {}),
+      ...(delivered ? { rework: delivered } : {}),
+    };
+  }
+  /** Native history proves the cited message exists; HQ attests who authorized the decision. */
+  private async humanDecisionSource(actorId: string, input: unknown, paseo?: PaseoApi) {
+    const source = HumanDecisionSource.parse(input);
+    if (!paseo) throw new Error("Native history is required to validate a Human decision source");
+    if (Date.parse(source.timestamp) > Date.now()) throw new Error("Human decision source is in the future");
+    const controls = new Set([
+      ...(this.store.member(actorId)?.pluginMessages ?? []).map((message) => message.id),
+      ...(await maintenanceMessageIds(this.home, actorId)),
+      ...(this.autonomy.get(actorId)?.wakeMessages ?? []),
+      ...this.wakeups.list().flatMap((w) => (w.ownerId === actorId && w.messageId ? [w.messageId] : [])),
+    ]);
+    let cursor: { epoch: string; seq: number } | undefined;
+    for (let pageNumber = 0; pageNumber < 20; pageNumber++) {
+      const page = await paseo.agents.ref(actorId).timeline.refetch({
+        direction: cursor ? "before" : "tail",
+        cursor,
+        limit: 100,
+        projection: "canonical",
+      });
+      if (page.error || page.gap || page.staleCursor || (cursor && page.epoch !== cursor.epoch))
+        throw new Error("Native timeline unavailable or changed while validating Human decision source");
+      for (const entry of page.entries) {
+        const item = entry.item;
+        if (
+          item.type !== "user_message" ||
+          (item.messageId !== source.messageId && item.clientMessageId !== source.messageId)
+        )
+          continue;
+        if (entry.timestamp !== source.timestamp) continue;
+        if (
+          [item.messageId, item.clientMessageId].some((id) => id && controls.has(id)) ||
+          /^\s*(?:<paseo-system\b|<task-notification\b|<system-reminder\b|\[piggery\]|Alliance\s|Account maintenance\b|The Human-authorized\b|<environment_context\b|<turn_aborted\b|<user_instructions\b|<subagent\b)/i.test(
+            item.text,
+          )
+        )
+          throw new Error("Human decision source is a known agent or system control message");
+        return {
+          ...source,
+          agentId: actorId,
+          turnId: entry.turnId ?? null,
+          digest: createHash("sha256").update(item.text).digest("hex"),
+          attestation: "HQ attests Human authorization",
+          validation: "native-user-message",
+        };
+      }
+      if (!page.hasOlder) break;
+      if (!page.startCursor || (cursor && page.startCursor.seq >= cursor.seq))
+        throw new Error("Native timeline cursor unavailable while validating Human decision source");
+      cursor = page.startCursor;
+    }
+    throw new Error("Human decision source message ID and timestamp were not found in HQ native history");
+  }
+  /**
+   * The rework prompt of a rejection goes to the child as an ordinary prompt, not as a wakeup: a
+   * wakeup batch keeps the phase it finds, so it would not reopen the rejected handback, and it
+   * wraps the text as a reminder to acknowledge. The decision is already recorded; a child that
+   * cannot take the prompt now (closed beyond loading, permission pending) is reported, not undone.
+   */
+  private async sendRework(
+    id: string,
+    actorId: string | null,
+    reason: string,
+    rework: string,
+    paseo?: PaseoApi,
+  ) {
+    try {
+      if (!paseo) throw new Error("No native connection to send the rework");
+      await this.resume(
+        id,
+        `${actorId ?? "An unidentified caller"} rejected your handback.\nReason: ${reason}\nRework requested: ${rework}`,
+        paseo,
+      );
+      return { sent: true as const };
+    } catch (error) {
+      return { sent: false as const, error: error instanceof Error ? error.message : String(error) };
+    }
   }
   async close() {
     this.closing = true;

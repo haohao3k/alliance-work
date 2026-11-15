@@ -171,7 +171,9 @@ export async function claudeSkillPlugin(home, bundle) {
 
 export function skillCatalog(bundle) {
   if (!bundle.skills.length) return "No skills are enabled for this runtime.";
-  return `Enabled skills (revision ${bundle.digest}):\n${bundle.skills.map((skill) => `- ${skill.name}: ${skill.description}\n  Read ${join(skill.directory, "SKILL.md")} and resolve its resources relative to that file.`).join("\n")}\nUse a skill when its trigger fits the task. The Lead chooses the approach; discovery does not mandate every skill on every task.`;
+  // Skills live in different directories (the role's home, the project), so each entry keeps its own
+  // path; the instruction to read it and resolve resources relative to it is stated once.
+  return `Enabled skills (revision ${bundle.digest}). Each entry's second line is the path of its SKILL.md: read that file when the trigger fits and resolve its resources relative to it.\n${bundle.skills.map((skill) => `- ${skill.name}: ${skill.description}\n  ${join(skill.directory, "SKILL.md")}`).join("\n")}\nUse a skill when its trigger fits the task. The Lead chooses the approach; discovery does not mandate every skill on every task.`;
 }
 
 export async function registerSkill(cwd, directory) {

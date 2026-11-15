@@ -6,6 +6,7 @@ import type {
   ProviderRegistration,
   ProviderSessionConfig,
 } from "@getpaseo/plugin/server/provider";
+import { allowedModel, refusedModel } from "../shared/model-policy";
 // Keep the pinned Paseo wire protocol, process supervision and transcript implementation.
 import { createAntigravityProvider } from "./agy-native/provider";
 import { effectiveSkills } from "./bundled-skills.mjs";
@@ -122,16 +123,22 @@ export function createAllianceAgyProvider(
             ...event,
             catalog: {
               ...event.catalog,
-              models: event.catalog.models.map((model): ProviderModel => {
-                const effort = agyEffort(model.id);
-                return effort
-                  ? {
-                      ...model,
-                      thinkingOptions: [{ id: effort, label: effort }],
-                      defaultThinkingOptionId: effort,
-                    }
-                  : model;
-              }),
+              defaultModel:
+                event.catalog.defaultModel && allowedModel("agy", event.catalog.defaultModel)
+                  ? event.catalog.defaultModel
+                  : undefined,
+              models: event.catalog.models
+                .filter((model) => allowedModel("agy", model.id))
+                .map((model): ProviderModel => {
+                  const effort = agyEffort(model.id);
+                  return effort
+                    ? {
+                        ...model,
+                        thinkingOptions: [{ id: effort, label: effort }],
+                        defaultThinkingOptionId: effort,
+                      }
+                    : model;
+                }),
             },
           };
         if (event.type === "session.config") {
@@ -159,6 +166,8 @@ export function createAllianceAgyProvider(
         },
         async send(input) {
           if (input.type === "session.open") {
+            if (!input.config.model || !allowedModel("agy", input.config.model))
+              throw new Error(refusedModel(input.config.model ?? "(omitted model)"));
             if (sessions.has(input.sessionId)) throw new Error("Duplicate AGY session");
             if (
               input.config.thinkingOption &&
@@ -175,8 +184,11 @@ export function createAllianceAgyProvider(
                 env: { ...input.config.env, ALLIANCE_AGY_SESSION_DIR: session.path },
               },
             };
-          } else if (input.type === "session.configure" && input.changes.thinkingOption) {
-            throw new Error("Select the desired AGY model ID to change effort");
+          } else if (input.type === "session.configure") {
+            if (input.changes.model !== undefined && !allowedModel("agy", input.changes.model))
+              throw new Error(refusedModel(input.changes.model));
+            if (input.changes.thinkingOption)
+              throw new Error("Select the desired AGY model ID to change effort");
           }
           await inner.send(input);
           if (input.type === "session.close") {

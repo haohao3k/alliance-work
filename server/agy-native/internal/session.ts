@@ -1,3 +1,5 @@
+// Modified by Alliance Work: Contain cleanup failures and retain proven completed responses after stale interruption.
+// Upstream: @getpaseo/server 0.12.0, Apache-2.0; see ../LICENSE and ../provenance.json.
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import type {
@@ -20,8 +22,13 @@ import { AntigravityError, diagnostic, type Frame, type Step } from "./wire.js";
 const persistenceSchema = z
   .object({ version: z.literal(1), data: z.object({ conversationId: z.string().min(1) }).strict() })
   .strict();
+const interruptedStream = "The stream was interrupted. Please continue the task you were working on.";
 interface Turn {
   id: string;
+  stepFloor: number;
+  latestStep?: Step;
+  hasCurrentInput: boolean;
+  hasCurrentError: boolean;
   text: Map<number, string>;
   usageSteps: Set<number>;
   tools: Map<string, Extract<ProviderTimelineItem, { type: "tool_call" }>>;
@@ -47,6 +54,7 @@ export class Session {
   private state: State = { type: "dormant" };
   private config: ProviderSessionConfig;
   private conversationId: string | null;
+  private highestStepIndex = -1;
   private firstMessage: boolean;
   private readonly promptFiles = new PromptFiles();
   private readonly reportedDenials = new Map<string, number>();
@@ -90,6 +98,9 @@ export class Session {
     const driver = this.state.driver;
     const turn: Turn = {
       id: randomUUID(),
+      stepFloor: this.highestStepIndex,
+      hasCurrentInput: false,
+      hasCurrentError: false,
       text: new Map(),
       usageSteps: new Set(),
       tools: new Map(),
@@ -238,9 +249,12 @@ export class Session {
   }
 
   private accept(frame: Frame): void {
+    if (frame.event === "step_update" && frame.step_update.conversation_id === this.conversationId)
+      this.highestStepIndex = Math.max(this.highestStepIndex, frame.step_update.step_index);
     if (this.state.type !== "running") return;
     const { turn, driver } = this.state;
     if (frame.event === "step_update") {
+      this.observeTurnStep(frame.step_update, turn);
       this.acceptStep(frame.step_update, turn);
       return;
     }
@@ -259,7 +273,22 @@ export class Session {
         },
       });
     }
-    if (result.status === "ERROR") {
+    const final = turn.latestStep;
+    const finalText = final && turn.text.get(final.step_index)?.trim();
+    const recovered =
+      result.status === "ERROR" &&
+      result.error === interruptedStream &&
+      result.conversation_id === this.conversationId &&
+      turn.hasCurrentInput &&
+      !turn.hasCurrentError &&
+      denied.length === 0 &&
+      final?.step_type === "agent_response" &&
+      final.state === "DONE" &&
+      (final.usage?.output_tokens ?? 0) > 0 &&
+      Boolean(finalText) &&
+      result.response.trim() === finalText &&
+      [...turn.tools.values()].every((tool) => tool.status === "completed");
+    if (result.status === "ERROR" && !recovered) {
       const canceled = result.error === "interrupted";
       this.finishTools(turn, canceled ? "canceled" : "failed");
       this.retire(driver);
@@ -271,6 +300,17 @@ export class Session {
         error: { message: diagnostic(result.error) },
       });
     } else {
+      if (recovered)
+        this.emit({
+          type: "session.notice",
+          sessionId: this.options.id,
+          notice: {
+            id: `${turn.id}:stream-interruption`,
+            severity: "warning",
+            title: "Antigravity reported a stream interruption after completing the response",
+            description: result.error,
+          },
+        });
       this.finishTools(turn, "completed");
       this.state = { type: "idle", driver };
       this.emit({
@@ -280,6 +320,23 @@ export class Session {
         state: "completed",
       });
     }
+  }
+
+  private observeTurnStep(step: Step, turn: Turn): void {
+    if (step.conversation_id !== this.conversationId) {
+      turn.hasCurrentError = true;
+      return;
+    }
+    if (step.step_index <= turn.stepFloor) return;
+    // Print mode starts each prompt, including a restored conversation, with its new user input.
+    // An earlier turn's steps or an unobserved prompt boundary cannot qualify this exception.
+    if (!turn.latestStep)
+      turn.hasCurrentInput = step.step_type === "user_input" && step.state === "DONE";
+    else if (step.step_type === "user_input" && step.step_index !== turn.latestStep.step_index)
+      turn.hasCurrentInput = false;
+    if (step.state === "ERROR" || step.step_type === "error_message" || step.tool_info?.error)
+      turn.hasCurrentError = true;
+    if (!turn.latestStep || step.step_index >= turn.latestStep.step_index) turn.latestStep = step;
   }
 
   private acceptStep(step: Step, turn: Turn): void {
@@ -331,11 +388,23 @@ export class Session {
 
   private retire(driver: Driver): void {
     this.state = { type: "stopping", driver };
-    void driver.stop("interrupt").then(() => {
-      if (this.state.type === "stopping" && this.state.driver === driver)
-        this.state = { type: "dormant" };
-      return undefined;
-    });
+    void driver.stop("interrupt").then(
+      () => {
+        if (this.state.type === "stopping" && this.state.driver === driver)
+          this.state = { type: "dormant" };
+      },
+      (error: unknown) => {
+        // Keep the stopping state: an unsuccessful cleanup is not a retired runtime.
+        this.emit({
+          type: "session.runtime_failed",
+          sessionId: this.options.id,
+          error: {
+            message: diagnostic(error instanceof Error ? error.message : String(error)),
+            code: "CLEANUP_FAILED",
+          },
+        });
+      },
+    );
   }
 
   private finishTools(turn: Turn, status: "completed" | "failed" | "canceled"): void {

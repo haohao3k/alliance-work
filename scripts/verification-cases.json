@@ -217,7 +217,7 @@
   },
   "rooms.provider-limit": {
     "file": "tests/rooms.test.ts",
-    "pattern": "ryzen's 2026-10-21 Claude session limit|a review batch whose turn ended on ryzen's session limit|a Claude API error that Paseo reports|a Claude limit notice recorded inside its printed reset minute|a limit in a turn Claude Code starts by itself|Claude's 'Not logged in' notice"
+    "pattern": "Claude session limit|a review batch whose turn ended on.*session limit|a Claude API error that Paseo reports|a Claude limit notice recorded inside its printed reset minute|a limit in a turn Claude Code starts by itself|Claude's 'Not logged in' notice"
   },
   "rooms.provider-limit-batch": {
     "file": "tests/lifecycle.test.ts",

@@ -54,3 +54,20 @@ export function acceptanceLabel(value: {
   if (value.decision === "rejected") return "Rejected";
   return value.lastOutcome === "completed" ? "Turn finished · awaiting acceptance" : "Not accepted";
 }
+
+const NAMED_CLAUDE_ACCOUNTS = ["5x", "20x"];
+/**
+ * Whether a limit on `limited` (the account the limited turn ran on) leaves a member alone. Only
+ * a member known to run a different named account is released. An unknown account, an unrecorded
+ * limit account or `legacy` (a role's own login, which may be the same subscription) stay held:
+ * that is how every Claude limit held before accounts were recorded.
+ */
+export function apartFromLimit(limited: string | undefined, running: readonly string[] | undefined) {
+  return (
+    limited !== undefined &&
+    NAMED_CLAUDE_ACCOUNTS.includes(limited) &&
+    running !== undefined &&
+    running.length > 0 &&
+    running.every((account) => NAMED_CLAUDE_ACCOUNTS.includes(account) && account !== limited)
+  );
+}

@@ -4,14 +4,30 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { PaseoApi } from "@getpaseo/client";
 import { Autonomy } from "../server/autonomy";
-import { authorizeDecision, Lifecycle, REMINDERS_PER_SCAN, STALE_DECISION_MS } from "../server/lifecycle";
+import {
+  authorizeDecision,
+  Lifecycle,
+  REMINDERS_PER_OWNER,
+  REMINDERS_PER_SCAN,
+  STALE_DECISION_MS,
+  summarizeLifecycle,
+} from "../server/lifecycle";
 import { type MemberRecord, newTurn, RoomStore } from "../server/store";
 import { Wakeups } from "../server/wakeups";
 import type { RoleName } from "../shared/contracts";
 import type { WakeRecordValue } from "../shared/wakeups";
 import { temporary } from "./temp";
 
-type Agent = { status: string; archived: boolean; permissions: number; parent?: string };
+// Synthetic regression fixtures use invented agent IDs and fixed test clocks.
+const DAY = 24 * 3600000;
+type Agent = {
+  status: string;
+  archived: boolean;
+  permissions: number;
+  parent?: string;
+  /** User messages Paseo recorded for it, oldest first. */
+  messages?: { id: string; at: number }[];
+};
 
 /** Room with Human → supervisor → lead → peer, plus a sibling peer, on a fake native runtime. */
 async function fleet() {
@@ -68,13 +84,32 @@ async function fleet() {
           onRefresh(id);
           const a = agents.get(id);
           if (!a) return null;
+          const last = a.messages?.at(-1);
           return {
             agent: {
               status: a.status,
               archivedAt: a.archived ? "archived" : null,
               pendingPermissions: Array.from({ length: a.permissions }, () => ({})),
+              ...(last ? { lastUserMessageAt: new Date(last.at).toISOString() } : {}),
             },
           };
+        },
+        timeline: {
+          refetch: async () => {
+            const entries = (agents.get(id)?.messages ?? []).map((m, index) => ({
+              timestamp: new Date(m.at).toISOString(),
+              turnId: "t",
+              seqEnd: index + 1,
+              item: { type: "user_message", messageId: m.id, text: "" },
+            }));
+            return {
+              entries,
+              epoch: "e",
+              hasOlder: false,
+              startCursor: { epoch: "e", seq: 1 },
+              endCursor: { epoch: "e", seq: entries.length },
+            };
+          },
         },
         archive: async () => {
           const a = agents.get(id);
@@ -82,9 +117,11 @@ async function fleet() {
           archived.push(id);
           return { archivedAt: "archived" };
         },
-        send: async (text: string) => {
+        send: async (text: string, options?: { messageId?: string }) => {
           sent.push(id);
           texts.push({ id, text });
+          const a = agents.get(id);
+          if (a) a.messages = [...(a.messages ?? []), { id: options?.messageId ?? `anon-${now}`, at: now }];
         },
       }),
     },
@@ -158,6 +195,12 @@ async function fleet() {
     /** The first lines of the prompts this agent received. */
     heads: (id: string) => texts.filter((t) => t.id === id).map((t) => t.text.split("\n", 1)[0]),
     sweep: () => lifecycle.sweep(api),
+    /** A message from the Human or another agent, which this plugin did not send. */
+    foreignMessage: (id: string) => {
+      const a = agents.get(id) as Agent;
+      const log = a.messages ?? [];
+      a.messages = [...log, { id: `foreign-${now}-${log.length}`, at: now }];
+    },
     onRefresh: (fn: (id: string) => void) => {
       onRefresh = fn;
     },
@@ -442,14 +485,14 @@ test("owned members get an assignment; a recent handback wakes the nearest live 
   }
 });
 
-test("a review sent over 48 hours ago and still undecided is asked again once", async () => {
+test("a review sent over a day ago and still undecided is asked again, once", async () => {
   const f = await fleet();
   try {
     f.store.updateMember("peer", {
       lastTurnId: "p1",
       lastOutcome: "completed",
       resultPath: "r.json",
-      lastTurnEndedAt: 1_000_000 - 3600000,
+      lastTurnEndedAt: 1_000_000 - STALE_DECISION_MS + 3600000,
     });
     f.wakes.add({
       key: "review-peer",
@@ -463,17 +506,17 @@ test("a review sent over 48 hours ago and still undecided is asked again once", 
     assert.deepEqual(f.sent, ["lead"]);
     (f.agents.get("peer") as Agent).status = "closed"; // the daemon restarted since
     const stale = () => f.wakes.list().filter((w) => w.key.startsWith("stale-decision-"));
-    f.advance(STALE_DECISION_MS - 3600000);
+    f.advance(2 * 3600000);
     await f.sweep();
-    assert.equal(stale().length, 0, "a review sent less than 48h ago still stands");
-    f.advance(70 * 60000);
+    assert.equal(stale().length, 0, "a review sent less than a day ago still stands");
+    f.advance(DAY);
     await f.sweep();
     assert.equal(stale().length, 1, "the unsettled review is asked again");
     await f.wakes.tick(f.api);
     assert.deepEqual(f.sent, ["lead", "lead"]);
     f.advance(10 * 60000);
     await f.sweep();
-    assert.equal(stale().length, 1, "once per turn and owner");
+    assert.equal(stale().length, 1, "not again within the same day");
   } finally {
     f.store.close();
   }
@@ -952,7 +995,7 @@ test("a waiting lead whose wake batch's turn fails with a provider error is retr
 });
 
 test("a waiting lead whose wake batch's turn ends on a provider limit keeps waiting and is not retried", async () => {
-  // ryzen, 2026-10-21: the plugin pushed a review to Lead 5e3d3284 at 14:17:20Z; that turn
+  // primaryHost, 2026-10-21: the plugin pushed a review to Lead 0000000e at 14:17:20Z; that turn
   // (foreground-turn-10) completed at 14:17:21Z on this notice, which the runtime reports as a
   // failure with that text. Wakeups sends such a batch again after the reset.
   const f = await batchTurnEnds(
@@ -1276,4 +1319,472 @@ test("native reopening restores custody without replaying work or renewing its b
   assert.equal(restored?.retries, 1);
   await f.autonomy.tick(f.api);
   assert.deepEqual(f.sent, [], "reopening must not send a prompt");
+});
+
+const idle = { status: "idle", archived: false, permissions: 0 };
+const pendingReminders = (f: Awaited<ReturnType<typeof fleet>>, id: string) =>
+  f.texts.filter((t) => t.id === id && t.text.includes("Decision pending")).length;
+
+test("status shows a native child that is not an Alliance member as a blocker, not as archivable", async () => {
+  const f = await fleet();
+  try {
+    f.agents.set("ext", { status: "idle", archived: false, permissions: 0, parent: "peer" });
+    f.accept("peer", "lead");
+    await f.sweep();
+    assert.ok(!f.archived.includes("peer"), "the sweep holds it");
+    const view = await f.lifecycle.describe(f.member("peer"), idle, new Map(), f.api);
+    assert.equal(view.state, "held");
+    assert.match(view.blockers.join("\n"), /ext/);
+    (f.agents.get("ext") as Agent).archived = true;
+    assert.equal((await f.lifecycle.describe(f.member("peer"), idle, new Map(), f.api)).state, "archivable");
+  } finally {
+    f.store.close();
+  }
+});
+
+test("a blocking wakeup shows its key and age, and held members are counted by cause", async () => {
+  const f = await fleet();
+  try {
+    f.wakes.add({
+      key: "wait-child",
+      roomId: "room",
+      ownerId: "peer",
+      reason: "waiting on a child",
+      trigger: { kind: "time", at: f.now() },
+      delivery: "idle",
+    });
+    f.store.updateMember("peer", { lastTurnId: "p0", lastOutcome: "completed", resultPath: "r.json" });
+    await f.wakes.tick(f.api);
+    f.accept("peer", "lead");
+    f.store.updateMember("peer", { lastTurnId: "p0" });
+    f.store.updateMember("sibling", { keep: { by: "lead", at: new Date(f.now()).toISOString() } });
+    f.accept("sibling", "lead");
+    f.advance(3 * DAY);
+    const peer = await f.lifecycle.describe(f.member("peer"), idle, new Map(), f.api);
+    assert.match(peer.blockers.join("\n"), /wait-child.*3d/);
+    const sibling = await f.lifecycle.describe(f.member("sibling"), idle, new Map(), f.api);
+    assert.deepEqual(summarizeLifecycle([peer, sibling]).held, { wakeup: 1, keep: 1 });
+  } finally {
+    f.store.close();
+  }
+});
+
+test("an undecided handback is reminded daily, then moves up the owner chain, then is flagged for the Human", async () => {
+  const f = await fleet();
+  try {
+    f.autonomy.ensure("peer");
+    f.begin("peer", "p1");
+    f.finish("peer", "p1");
+    const step = async () => {
+      f.advance(12 * 3600000);
+      await f.autonomy.tick(f.api);
+      await f.sweep();
+      await f.wakes.tick(f.api);
+    };
+    const view = () => f.lifecycle.describe(f.member("peer"), idle, new Map(), f.api);
+    for (let i = 0; i < 14; i++) await step(); // 7 days: the lead is reminded, the supervisor not yet
+    assert.equal(pendingReminders(f, "lead"), REMINDERS_PER_OWNER);
+    assert.equal((await view()).needsHuman, undefined, "not flagged while someone can still be asked");
+    for (let i = 0; i < 8; i++) await step();
+    assert.equal(pendingReminders(f, "lead"), REMINDERS_PER_OWNER, "the lead is not asked again");
+    assert.equal(pendingReminders(f, "sup"), REMINDERS_PER_OWNER, "then the supervisor is");
+    for (let i = 0; i < 20; i++) await step();
+    assert.equal(pendingReminders(f, "sup"), REMINDERS_PER_OWNER, "and nobody is asked forever");
+    const flagged = (await view()).needsHuman;
+    assert.ok(flagged && flagged.ageHours > 7 * 24, "flagged for the Human with its age");
+    const board = (await f.lifecycle.describe(f.member("peer"), idle, new Map(), f.api)).state;
+    assert.equal(board, "awaiting-decision", "it stays open: the plugin only reminds and flags");
+    assert.deepEqual(f.archived, []);
+    assert.equal(f.member("peer").decision, "open");
+  } finally {
+    f.store.close();
+  }
+});
+
+test("a review the owner cancelled is asked again, and later reminders move on when its owner archived", async () => {
+  const f = await fleet();
+  try {
+    f.autonomy.ensure("peer");
+    f.begin("peer", "p1");
+    f.finish("peer", "p1");
+    f.advance(130000);
+    await f.autonomy.tick(f.api);
+    const review = f.wakes.list().find((w) => w.key.startsWith("auto-review-"));
+    assert.ok(review);
+    f.wakes.action(review.key, "lead", review.revision, "cancel");
+    for (let i = 0; i < 10; i++) {
+      f.advance(12 * 3600000);
+      await f.autonomy.tick(f.api);
+      await f.sweep();
+      await f.wakes.tick(f.api);
+    }
+    assert.ok(pendingReminders(f, "lead") >= 2, "asked again after the cancelled review");
+    // The lead is archived while the decision is still open: the supervisor takes over.
+    f.store.updateMember("lead", { archivedAt: "archived" });
+    (f.agents.get("lead") as Agent).archived = true;
+    for (let i = 0; i < 20; i++) {
+      f.advance(12 * 3600000);
+      await f.autonomy.tick(f.api);
+      await f.sweep();
+      await f.wakes.tick(f.api);
+    }
+    assert.ok(pendingReminders(f, "sup") >= 1, "an archived owner is skipped, not waited for");
+  } finally {
+    f.store.close();
+  }
+});
+
+test("undecided Human-owned work is flagged for the Human with its age, and nothing is sent", async () => {
+  const f = await fleet();
+  try {
+    f.autonomy.start("sup");
+    f.begin("sup", "s1");
+    f.autonomy.checkpoint("sup", "review", "done");
+    f.finish("sup", "s1");
+    const view = () => f.lifecycle.describe(f.member("sup"), idle, new Map(), f.api);
+    f.advance(STALE_DECISION_MS - 3600000);
+    assert.equal((await view()).needsHuman, undefined, "not yet");
+    f.advance(40 * DAY);
+    await f.autonomy.tick(f.api);
+    await f.sweep();
+    await f.wakes.tick(f.api);
+    const flagged = (await view()).needsHuman;
+    assert.ok(flagged && flagged.ageHours >= 40 * 24, "flagged with its age");
+    assert.equal((await view()).state, "awaiting-decision");
+    assert.deepEqual(f.sent, [], "no agent is woken for the Human's decision");
+    assert.deepEqual(f.archived, []);
+  } finally {
+    f.store.close();
+  }
+});
+
+// Archived HQ → peer/lens, with a surviving sibling Lead, in a synthetic queue.
+async function orphanedHandback() {
+  const f = await fleet();
+  f.store.updateMember("peer", { parentId: "sup" });
+  f.store.updateMember("sup", { role: "hq", archivedAt: "archived" });
+  (f.agents.get("peer") as Agent).parent = "sup";
+  (f.agents.get("sup") as Agent).archived = true;
+  f.begin("peer", "p1");
+  f.finish("peer", "p1");
+  f.advance(STALE_DECISION_MS);
+  return f;
+}
+
+test("an archived owner chain reminds its unique nearest room coordinator without transferring authority", async () => {
+  const f = await orphanedHandback();
+  try {
+    const ownership = f.member("peer").ownership;
+    await f.sweep();
+    await f.wakes.tick(f.api);
+    assert.deepEqual(f.sent, ["lead"], "the surviving sibling Lead receives the orphan review");
+    const view = await f.lifecycle.describe(f.member("peer"), idle, new Map(), f.api);
+    assert.equal(view.needsHuman, undefined);
+    assert.match(view.blockers.join("\n"), /lead/);
+    assert.equal(f.member("peer").parentId, "sup");
+    assert.deepEqual(f.member("peer").ownership, ownership);
+    assert.equal(f.member("peer").decision, "open");
+    assert.deepEqual(f.archived, []);
+    assert.throws(() => authorizeDecision(f.store, "peer", "lead"), /owner chain/);
+    authorizeDecision(f.store, "peer", null);
+    assert.doesNotMatch(f.texts[0].text, /alliance-work accept --agent/, "no unauthorized accept command");
+    const reminder = f.wakes.list().find((w) => w.ownerId === "lead");
+    assert.ok(reminder);
+    f.wakes.action(reminder.key, "lead", reminder.revision, "ack");
+    assert.equal(f.store.wakeup(reminder.key)?.state, "acknowledged", "a coordinator can ack its notice");
+
+    f.advance(20 * 60000);
+    await f.sweep();
+    await f.wakes.tick(f.api);
+    assert.deepEqual(f.sent, ["lead"], "the daily reminder budget still applies");
+    f.advance(DAY);
+    await f.sweep();
+    await f.wakes.tick(f.api);
+    assert.deepEqual(f.sent, ["lead", "lead"]);
+    f.begin("peer", "p2");
+    await f.wakes.tick(f.api);
+    assert.ok(
+      f.wakes.list().every((w) => ["acknowledged", "canceled"].includes(w.state)),
+      "new work settles the old review",
+    );
+  } finally {
+    f.store.close();
+  }
+});
+
+test("a nearer coordinator wins over a farther connected coordinator", async () => {
+  const f = await orphanedHandback();
+  try {
+    f.store.updateMember("sibling", { role: "hq" }); // One edge farther than lead.
+    await f.sweep();
+    await f.wakes.tick(f.api);
+    assert.deepEqual(f.sent, ["lead"]);
+  } finally {
+    f.store.close();
+  }
+});
+
+test("orphan routing follows explicit ownership through multiple archived owners", async () => {
+  const f = await orphanedHandback();
+  try {
+    f.store.saveMember({ ...f.member("lead"), id: "old-lead", archivedAt: "archived" });
+    f.store.updateMember("peer", {
+      parentId: "lead",
+      ownership: { ownerId: "old-lead", revision: 1, evidence: "handoff.json", at: "now" },
+    });
+    await f.sweep();
+    await f.wakes.tick(f.api);
+    assert.deepEqual(f.sent, ["lead"]);
+    assert.equal(f.member("peer").ownership?.ownerId, "old-lead");
+    assert.throws(() => authorizeDecision(f.store, "peer", "lead"), /owner chain/);
+  } finally {
+    f.store.close();
+  }
+});
+
+test("an archived HQ in another room still connects its same-room sibling lead to the orphan", async () => {
+  const f = await orphanedHandback();
+  try {
+    f.store.addRoom({ ...f.store.room("room"), id: "hq-room", cwd: join(f.home, "hq") });
+    f.store.saveMember({ ...f.member("sup"), id: "old-hq", roomId: "hq-room" });
+    f.store.saveMember({ ...f.member("lead"), id: "foreign-lead", roomId: "hq-room", parentId: "old-hq" });
+    f.agents.set("foreign-lead", { status: "idle", archived: false, permissions: 0 });
+    f.store.updateMember("peer", { parentId: "old-hq" });
+    f.store.updateMember("lead", { parentId: "old-hq" });
+    await f.sweep();
+    await f.wakes.tick(f.api);
+    assert.deepEqual(f.sent, ["lead"]);
+    assert.equal(
+      (await f.lifecycle.describe(f.member("peer"), idle, new Map(), f.api)).needsHuman,
+      undefined,
+    );
+  } finally {
+    f.store.close();
+  }
+});
+
+test("a missing ancestor above a foreign archived HQ does not establish orphan routing", async () => {
+  const f = await orphanedHandback();
+  try {
+    f.store.addRoom({ ...f.store.room("room"), id: "hq-room", cwd: join(f.home, "hq") });
+    f.store.saveMember({
+      ...f.member("sup"),
+      id: "old-hq",
+      roomId: "hq-room",
+      parentId: "missing-grandparent",
+    });
+    f.store.updateMember("peer", { parentId: "old-hq" });
+    f.store.updateMember("lead", { parentId: "old-hq" });
+    await f.sweep();
+    await f.wakes.tick(f.api);
+    assert.deepEqual(f.sent, []);
+    assert.ok((await f.lifecycle.describe(f.member("peer"), idle, new Map(), f.api)).needsHuman);
+  } finally {
+    f.store.close();
+  }
+});
+
+test("equally near room coordinators leave an explicit ambiguity for the Human", async () => {
+  const f = await orphanedHandback();
+  try {
+    f.store.updateMember("sibling", { role: "lead", parentId: "sup" });
+    await f.sweep();
+    await f.wakes.tick(f.api);
+    assert.deepEqual(f.sent, []);
+    const view = await f.lifecycle.describe(f.member("peer"), idle, new Map(), f.api);
+    assert.match(view.needsHuman?.reason ?? "", /ambiguous/);
+    assert.match(view.needsHuman?.reason ?? "", /lead/);
+    assert.match(view.needsHuman?.reason ?? "", /sibling/);
+  } finally {
+    f.store.close();
+  }
+});
+
+test("an explicit Human handoff is not rerouted through the native parent", async () => {
+  const f = await orphanedHandback();
+  try {
+    f.store.updateMember("peer", {
+      ownership: { ownerId: null, revision: 1, evidence: "handoff.json", at: "now" },
+    });
+    await f.sweep();
+    await f.wakes.tick(f.api);
+    assert.deepEqual(f.sent, []);
+    assert.ok((await f.lifecycle.describe(f.member("peer"), idle, new Map(), f.api)).needsHuman);
+  } finally {
+    f.store.close();
+  }
+});
+
+test("orphan routing excludes descendants, other rooms and disconnected coordinators", async () => {
+  for (const variant of ["descendant", "other-room", "disconnected", "missing-owner"] as const) {
+    const f = await orphanedHandback();
+    try {
+      if (variant === "descendant") f.store.updateMember("lead", { parentId: "peer" });
+      if (variant === "other-room") {
+        f.store.addRoom({ ...f.store.room("room"), id: "other-room", cwd: join(f.home, "other") });
+        f.store.saveMember({ ...f.member("lead"), id: "other-lead", roomId: "other-room" });
+        f.agents.set("other-lead", { status: "idle", archived: false, permissions: 0 });
+        f.store.updateMember("lead", { archivedAt: "archived" });
+        (f.agents.get("lead") as Agent).archived = true;
+      }
+      if (variant === "disconnected") f.store.updateMember("lead", { parentId: null });
+      if (variant === "missing-owner") f.store.updateMember("peer", { parentId: "unknown" });
+      await f.sweep();
+      await f.wakes.tick(f.api);
+      assert.deepEqual(f.sent, [], variant);
+      assert.ok((await f.lifecycle.describe(f.member("peer"), idle, new Map(), f.api)).needsHuman, variant);
+    } finally {
+      f.store.close();
+    }
+  }
+});
+
+test("an orphan coordinator is reminded only three times before unresolved review returns to the Human", async () => {
+  const f = await orphanedHandback();
+  try {
+    for (let day = 0; day < REMINDERS_PER_OWNER + 2; day++) {
+      await f.sweep();
+      await f.wakes.tick(f.api);
+      f.advance(DAY);
+    }
+    assert.equal(f.sent.length, REMINDERS_PER_OWNER);
+    assert.ok(f.sent.every((id) => id === "lead"));
+    const view = await f.lifecycle.describe(f.member("peer"), idle, new Map(), f.api);
+    assert.ok(view.needsHuman);
+    assert.equal(view.state, "awaiting-decision");
+    assert.deepEqual(f.archived, []);
+    assert.equal(f.member("peer").decision, "open");
+  } finally {
+    f.store.close();
+  }
+});
+
+test("a queued orphan notice is canceled when a Human handoff or an ambiguous route replaces it", async () => {
+  for (const variant of ["human", "tie"] as const) {
+    const f = await orphanedHandback();
+    try {
+      await f.sweep(); // Queue the notice without delivering it.
+      assert.equal(f.wakes.list().length, 1);
+      if (variant === "human")
+        f.store.updateMember("peer", {
+          ownership: { ownerId: null, revision: 1, evidence: "handoff.json", at: "now" },
+        });
+      else f.store.updateMember("sibling", { role: "lead", parentId: "sup" });
+      f.advance(20 * 60000);
+      await f.sweep();
+      await f.wakes.tick(f.api);
+      assert.deepEqual(f.sent, [], variant);
+      assert.ok(
+        f.wakes.list().every((w) => w.state === "canceled"),
+        variant,
+      );
+    } finally {
+      f.store.close();
+    }
+  }
+});
+
+test("a rejection nobody follows up reminds its owner once after a day; a rework turn needs no reminder", async () => {
+  const f = await fleet();
+  try {
+    const reject = (id: string, turnId: string) => {
+      f.store.updateMember(id, {
+        lastTurnId: turnId,
+        lastOutcome: "completed",
+        resultPath: "r.json",
+        lastTurnEndedAt: f.now(),
+        decision: "rejected",
+        decisionEvidence: join(f.home, `${id}-rej.json`),
+        decisionBy: "lead",
+        decisionAt: new Date(f.now()).toISOString(),
+        decisionTurnId: turnId,
+      });
+    };
+    reject("peer", "p1");
+    reject("sibling", "s1");
+    f.advance(DAY - 3600000);
+    await f.sweep();
+    await f.wakes.tick(f.api);
+    assert.deepEqual(f.sent, [], "not before a day");
+    f.begin("sibling", "s2"); // the owner sent rework
+    f.advance(2 * 3600000);
+    await f.sweep();
+    await f.wakes.tick(f.api);
+    assert.deepEqual(f.sent, ["lead"], "only the rejection nobody followed up");
+    for (let i = 0; i < 30; i++) {
+      f.advance(DAY);
+      await f.sweep();
+      await f.wakes.tick(f.api);
+    }
+    assert.deepEqual(f.sent, ["lead"], "once");
+    assert.deepEqual(f.archived, []);
+    assert.equal(f.member("peer").decision, "rejected");
+  } finally {
+    f.store.close();
+  }
+});
+
+test("work that was already weeks overdue when this starts is reminded spread over a day, not at once", async () => {
+  const f = await fleet();
+  try {
+    const peers = Array.from({ length: 12 }, (_, n) => `old-${n}`);
+    for (const id of peers) {
+      f.store.saveMember({
+        ...f.member("peer"),
+        id,
+        launchKey: id,
+        lastTurnId: `${id}-t`,
+        lastOutcome: "completed",
+        resultPath: "r.json",
+        lastTurnEndedAt: f.now() - 500 * 3600000,
+      });
+      f.agents.set(id, { status: "idle", archived: false, permissions: 0, parent: "lead" });
+    }
+    const perScan: number[] = [];
+    for (let i = 0; i < 144 + 2; i++) {
+      const before = f.wakes.list().length;
+      await f.sweep();
+      perScan.push(f.wakes.list().length - before);
+      f.advance(10 * 60000);
+    }
+    assert.equal(perScan[0], 0, "nothing at the first scan after upgrade");
+    assert.ok(Math.max(...perScan) <= REMINDERS_PER_SCAN, "bounded per scan");
+    const asked = new Set(f.wakes.list().map((w) => w.trigger.kind === "turn" && w.trigger.agentId));
+    assert.equal(asked.size, peers.length, "each member is asked within the day");
+    assert.ok(perScan.filter(Boolean).length > 3, "over several scans, not one burst");
+  } finally {
+    f.store.close();
+  }
+});
+
+test("a prompt this plugin sent after the decision is not new work; anything else still is", async () => {
+  const f = await fleet();
+  try {
+    const wake = async (id: string) => {
+      f.wakes.add({
+        key: `wait-${id}-${f.now()}`,
+        roomId: "room",
+        ownerId: id,
+        reason: "plugin reminder",
+        trigger: { kind: "time", at: f.now() },
+        delivery: "idle",
+      });
+      await f.wakes.tick(f.api);
+      for (const w of f.wakes.list().filter((w) => w.ownerId === id && w.state === "delivered"))
+        f.wakes.action(w.key, id, w.revision, "ack");
+    };
+    f.accept("sibling", "lead");
+    f.accept("peer", "lead");
+    f.advance(60000);
+    await wake("sibling"); // the plugin's own prompt after the decision
+    f.foreignMessage("peer"); // somebody else's
+    await wake("peer"); // and a plugin prompt after it must not hide it
+    f.advance(60000);
+    await f.sweep();
+    assert.deepEqual(f.archived, ["sibling"]);
+    const view = await f.lifecycle.describe(f.member("peer"), idle, new Map(), f.api);
+    assert.equal(view.state, "archivable", "status has no live message readback");
+  } finally {
+    f.store.close();
+  }
 });

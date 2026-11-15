@@ -49,6 +49,7 @@ async function fixture(
   const runtime = new AllianceRuntime(home);
   runtime.store = store;
   runtime.autonomy = autonomy;
+  runtime.wakeups = wakes;
   const agent = {
     id: "lead",
     provider: "alliance-codex-lead",
@@ -137,6 +138,7 @@ async function fixture(
     },
     reloadWakes: () => {
       wakes = new Wakeups(store, () => now);
+      runtime.wakeups = wakes;
     },
   };
 }

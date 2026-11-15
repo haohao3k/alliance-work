@@ -3,15 +3,21 @@ import { lstat, readFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { effectiveSkills } from "../server/bundled-skills.mjs";
-import { selectedClaudeCredentials } from "../server/claude-accounts.mjs";
+import { selectedClaudeLaunch } from "../server/claude-accounts.mjs";
+import { recordClaudeRuntime } from "../server/claude-runtime.mjs";
+import { contextSettings } from "../server/context-settings.mjs";
+import { profileEnvironment } from "../server/profile-environment.mjs";
 import { claudeSkillPlugin } from "../server/project-skills.mjs";
 import { scopedMcpServers } from "../server/scoped-mcp.mjs";
+import { claudeWindowFor } from "../shared/context-settings.mjs";
 import { linkAgyAuth } from "./agy-auth.mjs";
 import { authSource, authStatus, bridgeCodexAuth } from "./auth.mjs";
 import { discoverCodex } from "./codex-discovery.mjs";
 import { contextPolicy } from "./context-policy.mjs";
 import { assertNoLinks, codexIsolationFeatures, loadManifest, verifyProfile } from "./profiles.mjs";
 import { userMcpServers } from "./user-mcp.mjs";
+
+export { profileEnvironment };
 
 /**
  * Agent turns have no terminal to answer a prompt, so a tool that asks would hang the turn. These
@@ -26,47 +32,6 @@ const nonInteractive = {
   DEBIAN_FRONTEND: "noninteractive",
   npm_config_yes: "true",
 };
-
-export function profileEnvironment(profile, home, ambient = process.env, credentials = {}) {
-  /** @type {Record<string,string>} */
-  const env = {};
-  for (const [key, value] of Object.entries(ambient)) {
-    if (
-      value !== undefined &&
-      /^(PATH|LANG|LC_.*|TZ|TERM|COLORTERM|TMPDIR|TMP|TEMP|USER|LOGNAME|PASEO_.*|ALLIANCE_AGY_SESSION_DIR|ALLIANCE_BOUND_ROOM|ALLIANCE_WORKSPACE_CWD|ALLIANCE_ASSIGNMENT|ALLIANCE_ARTIFACTS|ALLIANCE_CONTEXT|SSL_CERT_FILE|SSL_CERT_DIR|HTTPS?_PROXY|NO_PROXY)$/i.test(
-        key,
-      )
-    )
-      env[key] = value;
-  }
-  for (const [key, value] of Object.entries(credentials)) {
-    if (
-      typeof value !== "string" ||
-      (key === "CLAUDE_CODE_OAUTH_TOKEN" && profile.harness !== "claude") ||
-      !/^(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_API_KEY|ANTHROPIC_BASE_URL|OPENAI_API_KEY|OPENAI_BASE_URL|GEMINI_API_KEY|GOOGLE_API_KEY)$/.test(
-        key,
-      )
-    )
-      throw new Error(`Unsupported Alliance credential variable: ${key}`);
-    env[key] = value;
-  }
-  Object.assign(env, {
-    HOME: profile.osHome,
-    XDG_CONFIG_HOME: join(profile.osHome, ".config"),
-    XDG_DATA_HOME: join(profile.osHome, ".local/share"),
-    XDG_CACHE_HOME: join(profile.osHome, ".cache"),
-    ALLIANCE_WORK_HOME: home,
-    ALLIANCE_ROLE: profile.role,
-    CODEX_HOME: profile.harness === "codex" ? profile.home : join(profile.osHome, ".codex"),
-    CLAUDE_CONFIG_DIR: profile.harness === "claude" ? profile.home : join(profile.osHome, ".claude"),
-    PI_CODING_AGENT_DIR: profile.harness === "pi" ? profile.home : join(profile.osHome, ".pi"),
-  });
-  if (profile.harness === "pi") {
-    env.PI_CURSOR_SYSTEM_CREDENTIALS = "0";
-    env.ANTIGRAVITY_NO_EXTRA_TOOLS = "1";
-  }
-  return env;
-}
 
 function replaceFlag(args, flag, value) {
   const result = [];
@@ -108,13 +73,23 @@ export async function launchPlan(
   args,
   ambient = process.env,
   cwd = ambient.ALLIANCE_WORKSPACE_CWD ?? process.cwd(),
+  platform = process.platform,
 ) {
   cwd = resolve(cwd);
   const manifest = await loadManifest(home);
   const profile = manifest.profiles[id];
   if (!profile) throw new Error(`Unknown Alliance profile: ${id}`);
   await verifyProfile(profile);
-  const selected = profile.harness === "claude" ? await selectedClaudeCredentials(home, profile.role) : null;
+  if (ambient.PASEO_AGENT_ID && (!ambient.ALLIANCE_BOUND_ROOM || !ambient.ALLIANCE_WORKSPACE_CWD))
+    throw new Error(
+      "Alliance plugin did not bind this session to a room and workspace. Enable the plugin before launching.",
+    );
+  const roomId = ambient.PASEO_AGENT_ID
+    ? (ambient.ALLIANCE_CLAUDE_ROOM ?? ambient.ALLIANCE_BOUND_ROOM)
+    : undefined;
+  const claudeLaunch =
+    profile.harness === "claude" ? await selectedClaudeLaunch(home, profile.role, undefined, roomId) : null;
+  const selected = claudeLaunch?.credentials;
   const credentialPath = join(profile.home, "credentials.env.json");
   await assertNoLinks(credentialPath);
   const info = selected
@@ -134,17 +109,30 @@ export async function launchPlan(
     }
   }
   const env = profileEnvironment(profile, home, ambient, credentials);
-  if (profile.harness === "agy") await linkAgyAuth(home, profile);
+  const interactiveAgy = args.length === 0 && !ambient.PASEO_AGENT_ID;
+  const agyFileAuth =
+    profile.harness === "agy" && (await linkAgyAuth(home, profile, { allowSourceLogin: interactiveAgy }));
+  // AGY can migrate the selected file into the macOS user's shared Keychain on refresh.
+  const isolateAgyKeychain = platform === "darwin" && agyFileAuth;
+  const executable = isolateAgyKeychain ? "/usr/bin/sandbox-exec" : profile.executable;
+  const nativeArgs = () =>
+    isolateAgyKeychain
+      ? [
+          "-p",
+          '(version 1) (allow default) (deny process-exec (literal "/usr/bin/security"))',
+          profile.executable,
+          ...args,
+        ]
+      : args;
+  if (isolateAgyKeychain && interactiveAgy) {
+    for (const key of ["SSH_CLIENT", "SSH_CONNECTION", "SSH_TTY"]) if (ambient[key]) env[key] = ambient[key];
+  }
   const source = profile.harness === "codex" ? await authSource(home) : undefined;
   // Account/setup/help commands still use the isolated home, but need no session flags.
   const metadataCommand = args.some((arg) => ["--version", "--help", "-h"].includes(arg));
   const accountCommand = ["login", "logout", "auth", "setup-token"].includes(args[0]);
-  if (ambient.PASEO_AGENT_ID && (!ambient.ALLIANCE_BOUND_ROOM || !ambient.ALLIANCE_WORKSPACE_CWD))
-    throw new Error(
-      "Alliance plugin did not bind this session to a room and workspace. Enable the plugin before launching.",
-    );
   if ((metadataCommand && profile.harness !== "pi") || accountCommand)
-    return { executable: profile.executable, args, env, cwd, authSource: source };
+    return { executable, args: nativeArgs(), env, cwd, authSource: source };
   // Only agent sessions (Paseo sets PASEO_AGENT_ID); the Human's own launches keep their prompts.
   if (ambient.PASEO_AGENT_ID) for (const [key, value] of Object.entries(nonInteractive)) env[key] ??= value;
   const bundle = await effectiveSkills(cwd, profile);
@@ -207,7 +195,7 @@ export async function launchPlan(
     args = replaceFlag(args, "--session-dir", join(profile.home, "sessions"));
   } else if (profile.harness === "agy") {
     if (["models", "agent", "agents"].includes(args[0]) || args.length === 0)
-      return { executable: profile.executable, args, env, cwd };
+      return { executable, args: nativeArgs(), env, cwd };
     const sessionDir = ambient.ALLIANCE_AGY_SESSION_DIR;
     if (!sessionDir) throw new Error("AGY requires its Alliance provider session configuration");
     await assertNoLinks(sessionDir);
@@ -257,9 +245,19 @@ export async function launchPlan(
     // Override complete TOML tables: Codex CLI dotted keys do not unquote path/server names.
     args.push("-c", `mcp_servers=${toml(servers)}`);
   }
+  const context =
+    profile.harness === "claude" && ambient.PASEO_AGENT_ID
+      ? {
+          claudeWindow: claudeWindowFor(
+            (await contextSettings(home, ambient.ALLIANCE_BOUND_ROOM)).policy,
+            profile.role,
+          ),
+        }
+      : {};
   return {
-    executable: profile.executable,
-    ...contextPolicy(profile.harness, args, env),
+    executable,
+    claudeAccount: claudeLaunch?.account,
+    ...contextPolicy(profile.harness, nativeArgs(), env, context),
     cwd,
     authSource: source,
   };
@@ -293,6 +291,12 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       cwd: plan.cwd,
       stdio: shared ? ["pipe", "pipe", "inherit"] : "inherit",
     });
+    if (plan.claudeAccount && plan.env.PASEO_AGENT_ID)
+      child.once("spawn", () => {
+        void recordClaudeRuntime(home, plan.env.PASEO_AGENT_ID, plan.claudeAccount, child.pid).catch(() => {
+          console.error("Claude account observation unavailable; account will be shown as unknown");
+        });
+      });
     if (shared) bridgeCodexAuth({ child, source: plan.authSource });
     for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(signal, () => child.kill(signal));
     child.on("error", (error) => {

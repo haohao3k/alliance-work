@@ -6,18 +6,17 @@ reasoning and tools. Start with one Supervisor and let the work determine the te
 
 [Hướng dẫn sử dụng tiếng Việt](docs/quickstart.vi.md) · [Installation, auth and updates](docs/operations.md) · [Video demo](https://github.com/haohao3k/alliance-work/releases/download/v0.1.3/alliance-work-demo.mp4)
 
-## Public edition
+## Editions
 
-This public snapshot includes project accordions, automatic session naming, project MCP and
-skill settings, lifecycle recovery, account/quota management, and Paseo 0.15.3 compatibility.
-Personal setup helpers and additional same-name Seatwork adaptations are not included.
-The existing pinned Seatwork bundle is unchanged; new licensed playbooks retain their notices.
+This is the public edition in `haohao3k/alliance-work`. Its reviewed source includes the
+features listed in [the public candidate](docs/public-candidate.md). The separate private edition
+can release independently; its history, assets and unpublished playbooks are not imported here.
 
 ## Install
 
 Requires macOS or Linux, Node 24+, npm, Codex 0.160.0+ and Claude Code 2.1.289+.
-Paseo CLI/client/plugin **0.15.3** and Pi **1.5.0** are pinned and installed locally with the package.
-This release requires a qualified **0.15.3** daemon; see the [upgrade procedure](docs/operations.md#paseo-0153-upgrade). Source is public; GitHub release downloads use the GitHub CLI.
+Paseo CLI/client/plugin **0.15.4** and Pi **1.5.0** are pinned and installed locally with the package.
+This release requires a qualified **0.15.4** daemon; see the [upgrade procedure](docs/operations.md#paseo-0154-upgrade). Release downloads use the public repository through the GitHub CLI (`gh`).
 
 From this checkout:
 
@@ -43,13 +42,45 @@ assignment in the native chat. **Alliance Work** is the live monitor: status, pr
 **Open** to jump to a session. **Add project** provides host-local folder completion when needed.
 The dedicated installation defaults to **http://127.0.0.1:6771**; existing installations keep their port.
 
+Search and session filters reveal matching sessions inside projects automatically. Clear the
+search and return to **All sessions** for the collapsed overview. Projects with unfinished
+jobs, obligations or wakeups remain visible in session filters; obligations outside a search
+are counted above the results. On narrow screens, session actions sit below the title.
+Unknown and running jobs appear before exited records. Project job histories start with ten
+rows and load twenty more on request; the summary counts every record. Session filters keep
+responsibility details behind **Show project responsibilities** so matching sessions stay visible.
+
+### Better Paseo alongside Alliance
+
+[Better Paseo](https://github.com/RoundRedDot/better-paseo) can enhance the native chat and add
+its **Tasks** board alongside Alliance. Install it on the same native Paseo home that Alliance
+uses (`paseoHome` in `~/.alliance-work/installation.json`):
+
+```sh
+paseo plugin install roundreddot/better-paseo --home /absolute/path/to/paseo-home
+```
+
+Use the marketplace revision for reproducible installs. Better Paseo requires Paseo 0.14.0+;
+the qualified Alliance daemon remains pinned to 0.15.4. No daemon restart is needed to add the
+plugin. **Tasks** shows native agent activity; Alliance shows ownership, jobs, obligations and
+product acceptance. A completed turn or a card under Done does not accept a product milestone.
+Use Alliance's lifecycle checks before archiving sessions that retain responsibility.
+Better Paseo's automatic title generation is optional and stays off by default; it can create
+model calls when enabled. To disable only its chat rendering, use **Settings → Plugins →
+Better Paseo → Enable Better Paseo chat**; its Tasks board has a separate switch.
+
+For a runtime update while tasks are running, use the durable
+[`maintenance run` workflow](docs/operations.md#hold-tasks-while-updating-the-runtime). It checkpoints
+and resumes only the tasks held by that operation, with recovery receipts across restarts.
+
 ## Authenticate once for all Codex roles
 
 ```sh
 alliance-work auth codex --from "$HOME/.codex"
 alliance-work auth status
 alliance-work doctor
-alliance-work status                # owners, current acceptance, prior decisions and jobs
+alliance-work status                # owners, acceptance, prior decisions, jobs, and warnings when work is not in a safe place
+alliance-work usage                 # read-only tokens, cache hit and estimated cost (docs/operations.md)
 ```
 
 Shared auth covers **HQ, Supervisor, Lead, Peer and Lens**. Alliance reads the original Codex
@@ -77,7 +108,7 @@ alliance-work setup                 # installed profile/runtime status
 alliance-work setup --refresh       # regenerate managed assets and hot reload when idle
 alliance-work update --check        # inspect latest GitHub release without changing files
 alliance-work update                # stage, verify and activate a release
-alliance-work deploy --host ryzen --host i5 --remember   # push the release over SSH to other machines
+alliance-work deploy --host host-alpha --host host-beta --remember   # push the release over SSH to other machines
 alliance-work rollback              # reactivate the previous recorded installation
 alliance-work doctor
 ```
@@ -225,10 +256,11 @@ credentials and is a separate acceptance check.
 
 `vendor/seatwork/provenance.json` pins 18 selected skills / 22 files to commit
 `fa540f47efb4344396a1eb532d3d6164a7056b9c`; their playbook bytes remain unchanged. Pi uses generated
-valid metadata pointing to the installed effective playbook. This public candidate keeps the
-existing pinned bundle unchanged and does not add the private same-name adaptations.
-Provenance alone does not grant redistribution rights. See [AGENTS.md](AGENTS.md) and
-[operations](docs/operations.md#releasing) for publication requirements.
+valid metadata pointing to the installed effective playbook. This public edition ships the
+existing pinned playbooks without the fourteen unpublished same-name adaptations. Optional
+override support remains available for operator-authored resources; tests use synthetic fixtures.
+Provenance identifies sources and does not itself grant redistribution rights. Release packaging and contributor guidance are in [AGENTS.md](AGENTS.md)
+and [operations](docs/operations.md#releasing).
 
 Three additional playbooks retain raw upstream sources pinned to Seatwork `ab41c12` with a separate
 provenance manifest: `alliance-test-audit`, `alliance-blast-radius` and `alliance-friction`.
@@ -268,7 +300,7 @@ From 0.1.16 acceptance is the closing decision for every Alliance agent: only th
 the Human may accept, Leads/Supervisors/HQ need product acceptance, and `status` explains what
 holds each agent open. See [closing work by decision](docs/operations.md#closing-work-by-decision-0116).
 From 0.1.19 a review ends with a decision that closes it without an ack (`accept`, a rework
-prompt, or `reject --reason`, which tells the child nothing: follow it with rework or archive) or
+prompt, or `reject --reason`, which tells the child nothing unless given `--rework TEXT`) or
 with `wakeups defer`; see [handback, waiting and reminders](docs/operations.md#handback-waiting-and-reminders-0119).
 Alliance denies a member's approval request left pending for 5 minutes ([stuck members](docs/operations.md#stuck-members-0119)),
 and a provider limit (Claude's included, which Paseo reports as a completed turn) pauses every prompt
@@ -288,7 +320,7 @@ Choose **MCP** on an Alliance project to add/edit/remove stdio servers, select h
 restrict exact tool names. CLI: `alliance-work mcp projects`, `mcp save --file PROJECT.json
 --revision HASH`, and `mcp preview --project PATH --harness codex`. See
 [project MCP settings](docs/operations.md#project-mcp-settings) for the schema, inherited scopes,
-authentication and session refresh behavior. Existing Mac mini v1 scoped settings remain compatible.
+authentication and session refresh behavior. Existing v1 scoped settings remain compatible.
 
 ### Contextual session and workspace names
 
@@ -311,3 +343,9 @@ Opt-in real-agent check (Codex `gpt-6-astra`, medium):
 `node scripts/acceptance-naming.mjs /absolute/fresh-output "$HOME/.codex"`.
 It uses an isolated Paseo and workspace, two small coding tasks with no rename commands,
 and verifies both the code and agent-driven session/workspace names before cleanup.
+
+Claude account switching preserves conversations and waits for active turns and background work.
+The Claude accounts panel shows **In use**, **Selected**, and pending-switch status per session.
+See [account switching](docs/operations.md#claude-accounts-and-quota) for host scope and activation.
+
+Job history: use `alliance-work jobs settle --key KEY --revision N --outcome unverified --reason TEXT --evidence /absolute/proof.json`, then `jobs archive --key KEY --revision NEXT`. Restore with `jobs restore`. Archive preserves history; process exit never proves success. See docs/operations.md.

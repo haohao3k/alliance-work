@@ -142,7 +142,7 @@ tar -xzf "$BUNDLE/alliance-work-$TAG.tar.gz" -C "$BUNDLE/boot"
 "$NODE" "$BUNDLE/boot/alliance-work/scripts/cli.mjs" update --bundle "$BUNDLE" --home "$HOME_DIR" $WAIT_ARGS
 `;
 
-const sshOptions = [
+export const sshOptions = [
   "-o",
   "BatchMode=yes",
   "-o",

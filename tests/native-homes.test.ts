@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { test } from "node:test";
@@ -77,6 +78,133 @@ async function fixture() {
 type NativeCommand = { name: string; source?: string };
 type ClaudeResponse = { response: { response: { commands: NativeCommand[] } } };
 type PiResponse = { success: boolean; data: { commands: NativeCommand[] } };
+
+test("managed Claude removes Workflow from the native request shape and API tools", {
+  skip: !enabled,
+}, async () => {
+  const f = await fixture();
+  const captured: string[][] = [];
+  const api = createServer(async (request, response) => {
+    let bytes = "";
+    for await (const part of request) bytes += part;
+    const body = JSON.parse(bytes);
+    if (request.url?.includes("count_tokens")) {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ input_tokens: 100 }));
+      return;
+    }
+    captured.push(body.tools.map((tool: { name: string }) => tool.name));
+    response.setHeader("content-type", "text/event-stream");
+    const event = (type: string, data: object) =>
+      response.write(`event: ${type}\ndata: ${JSON.stringify(data)}\n\n`);
+    event("message_start", {
+      type: "message_start",
+      message: {
+        id: "msg_synthetic",
+        type: "message",
+        role: "assistant",
+        model: body.model,
+        content: [],
+        stop_reason: null,
+        stop_sequence: null,
+        usage: { input_tokens: 100, output_tokens: 0 },
+      },
+    });
+    event("content_block_start", {
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "text", text: "" },
+    });
+    event("content_block_delta", {
+      type: "content_block_delta",
+      index: 0,
+      delta: { type: "text_delta", text: "OK" },
+    });
+    event("content_block_stop", { type: "content_block_stop", index: 0 });
+    event("message_delta", {
+      type: "message_delta",
+      delta: { stop_reason: "end_turn", stop_sequence: null },
+      usage: { output_tokens: 1 },
+    });
+    event("message_stop", { type: "message_stop" });
+    response.end();
+  });
+  await new Promise<void>((resolve) => api.listen(0, "127.0.0.1", resolve));
+  try {
+    const manifest = JSON.parse(await readFile(join(f.home, "profiles.json"), "utf8"));
+    const profile = manifest.profiles["claude-peer"];
+    const address = api.address();
+    assert(address && typeof address !== "string");
+    await writeFile(
+      join(profile.home, "credentials.env.json"),
+      JSON.stringify({
+        ANTHROPIC_API_KEY: "synthetic-loopback-only",
+        ANTHROPIC_BASE_URL: `http://127.0.0.1:${address.port}`,
+      }),
+      { mode: 0o600 },
+    );
+    const readShape = async (directory: string, sessionId: string): Promise<string[] | undefined> => {
+      for (const entry of await readdir(directory, { withFileTypes: true })) {
+        const path = join(directory, entry.name);
+        if (entry.isDirectory()) {
+          const found = await readShape(path, sessionId);
+          if (found) return found;
+        } else if (entry.name.endsWith(".jsonl")) {
+          for (const line of (await readFile(path, "utf8")).split("\n")) {
+            if (!line.includes('"api-request-shape"')) continue;
+            const shape = JSON.parse(line);
+            if (shape.sessionId === sessionId)
+              return shape.shape.tools.map((tool: { name: string }) => tool.name);
+          }
+        }
+      }
+    };
+    for (const managed of [false, true]) {
+      const sessionId = randomUUID();
+      const plan = await launchPlan(
+        f.home,
+        "claude-peer",
+        ["-p", "Reply OK.", "--model", "claude-sonnet-4-6", "--session-id", sessionId],
+        { PATH: process.env.PATH },
+        f.cwd,
+      );
+      if (!managed) {
+        const baseline = join(f.root, "baseline-settings.json");
+        const settings = JSON.parse(await readFile(join(profile.home, "settings.json"), "utf8"));
+        await writeFile(baseline, JSON.stringify({ ...settings, disableWorkflows: false }));
+        plan.args[plan.args.indexOf("--settings") + 1] = baseline;
+      }
+      plan.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
+      plan.env.DISABLE_AUTOUPDATER = "1";
+      const child = spawn(plan.executable, plan.args, {
+        cwd: plan.cwd,
+        env: plan.env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let output = "";
+      child.stdout.on("data", (part) => {
+        output += part;
+      });
+      child.stderr.resume();
+      const timeout = setTimeout(() => child.kill("SIGKILL"), 20000);
+      const code = await new Promise<number | null>((resolve, reject) => {
+        child.on("error", reject);
+        child.on("exit", resolve);
+      }).finally(() => clearTimeout(timeout));
+      assert.equal(code, 0);
+      assert.equal(output.trim(), "OK");
+      const tools = await readShape(profile.home, sessionId);
+      assert(tools, "Native transcript must record api-request-shape.tools");
+      assert.equal(tools.includes("Workflow"), !managed);
+      assert.equal(captured.at(-1)?.includes("Workflow"), !managed);
+      for (const tool of ["Bash", "Read", "Edit", "Write"])
+        assert(tools.includes(tool), `Missing native capability: ${tool}`);
+    }
+  } finally {
+    api.closeAllConnections();
+    await new Promise<void>((resolve) => api.close(() => resolve()));
+  }
+});
 
 async function nativeResponse<T>(
   executable: string,

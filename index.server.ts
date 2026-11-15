@@ -1,20 +1,41 @@
 import type { PluginServerContext } from "@getpaseo/plugin/server";
 import { createAllianceAgyProvider } from "./server/agy-provider";
-import { claudeAccountsState, selectClaudeAccount } from "./server/claude-accounts.mjs";
+import {
+  claudeAccountsState,
+  projectClaudeAccountState,
+  selectClaudeAccount,
+  selectProjectClaudeAccount,
+} from "./server/claude-accounts.mjs";
 import { claudeQuota } from "./server/claude-quota.mjs";
 import { createClaudeUsageSource } from "./server/claude-usage-source";
+import { contextSettings, saveContextSettings } from "./server/context-settings.mjs";
 import { directorySuggestions } from "./server/directories";
 import { composeInstruction } from "./server/instructions";
+import { archiveJob, settleJob } from "./server/job-lifecycle";
+import { readMaintenanceHold } from "./server/maintenance-hold.mjs";
 import { AllianceRuntime, allianceProvider } from "./server/runtime";
 import { saveScopedProject, scopedMcpState } from "./server/scoped-mcp.mjs";
+import { scratchEnvironment } from "./server/scratch.mjs";
 import { installProjectSkills, previewSkillImport } from "./server/skill-imports.mjs";
 import { projectSkillSettings, saveProjectSkills } from "./server/skill-settings.mjs";
 import { autonomyCheckpoint, autonomyList, autonomyStart } from "./shared/autonomy";
-import { claudeAccountsRead, claudeAccountsSelect, claudeQuotaRead } from "./shared/claude-account-contracts";
+import {
+  claudeAccountsRead,
+  claudeAccountsSelect,
+  claudeAccountsSwitchNow,
+  claudeQuotaRead,
+  projectClaudeAccountRead,
+  projectClaudeAccountSelect,
+} from "./shared/claude-account-contracts";
+import { contextRead, contextSave } from "./shared/context-contracts";
 import {
   directoryList,
+  jobArchive,
   jobOwner,
+  jobSettle,
   jobTrack,
+  maintenanceReconcile,
+  maintenanceStatus,
   memberDisposition,
   memberKeep,
   memberLaunch,
@@ -24,6 +45,8 @@ import {
   policyRead,
   profileStatus,
   roomCreate,
+  roomKeepwarm,
+  roomKeepwarmSave,
   roomList,
   roomModelCatalog,
   roomModelPolicy,
@@ -68,8 +91,22 @@ export default function contribute(server: PluginServerContext) {
     void get().catch(() => undefined);
   });
   void get().catch(() => undefined);
+  server.handle(maintenanceReconcile, async ({ holdId }, { paseo }) =>
+    (await get()).reconcileMaintenance(holdId, paseo),
+  );
+  server.handle(maintenanceStatus, async () => ({
+    durablePause: true as const,
+    humanDecisionAttribution: true as const,
+    hold: await readMaintenanceHold((await get()).home),
+  }));
   server.handle(mcpRead, async () => scopedMcpState((await get()).home));
-  server.handle(claudeAccountsRead, async () => claudeAccountsState((await get()).home));
+  server.handle(claudeAccountsRead, async () => {
+    const instance = await get();
+    return {
+      ...(await claudeAccountsState(instance.home)),
+      sessions: await instance.claudeAccountSessions(),
+    };
+  });
   let quotaRequest: ReturnType<typeof claudeQuota> | undefined;
   let quotaAt = 0;
   server.handle(claudeQuotaRead, async () => {
@@ -84,6 +121,17 @@ export default function contribute(server: PluginServerContext) {
   });
   server.handle(claudeAccountsSelect, async ({ role, account, revision }) =>
     selectClaudeAccount((await get()).home, role, account, revision),
+  );
+  server.handle(projectClaudeAccountRead, async ({ roomId }) => {
+    const instance = await get();
+    return projectClaudeAccountState(instance.home, instance.store.room(roomId).id);
+  });
+  server.handle(projectClaudeAccountSelect, async ({ roomId, account, revision }) => {
+    const instance = await get();
+    return selectProjectClaudeAccount(instance.home, instance.store.room(roomId).id, account, revision);
+  });
+  server.handle(claudeAccountsSwitchNow, async ({ agentId, selected }) =>
+    (await get()).switchClaudeNow(agentId, selected),
   );
   server.handle(skillsRead, async ({ cwd }) => projectSkillSettings(cwd));
   server.handle(skillsSave, async ({ cwd, selected, revision, disabledBundled }) =>
@@ -104,12 +152,14 @@ export default function contribute(server: PluginServerContext) {
   server.handle(obligationAdd, async (input, { paseo }) => (await get()).obligations.add(input, paseo));
   server.handle(obligationAction, async (input, { paseo }) => (await get()).obligations.action(input, paseo));
   server.handle(autonomyList, async () => (await get()).autonomy.list());
-  server.handle(autonomyStart, async ({ agentId, ...options }) =>
-    (await get()).autonomy.start(agentId, options),
-  );
-  server.handle(autonomyCheckpoint, async ({ agentId, phase, reason, turnId }) =>
-    (await get()).autonomy.checkpoint(agentId, phase, reason, turnId),
-  );
+  server.handle(autonomyStart, async ({ agentId, ...options }, { paseo }) => {
+    const r = await get();
+    return r.startAutonomy(agentId, options, paseo);
+  });
+  server.handle(autonomyCheckpoint, async ({ agentId, phase, reason, turnId }, { paseo }) => {
+    const r = await get();
+    return r.checkpoint(agentId, phase, reason, turnId, paseo);
+  });
   server.handle(wakeList, async () => {
     const r = await get();
     await r.wakeups.tick();
@@ -127,6 +177,14 @@ export default function contribute(server: PluginServerContext) {
       input.minutes,
     ),
   );
+  server.handle(jobSettle, async (input) => {
+    const r = await get();
+    return settleJob(r.store, input);
+  });
+  server.handle(jobArchive, async (input) => {
+    const r = await get();
+    return archiveJob(r.store, input);
+  });
   server.handle(jobTrack, async (input) => (await get()).trackJob(input));
   server.handle(jobOwner, async (input, { paseo }) =>
     (await get()).changeJobOwner(input.key, input.ownerId, input.revision, paseo),
@@ -140,14 +198,26 @@ export default function contribute(server: PluginServerContext) {
   server.handle(roomList, async (_input, { paseo }) => (await get()).list(paseo));
   server.handle(roomCreate, async (input, { paseo }) => (await get()).createRoom(input, paseo));
   server.handle(roomModelPolicy, async ({ roomId }) => (await get()).store.modelPolicy(roomId));
+  server.handle(roomKeepwarm, async ({ roomId }) => (await get()).store.keepwarm(roomId));
+  server.handle(roomKeepwarmSave, async ({ roomId, enabled, actorId, maxPings }) =>
+    (await get()).store.setKeepwarm(roomId, enabled, actorId, maxPings),
+  );
+  server.handle(contextRead, async ({ roomId }) => {
+    const instance = await get();
+    return contextSettings(instance.home, instance.store.room(roomId).id);
+  });
+  server.handle(contextSave, async ({ roomId, policy, revision, actorId }) => {
+    const instance = await get();
+    return saveContextSettings(instance.home, instance.store.room(roomId).id, policy, revision, actorId);
+  });
   server.handle(roomModelPolicySave, async ({ roomId, policy, revision }) =>
     (await get()).store.saveModelPolicy(roomId, policy, revision),
   );
   server.handle(roomModelPolicyReset, async ({ roomId, revision }) =>
     (await get()).store.resetModelPolicy(roomId, revision),
   );
-  server.handle(roomModelCatalog, async ({ roomId, harness, role }, { paseo }) => ({
-    models: (await (await get()).modelCatalog(roomId, harness, role, paseo))
+  server.handle(roomModelCatalog, async ({ roomId, harness, role, scope }, { paseo }) => ({
+    models: (await (await get()).modelCatalog(roomId, harness, role, paseo, scope))
       .filter((model) => model.isSelectable !== false && allowedModel(harness, model.id))
       .map((model) => ({
         id: model.id,
@@ -166,7 +236,9 @@ export default function contribute(server: PluginServerContext) {
   server.handle(memberResume, async (input, { paseo }) =>
     (await get()).resume(input.agentId, input.prompt, paseo),
   );
-  server.handle(memberKeep, async ({ agentId, keep, actorId }) => (await get()).keep(agentId, keep, actorId));
+  server.handle(memberKeep, async ({ agentId, keep, actorId, reason, hours }) =>
+    (await get()).keep(agentId, keep, actorId, { reason, hours }),
+  );
   server.handle(memberDisposition, async (input, { paseo }) =>
     (await get()).disposition(
       input.agentId,
@@ -178,6 +250,7 @@ export default function contribute(server: PluginServerContext) {
       paseo,
       input.integration,
       input.analysisRoot,
+      { keep: input.keep, rework: input.rework, forHuman: input.forHuman, source: input.source },
     ),
   );
   server.addHook("agent.create.before", async ({ request }, { paseo }) => {
@@ -221,6 +294,7 @@ export default function contribute(server: PluginServerContext) {
       cwd: request.cwd,
       title: null,
     });
+    const member = instance.store.member(request.agentId);
     const recovery = await instance.recoveryContext(request.agentId);
     const selectedModel =
       profile.harness === "claude"
@@ -232,8 +306,11 @@ export default function contribute(server: PluginServerContext) {
         ...request.env,
         // Read the current native selection on every open, including resumed sessions.
         ALLIANCE_SESSION_MODEL: selectedModel ?? "",
+        ALLIANCE_CLAUDE_ROOM: profile.harness === "claude" ? (member?.roomId ?? room.id) : "",
         ALLIANCE_BOUND_ROOM: room.id,
         ALLIANCE_WORKSPACE_CWD: request.cwd,
+        // Temporary data of this session dies here: its own directory, emptied by `scratch clean`.
+        ...scratchEnvironment(instance.home, member?.roomId ?? room.id, request.agentId),
         HOME: profile.osHome,
         XDG_CONFIG_HOME: `${profile.osHome}/.config`,
         XDG_DATA_HOME: `${profile.osHome}/.local/share`,
@@ -241,7 +318,7 @@ export default function contribute(server: PluginServerContext) {
         ALLIANCE_WORK_HOME: instance.home,
         ALLIANCE_ROLE: profile.role,
         ALLIANCE_ARTIFACTS: room.artifacts,
-        ALLIANCE_ASSIGNMENT: instance.store.member(request.agentId)?.assignment ?? "",
+        ALLIANCE_ASSIGNMENT: member?.assignment ?? "",
         ALLIANCE_CONTEXT: recovery,
         CODEX_HOME: profile.harness === "codex" ? profile.home : `${profile.osHome}/.codex`,
         CLAUDE_CONFIG_DIR: profile.harness === "claude" ? profile.home : `${profile.osHome}/.claude`,

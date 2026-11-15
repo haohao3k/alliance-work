@@ -86,7 +86,26 @@ export async function reloadRegisteredPlugin(home, root = projectRoot) {
   } finally {
     await client.close();
   }
-  paseo(["plugin", "reload", "alliance-work"], home, root);
+  await reloadPlugin(home, root);
+}
+
+/**
+ * Paseo gives a plugin child 30 s to initialize and terminates it when it misses that; a loaded
+ * host can miss it once and load on the next reload. Only that failure is retried.
+ */
+export async function reloadPlugin(home, root = projectRoot, backoffMs = [5000, 15000, 30000]) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return paseo(["plugin", "reload", "alliance-work"], home, root);
+    } catch (error) {
+      if (attempt >= backoffMs.length || !/Plugin alliance-work did not initialize/.test(error.message))
+        throw error;
+      console.error(
+        `Plugin reload ${attempt + 1} missed Paseo's initialize deadline; reloading again in ${backoffMs[attempt] / 1000} s (retry ${attempt + 1} of ${backoffMs.length}).`,
+      );
+      await sleep(backoffMs[attempt]);
+    }
+  }
 }
 
 /**
@@ -163,4 +182,23 @@ export async function verifyRuntime(home, root = projectRoot) {
     if (!response.ok) throw new Error(`Alliance ${path} returned ${response.status}.`);
   }
   return { version: state.daemonVersion, url, plugin: plugin.status };
+}
+
+/** A plugin hot reload cannot retrofit the native admission lock. Read before activation. */
+export async function requireIdleSwitchDaemon(home) {
+  const config = JSON.parse(await readFile(join(home, "config.json"), "utf8"));
+  const client = commandClient({
+    url: `ws://${config.daemon.listen}/ws`,
+    clientId: "alliance-switch-capability",
+    password: process.env.ALLIANCE_PASEO_PASSWORD,
+  });
+  try {
+    await client.connect();
+    if (client.getLastServerInfoMessage()?.features?.idleAccountSwitch !== true)
+      throw new Error(
+        "Daemon lacks safe idle account switching. Candidate retained; no activation. Wait for an owned idle native daemon maintenance window; do not restart running work.",
+      );
+  } finally {
+    await client.close();
+  }
 }

@@ -2,8 +2,19 @@ import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { ClaudeAccountId, ClaudeAccounts, ClaudeRole, ClaudeSelection } from "../shared/claude-accounts.mjs";
+import {
+  ClaudeAccountId,
+  ClaudeAccounts,
+  ClaudeProjectAccounts,
+  ClaudeRole,
+  ClaudeRoomId,
+  ClaudeSelection,
+} from "../shared/claude-accounts.mjs";
 import { assertNoLinks } from "./profile-integrity.mjs";
+
+const hostSettings = "claude-accounts.json";
+const projectSettings = "claude-project-accounts.json";
+const ClaudeHostAccounts = ClaudeAccounts.omit({ projects: true });
 
 async function atomicWrite(path, value) {
   await assertNoLinks(path);
@@ -105,19 +116,37 @@ export function osCredentialStore(home, platform = process.platform, run = crede
   };
 }
 
-export async function claudeAccountsState(home) {
-  let config;
+/**
+ * @template T
+ * @param {string} path
+ * @param {{parse(input: unknown): T}} schema
+ * @param {unknown} defaults
+ */
+async function readSettings(path, schema, defaults) {
   try {
-    config = ClaudeAccounts.parse(JSON.parse(await privateRead(join(home, "claude-accounts.json"))));
+    return schema.parse(JSON.parse(await privateRead(path)));
   } catch (error) {
     if (error.code !== "ENOENT")
       throw new Error("Cannot read Claude account settings; repair the host configuration.");
-    config = ClaudeAccounts.parse({ version: 1, accounts: [], defaultAccount: "legacy", roles: {} });
+    return schema.parse(defaults);
   }
-  return { config, revision: createHash("sha256").update(JSON.stringify(config)).digest("hex") };
 }
 
-async function edit(home, revision, change) {
+export async function claudeAccountsState(home) {
+  const [host, { projects }] = await Promise.all([
+    readSettings(join(home, hostSettings), ClaudeHostAccounts, {
+      version: 1,
+      accounts: [],
+      defaultAccount: "legacy",
+    }),
+    readSettings(join(home, projectSettings), ClaudeProjectAccounts, { version: 1 }),
+  ]);
+  const config = { ...host, projects };
+  const revisionInput = Object.keys(projects).length ? config : host;
+  return { config, revision: createHash("sha256").update(JSON.stringify(revisionInput)).digest("hex") };
+}
+
+async function edit(home, revision, change, target = hostSettings) {
   await assertNoLinks(home);
   await mkdir(home, { recursive: true, mode: 0o700 });
   const lock = join(home, ".claude-accounts-lock");
@@ -128,8 +157,11 @@ async function edit(home, revision, change) {
     const state = await claudeAccountsState(home);
     if (revision && state.revision !== revision)
       throw new Error("Claude accounts changed; reload before saving.");
-    const config = ClaudeAccounts.parse(await change(state.config));
-    await atomicWrite(join(home, "claude-accounts.json"), `${JSON.stringify(config, null, 2)}\n`);
+    const { projects, ...host } = ClaudeAccounts.parse(await change(state.config));
+    // One atomic file write under the same lock for both scopes. The host file's
+    // shape remains readable by releases that predate project account selection.
+    const value = target === projectSettings ? { version: 1, projects } : host;
+    await atomicWrite(join(home, target), `${JSON.stringify(value, null, 2)}\n`);
     return claudeAccountsState(home);
   } finally {
     await rm(lock, { recursive: true });
@@ -163,13 +195,68 @@ export async function selectClaudeAccount(home, role, account, revision, store =
   });
 }
 
-export async function selectedClaudeCredentials(home, role, store = osCredentialStore(home)) {
+/** @param {Awaited<ReturnType<typeof claudeAccountsState>>} state @param {string} roomId */
+function projectAccountState({ config, revision }, roomId) {
+  return { account: config.projects[roomId] ?? "inherit", accounts: config.accounts, revision };
+}
+
+export async function projectClaudeAccountState(home, roomId) {
+  ClaudeRoomId.parse(roomId);
+  return projectAccountState(await claudeAccountsState(home), roomId);
+}
+
+export async function selectProjectClaudeAccount(
+  home,
+  roomId,
+  account,
+  revision,
+  store = osCredentialStore(home),
+) {
+  ClaudeRoomId.parse(roomId);
+  if (account !== "inherit") ClaudeAccountId.parse(account);
+  if (!revision) throw new Error("Claude accounts revision is required; reload before saving.");
+  const state = await edit(
+    home,
+    revision,
+    async (config) => {
+      const projects = { ...config.projects };
+      if (account === "inherit") delete projects[roomId];
+      else {
+        if (!config.accounts.includes(account)) throw new Error("Provision this account on this host first.");
+        if (!(await store.get(account))) throw new Error("Selected credential is unavailable.");
+        projects[roomId] = account;
+      }
+      return { ...config, projects };
+    },
+    projectSettings,
+  );
+  return projectAccountState(state, roomId);
+}
+
+/**
+ * @param {import("zod").output<typeof ClaudeAccounts>} config
+ * @param {import("zod").output<typeof ClaudeRole>} role
+ * @param {string} [roomId]
+ */
+export function selectedClaudeAccount(config, role, roomId) {
+  const projects = config.projects ?? {};
+  const project = roomId && Object.hasOwn(projects, roomId) ? projects[roomId] : undefined;
+  return project ?? config.roles[role] ?? config.defaultAccount;
+}
+
+/** @param {string} [roomId] */
+export async function selectedClaudeLaunch(home, role, store = osCredentialStore(home), roomId) {
   const { config } = await claudeAccountsState(home);
-  const account = config.roles[role] ?? config.defaultAccount;
-  if (account === "legacy") return null;
+  const account = selectedClaudeAccount(config, role, roomId);
+  if (account === "legacy") return { account, credentials: null };
   if (!config.accounts.includes(account))
     throw new Error("Selected Claude account is not provisioned on this host.");
   const token = await store.get(account);
   if (!token) throw new Error("Selected Claude credential is unavailable; no fallback was used.");
-  return { CLAUDE_CODE_OAUTH_TOKEN: token };
+  return { account, credentials: { CLAUDE_CODE_OAUTH_TOKEN: token } };
+}
+
+/** @param {string} [roomId] */
+export async function selectedClaudeCredentials(home, role, store = osCredentialStore(home), roomId) {
+  return (await selectedClaudeLaunch(home, role, store, roomId)).credentials;
 }

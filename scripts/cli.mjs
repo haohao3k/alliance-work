@@ -5,6 +5,7 @@ import { rmSync } from "node:fs";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { diskHealth, withDiskWarnings } from "../server/disk-health.mjs";
 import { Evidence, runVerification } from "../server/evidence.mjs";
 import { inspectFailureEval, runFailureEval } from "../server/failure-evals.mjs";
 import { runFeatureVerification } from "../server/feature-verification.mjs";
@@ -15,6 +16,7 @@ import { userMcpServers } from "../server/user-mcp.mjs";
 import { IntegrationPlan } from "../shared/integration.mjs";
 import { setAgyAuthSource } from "./agy-auth.mjs";
 import { authStatus, setAuthSource } from "./auth.mjs";
+import { cliHints } from "./cli-hints.mjs";
 import { commandClient } from "./command-client.mjs";
 import {
   BUSY_EXIT,
@@ -26,6 +28,7 @@ import {
   waitForIdle,
 } from "./deploy.mjs";
 import { downloadRelease, isNewerRelease, releaseInfo, repository, run } from "./distribution.mjs";
+import { fleetHosts, fleetStatus, formatFleet } from "./fleet.mjs";
 import {
   activate,
   doctor,
@@ -37,11 +40,13 @@ import {
 } from "./maintenance.mjs";
 import { schedulerPausedAt } from "./paseo.mjs";
 import { projectRoot } from "./profiles.mjs";
+import { collectReleases, describeCollection, removeBundleBoot, summarizeCollection } from "./release-gc.mjs";
 import { enableMobbin, userMcpSettings } from "./user-mcp.mjs";
 import { registerWait } from "./wait.mjs";
+import { withWorkSafety } from "./work-safety.mjs";
 
 const args = process.argv.slice(2);
-/** The deciding agent is the caller's Paseo identity. Outside any agent session it is the Human. */
+/** The deciding agent is the caller's Paseo identity; a terminal without one has unknown attribution. */
 function caller() {
   const id = process.env.PASEO_AGENT_ID || null;
   if (!id && (process.env.ALLIANCE_ROLE || process.env.ALLIANCE_BOUND_ROOM))
@@ -74,6 +79,10 @@ const positional = [];
 let checkCommand = [];
 const repeated = { "--input": [], "--artifact": [], "--unverified": [], "--feature": [], "--host": [] };
 const values = new Set([
+  "--max",
+  "--rework",
+  "--source",
+  "--hours",
   "--phase",
   "--max-retries",
   "--max-continuations",
@@ -82,6 +91,7 @@ const values = new Set([
   "--room",
   "--owner",
   "--evidence",
+  "--outcome",
   "--digest",
   "--product",
   "--integration",
@@ -125,6 +135,11 @@ const values = new Set([
   "--wait-idle",
   "--remote-home",
   "--harness",
+  "--scope",
+  "--older",
+  "--min-age-minutes",
+  "--role",
+  "--claude-window",
 ]);
 const switches = new Set([
   "--help",
@@ -137,11 +152,51 @@ const switches = new Set([
   "--hold",
   "--remember",
   "--off",
+  "--keep",
+  "--for-human",
   "--separate",
   "--separate-auth",
   "--json",
   "--all",
+  "--interrupt",
+  "--include-new",
+  "--apply",
+  "--dry-run",
+  "--include-primary",
 ]);
+function decisionAttribution(actorId) {
+  if (flags["--source"] && !flags["--for-human"]) throw new Error("--source requires --for-human");
+  if (!flags["--for-human"]) return {};
+  if (!actorId) throw new Error("--for-human requires the deciding HQ's PASEO_AGENT_ID");
+  if (!flags["--source"] || !flags["--at"])
+    throw new Error("--for-human requires --source NATIVE_MESSAGE_ID --at ISO_TIMESTAMP");
+  if (!Number.isFinite(Date.parse(flags["--at"])))
+    throw new Error("--at must be the exact native message ISO timestamp");
+  return { forHuman: true, source: { messageId: flags["--source"], timestamp: flags["--at"] } };
+}
+function checkDecisionAttribution(result, attribution) {
+  if (
+    attribution.forHuman &&
+    (result.authorizedBy !== "Human" ||
+      result.source?.messageId !== attribution.source.messageId ||
+      result.source?.timestamp !== attribution.source.timestamp)
+  )
+    throw new Error(
+      "The member decision was recorded, but the running plugin did not confirm Human attribution. Upgrade the plugin before recording --for-human; inspect the disposition before retrying.",
+    );
+}
+async function requireDecisionAttribution(client, attribution) {
+  if (!attribution.forHuman) return;
+  const status = await client.invokePluginRpc("alliance-work", "maintenance.status", {}).catch(() => {
+    throw new Error(
+      "The running plugin could not confirm Human attribution support. Check its connection/version before recording --for-human. No decision was sent.",
+    );
+  });
+  if (status.humanDecisionAttribution !== true)
+    throw new Error(
+      "The running plugin does not support Human attribution; upgrade it before recording --for-human. No decision was sent.",
+    );
+}
 const help = `Alliance Work — isolated agent rooms on native Paseo
 
   alliance-work install [--codex-auth-from ~/.codex]
@@ -168,11 +223,32 @@ const help = `Alliance Work — isolated agent rooms on native Paseo
                                      Remove one project's extra MCP settings
   alliance-work mcp preview --project PATH --harness codex|claude|pi|agy
                                      Show the effective MCP launch configuration
+  alliance-work usage [--days N] [--json]   Read-only tokens, cache hit, est. cost by provider/role (see usage --help)
+  alliance-work scratch clean         Empty this session's own scratch ($ALLIANCE_SCRATCH, also $TMPDIR); no approval needed
+  alliance-work scratch clean PATH    Remove one subpath of your own scratch (same refusals)
+  alliance-work disk [--json]         Read scratch per room/member and worktrees of archived members; deletes nothing
+  alliance-work cleanup artifacts [--scope own-scratch|archived|archived-scratch|archived-worktrees]
+                                      [--older 1d] [--include-primary] [--apply]
+                                      Rebuildable node_modules, target, .venv, caches. Lists by default; a
+                                      session may apply only in its own scratch; the Human elsewhere
+  alliance-work cleanup worktrees|scratch [--base REF] [--apply]
+                                      Archived members only. Dry run by default; --apply (Human) removes clean,
+                                      merged, unused worktrees (git worktree remove, no --force) / their scratch
   alliance-work doctor                Verify homes, capabilities, pinned source and live plugin
-  alliance-work status                Read agents, owners, decisions and tracked processes
+  alliance-work status                Read agents, owners, decisions and tracked processes; warns when
+                                      work is not in a safe place (no remote, unpushed, no VCS)
   alliance-work members owner --agent ID --owner ID|Human --revision N --evidence HANDOFF_FILE
-  alliance-work members keep --agent ID [--off]   Keep an agent open; acceptance will not archive it
+  alliance-work members keep --agent ID --reason TEXT [--hours N]
+                                      Keep an agent open past acceptance for follow-up work you handed it;
+                                      lapses after N hours (default 24) or when you are archived.
+  alliance-work members keep --agent ID --off     Lift a keep
+  alliance-work context show --room ID    Read the room's Claude context window and role overrides
+  alliance-work context set --room ID [--role hq|supervisor|lead|peer|lens] --claude-window 300000|232000
+  alliance-work context reset --room ID [--role hq|supervisor|lead|peer|lens]
+      Human-only writes; omit --role to set the room default or reset the entire room.
+      Default 300000; 232000 opts into the Claude compact pilot. Codex and Pi are unchanged.
   alliance-work models show [--room ID]   Read each room's Peer/Lens allowlist (saved or release default)
+  alliance-work keepwarm --room ID on|off|status [--max N]   Human-only opt-in Claude owner pings
   alliance-work models reset --room ID|--all
                                       Human only: drop saved settings so rooms follow the release default
   alliance-work policy read --agent ID
@@ -181,6 +257,8 @@ const help = `Alliance Work — isolated agent rooms on native Paseo
   alliance-work obligations add --file OBLIGATION.json
   alliance-work obligations action --file ACTION.json
   alliance-work obligations history --key KEY
+  alliance-work jobs settle --key KEY --revision N --outcome succeeded|failed|superseded|unverified --reason TEXT --evidence FILE
+  alliance-work jobs archive|restore --key KEY --revision N
   alliance-work jobs track --pid PID --key RUN_ID --title TITLE [--room ID] [--owner AGENT]
                                       Room and owner default to the agent session's own
   alliance-work jobs owner --key RUN_ID --owner AGENT --revision N
@@ -201,7 +279,7 @@ const help = `Alliance Work — isolated agent rooms on native Paseo
   alliance-work wakeups defer --key KEY --owner AGENT --revision N --minutes M
                                       Due again in M minutes; at most 3 times, then decide or cancel
   alliance-work wakeups owner --key KEY --owner OLD --next-owner NEW --revision N
-  alliance-work update --check        Read latest private GitHub release; change nothing
+  alliance-work update --check        Read latest public GitHub release; change nothing
   alliance-work update                Verify, stage, check and activate the latest release
   alliance-work update --wait-idle 120  Stage now; activate once no agent runs (max 120 minutes)
   alliance-work update --wait-idle 120 --hold
@@ -210,25 +288,50 @@ const help = `Alliance Work — isolated agent rooms on native Paseo
   alliance-work update --bundle DIR   Activate a release copied here by deploy; no GitHub access
   alliance-work deploy --host H [--host H2] [--wait-idle MIN [--hold]] [--detach] [--remember]
                                       Push the latest release over SSH and update each host
+  alliance-work fleet status [--host H ...] [--timeout-ms 30000] [--json]
+                                      Read-only: per host (remembered deploy list, or --host) and here,
+                                      versions, disk, unarchived sessions/members, plugin running
+  alliance-work maintenance status    Read the durable task hold and recovery ledger
+  alliance-work maintenance run --reason TEXT [--timeout-ms 60000] [--interrupt] -- COMMAND [ARGS...]
+                                      Checkpoint running tasks, run a verified update command, resume
+                                      the same sessions; --interrupt allows native stop after timeout
+  alliance-work maintenance run --include-new --key ID ... -- COMMAND [ARGS...]
+                                      Explicitly capture new running tasks into the same failed hold;
+                                      prior held checkpoints and original baselines remain intact
+  alliance-work maintenance hold --reason TEXT [--timeout-ms 60000] [--interrupt]
+                                      Leave a durable hold on a plugin supporting maintenance.status
+  alliance-work maintenance resume --reason TEXT --evidence FILE
+                                      Verify native health and recover only the held sessions
   alliance-work rollback              Activate the previous installation when idle
+  alliance-work cleanup releases [--apply] [--min-age-minutes 60]
+                                      List old releases that no installation, config or running process
+                                      needs (dry run); --apply deletes them. Updates do this on their own.
   alliance-work skills list [--project PATH]
   alliance-work skills add .agents/skills/NAME [--project PATH]
   alliance-work skills settings [--project PATH]
   alliance-work skills save --file SELECTION.json --revision HASH [--project PATH]
   alliance-work skills remove .agents/skills/NAME --revision HASH [--project PATH]
   alliance-work verify --scenario NAME [--project PATH] [--base BASE_SHA] -- COMMAND [ARGS...]
+      --base records a reviewed Git contribution scope.
   alliance-work verify --map .alliance/features.json [--feature ID] [--project PATH]
   alliance-work eval --suite .alliance/evals/failure.json [--project PATH]
   alliance-work eval inspect --report /absolute/eval.json [--project PATH]
-  alliance-work accept --agent ID --report /absolute/report.json [--product /absolute/journey.json] [--integration /absolute/plan.json]
+  alliance-work accept --agent ID --report /absolute/report.json [--product /absolute/journey.json] [--integration /absolute/plan.json] [--for-human --source MESSAGE_ID --at ISO_TIMESTAMP]
       --analysis-root /absolute/room/artifacts/bundle accepts explicit analysis files in that room only;
       it cannot be combined with --product or --integration and never implies product completion.
-      --base records a reviewed Git contribution scope. Product acceptance checks accepted children;
+      Product acceptance checks accepted children;
       --integration maps squash/cherry-pick/files or records non-code analysis with immutable evidence.
       --report is the report verify writes for the candidate, not a turn file.
       Only the responsible owner chain or the Human may accept. An accepted idle Peer/Lens with no
       open work is archived; HQ/Supervisor/Lead need --product from an owner, or the Human.
-  alliance-work reject --agent ID --reason TEXT   Record that the latest handback is not accepted
+      Accepting also lifts a keep you set on the agent earlier and settles its reminders that already
+      fired; --keep keeps the agent open for follow-up work (24 hours, see members keep).
+  alliance-work reject --agent ID --reason TEXT [--rework TEXT] [--for-human --source MESSAGE_ID --at ISO_TIMESTAMP]
+      Record that the latest handback is not accepted. --rework sends the agent the reason and this
+      rework as its next prompt in one step; nothing is archived either way.
+      --for-human is a live HQ's attestation of Human authorization. Cite the exact native user message
+      ID and timestamp in HQ's chat; its existence is checked, not its Human origin. HQ remains decider.
+      This never bypasses owner authority or candidate evidence. No identity means unknown attribution.
 
 Verification options: --kind test|runtime|analysis (default test), --target LABEL,
   --input FILE (repeat for ignored runtime inputs), --artifact FILE (repeat),
@@ -241,9 +344,49 @@ Options: --home PATH, --paseo-home PATH, --bin-dir PATH, --port 6771,
          --codex-auth-from PATH, --separate-auth, --json
 Requires Node 24+ and native Codex/Claude. Pi is bundled; update and deploy read releases with
 authenticated gh; deploy targets need only SSH and an existing installation.
-Paseo is pinned per release. Maintenance never restarts a running daemon.
+Paseo is pinned per release. Ordinary activation waits for idle; maintenance run explicitly
+checkpoints tasks, runs the chosen update command and resumes its retained sessions.
 `;
+const settleHelp = `Record an exited job's outcome; this does not accept a product or stop a process.
+
+  alliance-work jobs settle --key KEY --revision N --outcome succeeded|failed|superseded|unverified --reason TEXT --evidence FILE
+
+Evidence schema (a JSON object, separate from a verify report):
+  key: string, pid: number, processIdentity: string, outcome: string, reason: nonempty string
+  artifacts: [{"path": ABSOLUTE_PATH, "sha256": SHA256_HEX}]
+
+Copy key, pid and processIdentity from alliance-work jobs list; use its current revision.
+outcome and reason must exactly match --outcome and --reason. FILE must be absolute.
+succeeded, failed and superseded require nonempty artifacts with current SHA-256 hashes.
+unverified makes no success claim and needs no artifacts. Use a separate proof per job.
+Only the owner chain or Human may settle; running/unknown jobs and stale revisions are refused.
+Add the same --home HOME to list and settle when using a nondefault installation.
+
+Examples: replace the job identity and revision below with jobs list values before running.
+Use your own evidence paths; for verified results replace the artifact path and hash too.
+
+Unverified historical result:
+cat > "$PWD/job-unverified.json" <<'JSON'
+{"key":"build-r1","pid":12345,"processIdentity":"COPY_FROM_JOBS_LIST","outcome":"unverified","reason":"Historical result unavailable"}
+JSON
+alliance-work jobs settle --key build-r1 --revision 1 --outcome unverified --reason "Historical result unavailable" --evidence "$PWD/job-unverified.json"
+
+Verified result (interpret the artifact before claiming success):
+cat > "$PWD/job-succeeded.json" <<'JSON'
+{"key":"build-r2","pid":12346,"processIdentity":"COPY_FROM_JOBS_LIST","outcome":"succeeded","reason":"Result checked","artifacts":[{"path":"/absolute/result.txt","sha256":"COPY_CURRENT_SHA256_HEX"}]}
+JSON
+alliance-work jobs settle --key build-r2 --revision 1 --outcome succeeded --reason "Result checked" --evidence "$PWD/job-succeeded.json"
+`;
+const hints = cliHints({
+  help,
+  flags: [...values, ...switches, ...Object.keys(repeated)],
+  valueFlags: [...values, ...Object.keys(repeated)],
+});
 try {
+  if (args[0] === "usage") {
+    console.log(await (await import("./usage-cli.mjs")).usageCommand(args.slice(1)));
+    process.exit(process.exitCode ?? 0);
+  }
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === "--") {
@@ -266,8 +409,10 @@ try {
     process.exit(0);
   }
   const command = positional[0];
+  if ((flags["--for-human"] || flags["--source"]) && !["accept", "reject"].includes(command))
+    throw new Error("--for-human and --source apply only to member accept/reject decisions");
   if (!command || flags["--help"] || flags["-h"]) {
-    console.log(help);
+    console.log(command === "jobs" && positional[1] === "settle" ? settleHelp : help);
     process.exit(0);
   }
   const home = resolve(
@@ -283,7 +428,51 @@ try {
     authFrom: flags["--codex-auth-from"],
     separateAuth: !!flags["--separate-auth"],
   };
-  if (command === "accounts") {
+  /** Releases changed within this many minutes are never collected (default 60). */
+  const releaseAge = () => {
+    const minutes = flags["--min-age-minutes"];
+    if (minutes === undefined) return {};
+    if (!(Number(minutes) >= 0)) throw new Error("--min-age-minutes takes minutes (0 or more).");
+    return { minAgeMs: Number(minutes) * 60000 };
+  };
+  if (command === "context") {
+    const { contextCommand } = await import("./context-cli.mjs");
+    let client;
+    try {
+      output(
+        await contextCommand(positional.slice(1), flags, {
+          actorId: caller(),
+          invoke: async (method, input) => {
+            client ??= await daemonClient(home, "alliance-context");
+            return client.invokePluginRpc("alliance-work", method, input);
+          },
+        }),
+      );
+    } finally {
+      if (client) await client.close();
+    }
+  } else if (command === "maintenance") {
+    if (caller()) throw new Error("Runtime maintenance belongs to the Human; run outside an agent session");
+    const { taskMaintenanceCommand } = await import("./task-maintenance-cli.mjs");
+    output(
+      await taskMaintenanceCommand(home, positional[1], {
+        reason: flags["--reason"],
+        evidence: flags["--evidence"],
+        key: flags["--key"],
+        timeoutMs: flags["--timeout-ms"] === undefined ? undefined : Number(flags["--timeout-ms"]),
+        interrupt: !!flags["--interrupt"],
+        includeNew: !!flags["--include-new"],
+        command: checkCommand,
+      }),
+    );
+  } else if (
+    command === "scratch" ||
+    command === "disk" ||
+    (command === "cleanup" && ["worktrees", "scratch", "artifacts"].includes(positional[1]))
+  ) {
+    const { diskCommand } = await import("./disk-cli.mjs");
+    output(await diskCommand(home, positional, flags));
+  } else if (command === "accounts") {
     if (caller()) throw new Error("Claude account credentials and selection belong to the Human.");
     const { claudeAccountsCommand } = await import("./claude-accounts-cli.mjs");
     output(await claudeAccountsCommand(home, positional.slice(1)));
@@ -439,9 +628,22 @@ try {
       } else throw new Error("Usage: autonomy start|checkpoint|list (see --help)");
     }
     if (command === "members" && positional[1] === "keep") {
-      if (!flags["--agent"]) throw new Error("Usage: members keep --agent ID [--off]");
+      if (!flags["--agent"])
+        throw new Error("Usage: members keep --agent ID --reason TEXT [--hours N] | --off");
+      if (!flags["--off"] && !flags["--reason"]?.trim())
+        throw new Error(
+          "members keep needs --reason TEXT: keep an agent only for follow-up work you handed it, and say which",
+        );
+      const hours = flags["--hours"] === undefined ? undefined : Number(flags["--hours"]);
+      if (hours !== undefined && !(hours > 0 && hours <= 720))
+        throw new Error("--hours takes a number of hours, up to 720");
       method = "members.keep";
-      input = { agentId: flags["--agent"], keep: !flags["--off"], actorId: caller() };
+      input = {
+        agentId: flags["--agent"],
+        keep: !flags["--off"],
+        actorId: caller(),
+        ...(flags["--off"] ? {} : { reason: flags["--reason"], ...(hours === undefined ? {} : { hours }) }),
+      };
     } else if (command === "members") {
       if (positional[1] !== "owner") throw new Error("Usage: members owner|keep");
       for (const flag of ["--agent", "--owner", "--revision", "--evidence"])
@@ -485,8 +687,32 @@ try {
         if (!flags[flag]) throw new Error(`Missing ${flag}`);
       method = "jobs.owner";
       input = { key: flags["--key"], ownerId: flags["--owner"], revision: Number(flags["--revision"]) };
+    } else if (command === "jobs" && ["settle", "archive", "restore"].includes(positional[1])) {
+      for (const flag of ["--key", "--revision"]) if (!flags[flag]) throw new Error(`Missing ${flag}`);
+      const actorId = process.env.PASEO_AGENT_ID ?? null;
+      if (positional[1] === "settle") {
+        for (const flag of ["--outcome", "--reason", "--evidence"])
+          if (!flags[flag]) throw new Error(`Missing ${flag}`);
+        method = "jobs.settle";
+        input = {
+          key: flags["--key"],
+          revision: Number(flags["--revision"]),
+          actorId,
+          outcome: flags["--outcome"],
+          reason: flags["--reason"],
+          evidence: flags["--evidence"],
+        };
+      } else {
+        method = "jobs.archive";
+        input = {
+          key: flags["--key"],
+          revision: Number(flags["--revision"]),
+          actorId,
+          archive: positional[1] === "archive",
+        };
+      }
     } else if (command === "jobs" && positional[1] !== "list")
-      throw new Error("Usage: jobs list|track|owner");
+      throw new Error("Usage: jobs list|track|owner|settle|archive|restore");
     if (command === "wakeups") {
       const action = positional[1];
       const ownerId = flags["--owner"] ?? process.env.PASEO_AGENT_ID;
@@ -543,16 +769,67 @@ try {
     try {
       await client.connect();
       const result = await client.invokePluginRpc("alliance-work", method, input);
-      output(command === "jobs" && positional[1] === "list" ? result.jobs : result);
+      // Disk warnings are computed here, not in the plugin, so a plugin loaded before this release shows them too.
+      const health =
+        command === "status"
+          ? await diskHealth({ home, paseoHome: current.paseoHome }).catch(() => null)
+          : null;
+      output(
+        command === "jobs" && positional[1] === "list"
+          ? result.jobs
+          : command === "status"
+            ? withDiskWarnings(await withWorkSafety(result, { home }), health)
+            : result,
+      );
+    } finally {
+      await client.close();
+    }
+  } else if (command === "keepwarm") {
+    const action = positional[1];
+    const maxPings = flags["--max"] === undefined ? undefined : Number(flags["--max"]);
+    if (
+      !flags["--room"] ||
+      !["on", "off", "status"].includes(action) ||
+      (maxPings !== undefined &&
+        (!Number.isInteger(maxPings) || maxPings < 1 || maxPings > 5 || action === "status"))
+    )
+      throw new Error("Usage: alliance-work keepwarm --room ID on|off|status [--max N (1-5)]");
+    const actorId = caller();
+    if (action !== "status" && actorId !== null)
+      throw new Error("Keepwarm settings belong to the Human; run outside an agent session.");
+    const client = await daemonClient(home, "alliance-keepwarm");
+    try {
+      output(
+        await client.invokePluginRpc(
+          "alliance-work",
+          action === "status" ? "keepwarm.read" : "keepwarm.save",
+          {
+            roomId: flags["--room"],
+            ...(action === "status" ? {} : { enabled: action === "on", actorId, maxPings }),
+          },
+        ),
+      );
     } finally {
       await client.close();
     }
   } else if (command === "models") {
     const action = positional[1];
-    if (!["show", "reset"].includes(action) || (action === "reset" && !!flags["--room"] === !!flags["--all"]))
-      throw new Error("Usage: alliance-work models show [--room ID] | models reset --room ID|--all");
-    if (action === "reset" && caller())
-      throw new Error("Room model settings belong to the Human; run models reset outside an agent session.");
+    if (
+      !["show", "reset", "save"].includes(action) ||
+      (action === "reset" && !!flags["--room"] === !!flags["--all"]) ||
+      (action === "save" && (!flags["--room"] || !flags["--file"] || flags["--all"]))
+    )
+      throw new Error(
+        "Usage: alliance-work models show [--room ID] | models reset --room ID|--all | models save --room ID --file FILE (JSON: policy, revision)",
+      );
+    if (action !== "show" && caller())
+      throw new Error(
+        `Room model settings belong to the Human; run models ${action} outside an agent session.`,
+      );
+    const edit = action === "save" ? JSON.parse(await readFile(resolve(flags["--file"]), "utf8")) : null;
+    if (action === "save" && (!edit?.policy || !Number.isInteger(edit.revision) || edit.revision < 0))
+      throw new Error("Model settings file requires policy and its nonnegative revision from models show.");
+    const { modelPolicyWarnings } = await import("../shared/model-rules.mjs");
     const client = await daemonClient(home, "alliance-models");
     try {
       const rpc = (method, input) => client.invokePluginRpc("alliance-work", method, input);
@@ -562,8 +839,8 @@ try {
       const result = [];
       for (const room of targets) {
         const { policy, revision, saved, removed } = await rpc(
-          action === "reset" ? "models.reset" : "models.read",
-          { roomId: room.id },
+          action === "reset" ? "models.reset" : action === "save" ? "models.save" : "models.read",
+          { roomId: room.id, ...(action === "save" ? { policy: edit.policy, revision: edit.revision } : {}) },
         );
         const routes = (role) =>
           policy.routes
@@ -578,6 +855,9 @@ try {
           title: room.title,
           settings: saved ? `saved revision ${revision}` : "release default",
           ownerEffort: policy.leadEffort,
+          revision,
+          policy,
+          warnings: modelPolicyWarnings(policy),
           peer: routes("peer"),
           lens: routes("lens"),
           ...(removed
@@ -602,6 +882,7 @@ try {
       ? IntegrationPlan.parse(JSON.parse(await readFile(resolve(flags["--integration"]), "utf8")))
       : undefined;
     const actorId = caller();
+    const attribution = decisionAttribution(actorId);
     const reportPath = resolve(flags["--report"]);
     // Owners passed the turn file their review names, or notes of their own, and got a raw parse error.
     const report = await readFile(reportPath, "utf8")
@@ -622,20 +903,23 @@ try {
     });
     try {
       await client.connect();
-      output(
-        await client.invokePluginRpc("alliance-work", "members.disposition", {
-          agentId: flags["--agent"],
-          decision: "accepted",
-          candidate: report.candidate.digest,
-          evidence: reportPath,
-          actorId,
-          ...(flags["--analysis-root"] ? { analysisRoot: resolve(flags["--analysis-root"]) } : {}),
-          ...(integration ? { integration } : {}),
-          ...(flags["--product"]
-            ? { product: JSON.parse(await readFile(resolve(flags["--product"]), "utf8")) }
-            : {}),
-        }),
-      );
+      await requireDecisionAttribution(client, attribution);
+      const result = await client.invokePluginRpc("alliance-work", "members.disposition", {
+        agentId: flags["--agent"],
+        decision: "accepted",
+        candidate: report.candidate.digest,
+        evidence: reportPath,
+        actorId,
+        ...attribution,
+        ...(flags["--keep"] ? { keep: true } : {}),
+        ...(flags["--analysis-root"] ? { analysisRoot: resolve(flags["--analysis-root"]) } : {}),
+        ...(integration ? { integration } : {}),
+        ...(flags["--product"]
+          ? { product: JSON.parse(await readFile(resolve(flags["--product"]), "utf8")) }
+          : {}),
+      });
+      output(result);
+      checkDecisionAttribution(result, attribution);
     } finally {
       await client.close();
     }
@@ -677,27 +961,49 @@ try {
     }
   } else if (command === "reject") {
     if (!flags["--agent"] || !flags["--reason"])
-      throw new Error("Usage: alliance-work reject --agent ID --reason TEXT");
+      throw new Error("Usage: alliance-work reject --agent ID --reason TEXT [--rework TEXT]");
     const actorId = caller();
+    const attribution = decisionAttribution(actorId);
     const client = await daemonClient(home, "alliance-acceptance");
     try {
+      await requireDecisionAttribution(client, attribution);
       // The plugin binds the decision to the agent's latest turn; the reason is the evidence.
-      output(
-        await client.invokePluginRpc("alliance-work", "members.disposition", {
-          agentId: flags["--agent"],
-          decision: "rejected",
-          candidate: "handback",
-          evidence: flags["--reason"],
-          actorId,
-        }),
-      );
+      const result = await client.invokePluginRpc("alliance-work", "members.disposition", {
+        agentId: flags["--agent"],
+        decision: "rejected",
+        candidate: "handback",
+        evidence: flags["--reason"],
+        actorId,
+        ...attribution,
+        ...(flags["--rework"] ? { rework: flags["--rework"] } : {}),
+      });
+      output(result);
+      checkDecisionAttribution(result, attribution);
+      // A plugin older than 0.1.52 drops --rework without a word: the rejection stands, nothing was sent.
+      if (flags["--rework"] && !result.rework?.sent) {
+        process.exitCode = 1;
+        console.error(
+          `The rejection is recorded but the rework was not delivered${result.rework?.error ? ` (${result.rework.error})` : " (the running plugin predates --rework)"}. Send it as a prompt to ${flags["--agent"]} in its chat.`,
+        );
+      }
     } finally {
       await client.close();
     }
   } else if (command === "install" || (command === "setup" && flags["--refresh"])) {
     if (flags["--codex-auth-from"] && flags["--separate-auth"])
       throw new Error("Choose shared or separate auth, not both.");
-    output(await withMaintenance(home, () => activate(installOptions)));
+    output(
+      await withMaintenance(home, async () => {
+        const result = await activate(installOptions);
+        // Old releases cost about 1G each. A failure to collect them never fails the activation.
+        const collected = await collectReleases({ home, apply: true, ...releaseAge() }).catch((error) => ({
+          error: error.message,
+        }));
+        const summary = summarizeCollection(collected);
+        if (summary) result.releasesRemoved = summary;
+        return result;
+      }),
+    );
   } else if (command === "doctor" || command === "setup") {
     const result = await doctor(home);
     output(result);
@@ -890,6 +1196,8 @@ try {
               // A staged copy that never became active and was never switched to is removed.
               if (!activated && !keep) await rm(root, { recursive: true, force: true });
             }
+            // The unpacked bootstrap copy of a deploy bundle is not needed once the update is active.
+            if (flags["--bundle"]) await removeBundleBoot(resolve(flags["--bundle"])).catch(() => undefined);
             return { updated: release.tagName, root };
           },
           { pause: !waitMs },
@@ -917,6 +1225,34 @@ try {
       });
     output(result);
     if (result.results.some((r) => !r.ok && !r.detached)) process.exitCode = 1;
+  } else if (command === "fleet" && positional[1] === "status") {
+    const report = await fleetStatus({
+      hosts: await fleetHosts(home, repeated["--host"]),
+      home,
+      remoteHome: flags["--remote-home"],
+      timeoutMs: flags["--timeout-ms"] === undefined ? undefined : Number(flags["--timeout-ms"]),
+    });
+    console.log(flags["--json"] ? JSON.stringify(report, null, 2) : formatFleet(report));
+    if (report.hosts.some((h) => !h.ok)) process.exitCode = 1;
+  } else if (command === "cleanup" && positional[1] === "releases") {
+    if (
+      flags["--apply"] &&
+      (process.env.PASEO_AGENT_ID || process.env.ALLIANCE_ROLE || process.env.ALLIANCE_BOUND_ROOM)
+    )
+      throw new Error(
+        "cleanup --apply deletes other sessions' data and belongs to the Human; run it outside an agent session. Dry run is open to everyone.",
+      );
+    // --apply holds the maintenance lock, so it cannot run beside an update staging a release.
+    const collect = (apply) => collectReleases({ home, apply, ...releaseAge() });
+    const result = flags["--apply"]
+      ? await withMaintenance(home, () => collect(true), { pause: false })
+      : await collect(false);
+    output(flags["--json"] ? result : describeCollection(result));
+    if (result.failed.length) process.exitCode = 1;
+    if (!flags["--apply"] && result.remove.length)
+      console.error(
+        `Nothing deleted. Run with --apply to remove ${result.remove.length} of ${result.remove.length + result.keep.length}.`,
+      );
   } else if (command === "rollback") {
     const current = await installation(home);
     if (!current?.previous) throw new Error("No previous installation is recorded.");
@@ -958,7 +1294,7 @@ try {
     );
   } else throw new Error(`Unknown command ${command}. Run alliance-work --help.`);
 } catch (error) {
-  console.error(error.message);
+  console.error(hints.explain(error.message, args));
   // A refusal because agents were busy, after a verified restore, can be retried by a waiting
   // parent update; any other failure, or an unverified recovery, is final.
   const busy = /^Update blocked/.test(error.message) && !/could not|unverified/i.test(error.message);

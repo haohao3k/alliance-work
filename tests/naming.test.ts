@@ -1,16 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { agentTitle } from "../shared/naming";
+import { agentTitle, namingInstruction } from "../shared/naming";
 
 test("task names retain project, role and multilingual task without host or implementation IDs", () => {
-  assert.equal(
-    agentTitle("ExampleApp", "peer", "Rà soát phân quyền"),
-    "[peer] [ExampleApp] Rà soát phân quyền",
-  );
+  assert.equal(agentTitle("ACME", "peer", "Rà soát phân quyền"), "[peer] [ACME] Rà soát phân quyền");
   assert.equal(agentTitle("Alliance Work", "hq"), "[hq] [Alliance Work]");
   assert.equal(
-    agentTitle("Sleek Radar", "lead", "\n# Hoàn thiện dashboard\nDetails"),
-    "[lead] [Sleek Radar] Hoàn thiện dashboard",
+    agentTitle("Example Workspace", "lead", "\n# Hoàn thiện dashboard\nDetails"),
+    "[lead] [Example Workspace] Hoàn thiện dashboard",
   );
 });
 
@@ -38,4 +35,12 @@ test("supplied child titles cannot omit or spoof the profile role and retain the
     "[lens] [ExampleApp] Review",
   );
   assert.equal(agentTitle("App", "peer", "Apple diagnostics", ["App"]), "[peer] [App] Apple diagnostics");
+});
+
+test("every role may rename its own session, but only owners are told about workspace titles", () => {
+  for (const role of ["hq", "supervisor", "lead", "peer", "lens"] as const) {
+    const text = namingInstruction("Example", role);
+    assert.ok(text.includes("update_agent") && text.includes("PASEO_AGENT_ID"), role);
+    assert.equal(text.includes("rename_workspace"), ["hq", "supervisor", "lead"].includes(role), role);
+  }
 });

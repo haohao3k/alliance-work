@@ -7,19 +7,87 @@ modify the user's ordinary Codex/Claude/Pi configuration.
 ## Installation
 
 Run `./install.sh --codex-auth-from "$HOME/.codex"` from the checkout, or use the GitHub release
-bootstrap shown in the [README](../README.md#install). Release downloads use the current `gh`
-account without embedding a GitHub token in scripts.
+bootstrap shown in the [README](../README.md#install). Release downloads use the public
+`haohao3k/alliance-work` repository through `gh`, without embedding a GitHub token in scripts.
 
 The bootstrap verifies `checksums.txt`, installs `package-lock.json` dependencies and checks the
 candidate before activation. Native Codex and Claude must be on PATH. Pi is installed with the
 release. Harness versions affect configuration/discovery; run `npm run test:native` after upgrading one.
 
-This release pins Paseo CLI/client/plugin `0.15.3` and requires a running `0.15.3` daemon.
+This release pins Paseo CLI/client/plugin `0.15.4` and requires a running `0.15.4` daemon.
 Activation does not upgrade or restart the daemon. Other versions remain blocked. The disposable
 maintenance tests use the pinned daemon; an alternate binary is selected explicitly with
 `ALLIANCE_TEST_DAEMON_CLI`.
 
-### Paseo 0.15.3 upgrade
+### Hold tasks while updating the runtime
+
+Run the maintenance CLI outside an agent session. Stage and verify the candidate first, then:
+
+```sh
+alliance-work maintenance run --reason "Upgrade the native runtime" \
+  --timeout-ms 60000 --interrupt --evidence /absolute/process-custody.json \
+  -- node /absolute/verified-update-worker.mjs
+```
+
+The command records the currently running native sessions and their original provider, model,
+effort, conversation, responsibilities, budgets and background evidence before notifying any task.
+Originally idle, archived and parked sessions receive no prompt. Running tasks are asked to write
+`checkpoint.md` in their recorded maintenance directory and end the turn. Without `--interrupt`,
+a checkpoint timeout leaves the operation held. With it, native interruption is allowed after the
+bounded grace period. Providers that cannot steer receive their checkpoint instruction in a new
+turn of the same conversation after that interruption, followed by a bounded checkpoint window.
+
+The update command runs directly, without a shell, under `ALLIANCE_PARENT_MAINTENANCE` and
+`ALLIANCE_MAINTENANCE_HOLD`. It must perform and verify the requested update or return nonzero.
+It must retain the native sessions, product services, terminals, credentials and rollback runtime.
+Before comparing task state after activating this plugin, the worker invokes the owned
+`maintenance.reconcile` RPC with `{holdId: process.env.ALLIANCE_MAINTENANCE_HOLD}`. This restores
+maintenance-induced changes made by older plugin hooks to the captured task phases, counters and
+deadlines. It checks task custody and exact native user-message identities; changed Human input or
+ownership stops reconciliation. Original and observed states remain in the ledger audit.
+
+`maintenance-hold.json` and `maintenance-holds/ID/` retain the exact target set and delivery receipts
+through daemon restart and controller failure. The supervisor keeps older schedulers paused while
+the new plugin reads the durable hold directly. `maintenance status` reads the ledger. On supported
+plugins, `maintenance hold` performs only the checkpoint stage and leaves the pause in place; use
+`maintenance run` for the first upgrade from a plugin without this support.
+
+Before dispatch, the ledger registers each control message's exact body SHA256, dispatch UUID and
+native conversation identity; the native acknowledgement is retained afterward. If Claude history
+hydration exposes its provider UUID instead of the submitted UUID, only a canonical user row with
+the exact registered body, owned dispatch, acknowledgement and conversation qualifies as an alias.
+Assistant quotes and changed user input do not qualify. These receipts carry across maintenance
+cycles; the immediately previous acknowledged legacy ledger is reconstructed from its owned control
+bodies. The pre-hold user baseline also covers the native prompt index at the frozen hold boundary,
+including older user messages outside a tool-heavy tail window.
+
+A successful update is followed by native health verification and a resume prompt to each held
+session. Native canonical user-message receipts and session readback prove delivery. A lost or
+ambiguous acknowledgement never causes a duplicate prompt. Other sessions remain untouched.
+Use a stable `--key OPERATION_ID` when retrying the same operation. A new task that starts during
+the hold blocks the update and is reported for reconciliation.
+To include that newly running work under the same authorized operation, repeat `maintenance run`
+with `--include-new --key ID` and the verified update command. Only newly running sessions are
+notified; earlier held tasks, checkpoints and their original state baselines are retained.
+
+If an update or resume fails, the durable hold remains; work is not accepted or canceled. Verify
+the restored or updated native runtime and supply the recovery evidence:
+
+```sh
+alliance-work maintenance status
+alliance-work maintenance resume --reason "Verified rollback; continue retained work" \
+  --evidence /absolute/recovery-receipt.json
+```
+
+Recovery adopts only its own hold after the prior controller exits. It verifies native health
+before resuming and uses the same ledger and message identities. If delivery or custody remains
+uncertain, inspect that session's saved timeline and ledger instead of sending another prompt.
+
+### Paseo 0.15.4 upgrade
+
+Fable 5.2 uses the native Paseo 0.15.4 model catalog and requires Claude Code 2.1.321+.
+Upgrade the executable selected by the isolated Claude profiles, then refresh provider discovery.
+Existing model defaults, worker allowlists and active conversations are preserved.
 
 Before upgrading an existing host, record native running agents, their model/effort, scripts,
 terminal jobs, daemon identity and service configuration. Hold the Alliance scheduler with the
@@ -28,7 +96,7 @@ idle. Preserve terminal programs and editor buffers explicitly: terminal surviva
 of the outgoing daemon, so installing a new CLI does not make a `0.14` shutdown preserve them.
 
 With work stopped, back up the existing runtime and native state, upgrade the owned daemon service
-to `0.15.3`, and activate Alliance through `update` or `setup --refresh`. Verify daemon identity,
+to `0.15.4`, and activate Alliance through `update` or `setup --refresh`. Verify daemon identity,
 plugin health, retained sessions/settings and restored terminal jobs before resuming precisely the
 agents that were interrupted, in their retained conversations and original model/effort. Restore the
 previous runtime and state if verification fails; never use an unqualified daemon with this release.
@@ -54,7 +122,7 @@ explicit provider-key/model reconciliation before upgrading; other retained mode
 be verified through the native configuration. No authentication re-login or token rotation is
 part of this upgrade.
 
-Paseo `0.15.3` still ships its own exact MCP SDK `1.29.0` dependency. Updating Alliance's direct
+Paseo `0.15.4` still ships its own exact MCP SDK `1.29.0` dependency. Updating Alliance's direct
 SDK does not patch that nested daemon dependency; do not claim a daemon-wide security fix or
 force overrides without separate native qualification.
 
@@ -100,8 +168,8 @@ cannot remove instructions or tools that were previously visible.
 
 ## Context budget
 
-Every Alliance role uses a 300,000-token auto-compaction ceiling. Codex counts the full
-active context; Claude uses a 300k auto-compact window; Pi caps the selected model's
+Alliance roles default to a 300,000-token auto-compaction ceiling. Codex counts the full
+active context; Claude has a separate auto-compact window; Pi caps the selected model's
 window at 300k and retains its native compaction reserve. Smaller model windows remain
 smaller. Pi provider extensions, including Cursor, Devin and Antigravity, share this policy.
 The native harness creates the summary and continues the session. Large tool results can
@@ -114,6 +182,32 @@ Keep Pi's `compaction.enabled` on. Generated Alliance homes enable it automatica
 Ordinary Paseo providers can use `scripts/context-launch.mjs HARNESS EXECUTABLE` as their
 configured command and must also have native auto-compaction enabled. This does not
 change the executable or model used by those providers.
+
+The Human can opt a room's Claude Peers into the measured 232K-window pilot from a terminal
+outside an agent session:
+
+```sh
+alliance-work context show --room ROOM_ID
+alliance-work context set --room ROOM_ID --role peer --claude-window 232000
+alliance-work context reset --room ROOM_ID --role peer
+```
+
+Omit `--role` to set the room default; role overrides take precedence. Reset without `--role`
+restores the room's release default and clears overrides. Only 300000 and the 232000 pilot
+window are supported. Codex and Pi budgets do not change. The pilot's approximately 200K
+compaction trigger is an estimate from prior observations; its effect on handback quality
+still needs measurement. A running Claude process keeps its launch window. A future fresh
+process, including a resumed session, reads the room's latest setting.
+
+These settings are separate files under the Alliance home's `context-settings/` directory;
+older releases ignore them and retain their own defaults. The CLI rejects agent-session
+writes, and the server requires an explicit Human actor (`actorId: null`). Paseo 0.15.4's
+plugin RPC context has no authenticated caller identity, so this actor convention is not
+a transport authentication boundary.
+
+Managed Claude profiles disable dynamic Workflows. A disposable-home trial on Claude Code
+2.1.325 verified that this removes Workflow from `api-request-shape.tools` and the API request.
+Existing processes keep their previously loaded tools until their next launch.
 
 ## Authentication
 
@@ -166,10 +260,29 @@ Never commit, record or pass credentials as command-line arguments.
 ### Claude accounts and quota
 
 Open **Alliance Work → Claude accounts** on the selected Paseo host. **Host default** selects
-5x/20x for new Claude processes; HQ, Supervisor, Lead, Peer and Lens can override it.
-**Existing role login** keeps the previous role credential mechanism. Switching never stops,
-resumes or restarts an agent. A resumed session can reuse its old process and credential;
-the UI reports the selection for the next process, not a claim about an existing one.
+5x/20x; HQ, Supervisor, Lead, Peer and Lens can override it. **Existing role login** keeps
+its previous credential mechanism. The panel shows each session's **In use** and **Selected**
+accounts separately. In-use labels come from a launch receipt checked against the live process
+identity; older processes are shown as unknown, never inferred from the selection.
+
+In **Models → This project → Claude account**, select **Claude 5x** or **Claude 20x** for all
+Claude roles in that project. **Inherit** restores the host role selection, followed by the host
+default. Account and model settings save independently, so a project can pick an account while
+inheriting Global Models. The selected account must be provisioned on the daemon that runs the project.
+
+A selection change is reconciled within 15 seconds, including changes made through the CLI.
+An existing process is retired only after native Paseo confirms no foreground turn, queued
+message, permission, provider background task or active descendant remains. Tracked Alliance
+jobs also block retirement. Prompt admission and final revalidation share the native lifecycle
+lock, so a racing message keeps the old process. The session ID, history and ownership remain;
+its next message resumes the same conversation with the latest selected account. Saving sends
+no prompt and never cancels work. Switching again while pending uses the latest selection.
+
+Automatic retirement requires the private qualified `idleAccountSwitch` daemon capability
+(see `patches/README.md`). An older running daemon reports **Daemon update required** and is
+never given an ordinary reload request. Installing new plugin code does not retrofit that daemon;
+activation must wait for a separately idle native daemon maintenance window. Unknown provider
+background safety keeps the switch pending.
 
 Provision each account on each execution host using a local terminal:
 
@@ -185,6 +298,21 @@ does not select the account. Labels are operator-assigned, not subscription iden
 For terminal selection use `alliance-work accounts select default 20x` or
 `alliance-work accounts select peer 5x`; `select peer inherit` restores the host default.
 
+Account selection is a desired state, not proof that a running process has switched. The panel
+shows **In use** separately from **Selected**. Idle sessions retire through native guarded
+lifecycle and reopen with the selected account in the same conversation. Jobs belonging to
+reporting Leads/Peers do not block an idle HQ; tracked jobs with verified process dependency and actual native
+background work still protect their runtime.
+
+**Switch now · stop turn and resume** is an explicit interruption of that session. Alliance checks
+credentials first, saves the turn and recent history in `claude-switch-checkpoints/`, stops the
+native turn, retires only at a safe idle boundary, verifies the new launch account and sends one
+continuation. It does not recreate the workspace or erase history. The continuation checks existing
+tool results before repeating actions. A job dependent on that runtime must finish or be checkpointed
+first; the button never kills it. Unknown resume delivery remains visible for readback and is not
+automatically resent. Selecting another account never bypasses that account's quota or invalid
+credentials, and a quota error does not prohibit selecting a different account.
+
 macOS stores tokens in Keychain, namespaced by Alliance home and account. Linux requires
 `systemd-creds` with user-scoped `host+tpm2` encryption; encrypted blobs are owner-only under
 `claude-secrets/`. No plaintext or null-key fallback is permitted. TPM/host changes can require
@@ -194,14 +322,18 @@ are not silently migrated or relabeled. Account selection JSON contains no token
 imports stay out of plugin RPCs and browser storage. Provisioning one host does not copy
 secrets to other hosts.
 
-Quota uses separate CLI OAuth logins, never setup-token. Authenticate each isolated account
-with Claude Code using its own `CLAUDE_CONFIG_DIR`. Do not copy the daily profile or credentials.
+Quota uses separate CLI OAuth logins, never setup-token. On the personal MBP, run
+`python3 scripts/setup-personal-claude.py` once, then `claude-5x auth login` and
+`claude-20x auth login` in a terminal. The wrappers use `~/.claude-5x` and `~/.claude-20x`,
+remove conflicting auth environment variables, and preserve normal Claude permissions.
+They neither copy the daily profile nor change the `claude` command.
 
 The non-secret registry `~/.config/paseo/claude-accounts.json` contains version 1 and an
 `accounts` array of `{id, label, configDir}` with absolute paths. The plugin quota panel reads
 only registered profiles on the selected host and caches results for one minute. It displays
 errors independently and never refreshes or rewrites OAuth credentials. Use the matching CLI
-login when credentials expire. Select the host where the account profiles are registered to see their usage. Other hosts do not receive these credentials or quota
+login when credentials expire. Open the MBP host to see its two accounts, including usage from
+remote machines on those accounts. Other hosts do not receive these credentials or quota
 snapshots automatically. Alliance registers the profiles through Paseo's native usage-source API,
 so they also appear in the global Usage tracker without patching Paseo core. Login errors are
 reported per account. After editing the registry, refresh Usage; no daemon restart is needed.
@@ -248,7 +380,9 @@ dependency changes, verified by native tests and shipped with a new release.
 | `update --wait-idle MIN --hold` | The same, but scheduled prompts stay paused from the end of staging until activation, so agents you stop are not woken: for a busy host |
 | `update --bundle DIR` | Same staged update from a release `deploy` copied here; needs no GitHub access |
 | `deploy --host H …` | From a machine with `gh`, push the release over SSH and run `update --bundle` on each host |
+| `fleet status [--host H …]` | Read-only table of this host and the remembered hosts: versions, disk, unarchived sessions/members, plugin state |
 | `rollback` | Activate the previous installation root, preserving current rooms and credentials |
+| `cleanup releases [--apply]` | List the releases under `<home>/releases` that nothing needs, and why each other one is kept; Human-only `--apply` rechecks safety under the maintenance lock and deletes eligible releases |
 
 ### Deploy to other machines (0.1.16)
 
@@ -257,7 +391,7 @@ existing installation; nvm or `~/.local/bin` need not be on the SSH `PATH` becau
 uses the Node recorded in the Alliance launcher and the harness paths of the installed profiles.
 
 ```sh
-alliance-work deploy --host ryzen --host i5 --host build-mac --remember
+alliance-work deploy --host host-alpha --host host-beta --host host-gamma --remember
 alliance-work deploy --wait-idle 240 --detach   # later: reuse the remembered fleet
 ```
 
@@ -337,6 +471,26 @@ prompts running while it waits, and an update without `--wait-idle` pauses them 
 starts: in both cases an idle assignment may be continued, or an owner reminded, into an agent
 you just stopped, and an update without a wait then refuses the busy host.
 
+### Check the fleet without logging in to each host
+
+```sh
+alliance-work fleet status                 # this host + the hosts saved by deploy --remember
+alliance-work fleet status --host host-alpha    # only the named hosts (plus this one); --json for scripts
+```
+
+One row per host: Alliance version (from `installation.json`), Paseo daemon version, whether the
+Alliance plugin is running (and healthy, and the installed release), disk used on the volumes
+holding the Alliance home, the Paseo home and scratch space (`df` on those directories, so macOS
+reports its Data volume), Paseo sessions not archived (with how many run) and Alliance members
+not archived (`rooms.sqlite`, opened read-only). Differing Alliance versions are called out.
+
+It only reads: SSH runs a probe from stdin (nothing is installed or written on the host) that
+uses the host's own launcher Node and its release's pinned `paseo daemon status`, `plugin ls` and
+`agent ls`; no daemon state changes. It works on hosts from 0.1.49 on. Hosts are probed in
+parallel; one that is down or silent for `--timeout-ms` (default 30000) is listed with its reason
+and the command exits 1, so a dead host never hangs the others. `--remote-home` names a
+non-default Alliance home on the hosts. Output holds no tokens or conversation text.
+
 ### Long-lived sessions after an update (0.1.17)
 
 A session's instructions are fixed when it is created, so an agent created before an update still
@@ -391,8 +545,69 @@ wait`, `reject` and `wakeups defer`, which older CLIs refuse: after such a rollb
 agents a short note (instead of `wait`, add a reminder with `wakeups add … --delivery idle` and end
 the turn; decide with `accept` or a rework prompt), or recreate them.
 
-Backups/releases are retained until you remove them deliberately. Keep the current and previous
-installation roots. For a stale `.maintenance-mutex` or `.maintenance-lock`, read its
+#### Store level: a store newer than the running code (0.1.52)
+
+Hosts run mixed versions during a rollout, so a release that changes `rooms.sqlite` in a way an
+older release would misread or damage must say so, and the older release must not write it.
+Releases 0.1.52 and later compare the **store level** they support (`STORE_LEVEL` in
+`server/store-compat.mjs`; level 1 is the layout of 0.1.19-0.1.52) with a marker in table
+`store_compat` (`write_level`, optional `read_level`, `marked_by` = the marking release's
+version). No table means level 1.
+
+- Marked above what this code supports: the plugin does not write. With only `write_level` raised,
+  reads and `status` still work, the scheduler runs no sweep, `status` shows the reason in
+  `wakeupHealth.error`, writes (hooks, RPCs) fail with the message, and `doctor` has a failing
+  `store` finding. With `read_level` raised (or a value that is not a number), the plugin refuses to
+  open the store at all, with the same message. `rollback` below 0.1.19 does not rewrite such a
+  store. The message names the marking release, the level this release supports and the way out:
+  update (`alliance-work update`), or run `alliance-work rollback` from the release that marked it,
+  whose rollback converts the store and lowers the marker. Nothing is deleted. The marker is read
+  again before every write, so a release that marks the store while this one runs stops its next
+  write.
+- Why not `user_version`: it is the one-time migration counter (1 since 0.1.19) and releases
+  0.1.19-0.1.51 treat any value >= 1 as done, so they ignore a higher one; using it as "readers
+  need >= N" would also make every additive migration lock out the previous release after a
+  rollback. `store_compat` is a table those releases never open, and 0.1.52 itself writes no
+  marker, so a store 0.1.52 touched is byte-compatible with 0.1.49-0.1.51 and rolling back to them
+  needs no step (`tests/store-compat.test.ts` opens it with the 0.1.51 sources from git).
+- Rules for a later release: raise the marker (`setStoreMarker`) only when an older release would
+  misread or damage the store after rolling back to it. Additive changes (a new table, a JSON field
+  older releases ignore, a counter bump in `user_version`) must not. A release that does raise it
+  ships, in its `rollback`, the conversion back to the target's layout and then lowers the marker
+  with `setStoreMarker` to the target's level (level 1 removes the table, how every older store
+  looks). Rolling back onto 0.1.49-0.1.51 ignores the marker, so the conversion must come first;
+  a store left marked is refused by 0.1.52 and later until the marking release returns or lowers it.
+- Last resort, when the marker is wrong or its release is gone: stop the plugin, back up
+  `rooms.sqlite` with its WAL, and delete the marker table (`DROP TABLE store_compat`). Only do
+  this after checking that the store really has the older layout.
+
+Backups are retained until you remove them deliberately. Each release is about 1G
+(`node_modules`), so a successful activation (`install`, which `update` and `deploy` run from the
+new release, and `setup --refresh`) then collects old ones from `<home>/releases`: it keeps the
+current and previous installation (rollback), every release named by the Paseo config, launcher,
+`profiles.json`/`providers.json` or a managed profile file, every release your own harness
+configuration names (in your OS home, not a role's: `~/.claude.json`, `~/.claude/settings.json`,
+`~/.claude/settings.local.json`, `~/.codex/config.toml`, `~/.gemini/config/mcp_config.json`,
+`~/.gemini/settings.json`, `~/.pi/agent/settings.json`, `~/.pi/agent/mcp.json`; the absolute path, or
+`releases/<name>` as in `~/.alliance-work/releases/<name>`, counts; a missing file is normal), every
+release holding a `.keep` file (create one to pin a release by hand), and every release a running
+process uses by command line or working directory; it removes the other Alliance releases and
+leftover `.download-*`/`install.*` staging directories. Anything changed in the last hour is left
+alone, since another installer may be staging it. When the installation record, the process list or
+one of those files cannot be read (or a harness config is over 16 MiB), nothing is deleted, and
+`install`/`update` print `releasesRemoved.heldAll: "Kept every release: <why>"` (the dry run prints
+the same line first). Session and agent records that still name an old release (AGY
+`~/.agy-alliance-work/*/sessions/*/.agents/mcp_config.json`, Paseo `agents/*.json`) are not read; they
+only matter if such a session is resumed after its release was collected. An update from 0.1.49–0.1.51 already collects, because the new
+release's own `install` does it; the first collection removes every old release that no process uses.
+`alliance-work cleanup releases` shows the same decision as a dry run, with the reason for each
+release; Human-only `--apply` takes the maintenance lock, rechecks safety before each deletion, and deletes eligible releases. It never follows symlinks and never
+touches anything outside `<home>/releases`. `doctor` and `status` warn (never fail) when a
+filesystem holding the Alliance home, the Paseo home or `/` is above 80% used or has under 5G free,
+or when `releases` holds more than three directories. On macOS the working directories come from
+`lsof`; when working-directory detection is unavailable, every release is kept with a reason.
+A `.keep` inspection error other than a missing file also keeps that release with a reason.
+For a stale `.maintenance-mutex` or `.maintenance-lock`, read its
 `owner.json`, verify that process has exited, then remove that lock directory and rerun the command.
 
 Native diagnostics remain available:
@@ -418,9 +633,10 @@ configuration; retain their native conversation and unfinished assignment.
 
 ## Releasing
 
-Publish reviewed public candidates only to `haohao3k/alliance-work`. Do not merge private
-history or include personal setup and runtime data. New third-party assets require explicit
-redistribution rights and retained notices.
+Publish this edition only to the public `haohao3k/alliance-work` repository, verifying
+`private=false` before publishing. Build from reviewed public history and the approved feature
+scope in [the public candidate](public-candidate.md). Do not import private history, tags, host
+data, personal helpers or unpublished skill adaptations. The private edition releases separately.
 Bump `package.json` and the lockfile together. Check the candidate and commit it before packaging:
 
 ```sh
@@ -436,7 +652,9 @@ Packaging uses `git archive HEAD` and refuses a dirty checkout. It creates the v
 `checksums.txt` and `install.sh` in ignored `dist/`. The tag workflow checks package/tag agreement,
 runs the portable suite and publishes those assets to this public repository. Native harness, disposable Paseo maintenance
 and real model acceptance checks remain local; CI does not claim to have run them.
-CI also runs the shipped feature map and retains the per-scenario coverage artifacts. For an
+CI also runs the shipped feature map and retains the per-scenario coverage artifacts.
+Every pull request and branch push also runs `npm run check` and `npm run lint` (`.github/workflows/ci.yml`);
+it publishes nothing and does not replace the tag workflow. For an
 opt-in real Codex Lead handback plus a with/without-lesson model eval, run:
 
 ```sh
@@ -460,7 +678,7 @@ The release archive contains no home directories, runtime credentials or generat
 ## Upgrading host builds with a prerelease suffix
 
 From v0.1.6, `alliance-work update` compares stable releases with installed host versions such
-as `0.1.4-ryzen.1`. Older launchers cannot parse that suffix. Bootstrap once with the release
+as `0.1.4-host-alpha.1`. Older launchers cannot parse that suffix. Bootstrap once with the release
 installer, which preserves the recorded Alliance/Paseo home, credentials, rooms and native settings:
 
 ```sh
@@ -500,12 +718,50 @@ closed or unknown owners are highlighted for reassignment. Ownership writes use 
 revision and require an available recipient; recording ownership does not notify or acknowledge
 that recipient. Keep the handoff and output paths in the durable assignment.
 
+Archive and idle are native session states, not process exits: neither proves that the session's
+child processes have stopped. Inspect tracked jobs and any untracked children before treating
+its work as stopped.
+
 macOS process timestamps are read in the C locale, independently of the daemon or CLI language.
 The caller's locale stays unchanged. Existing C-locale identities continue to match. An older
 localized identity that cannot be compared stays `unknown` while its PID exists; its job reminder
 does not fire on that uncertainty. Reconcile the original controller and its evidence before
 registering a verified run under a new key. The old record is retained, never rebound to a PID
 that may have been reused. A missing process observer also reports `unknown`, not an exit.
+
+## Work in a safe place
+
+`alliance-work status` starts with `workSafety`: `warnings` lists every room still in use (any
+unarchived member, or no member yet) whose results exist only on one disk, and `checked` is the
+number of project paths inspected. Each warning has a `kind`, the `path`, the `rooms` it concerns
+and a `message` with the fact to act on:
+
+- `no-vcs`: the project directory is not under version control.
+- `no-remote`: the Git repository has no remote; the message gives its commit and branch counts.
+- `unpushed`: local branches carry commits that no remote branch holds (counts, how many have no
+  upstream, and up to three branch names). A remote that was configured but never pushed to counts.
+- `detached`: commits held only by a detached worktree HEAD.
+- `core-bare`: `core.bare` is true in a normal `.git` checkout. Git then refuses `status`, `add` and
+  `checkout` there. A deliberate bare repository is not flagged.
+- `path-missing`, `git-missing`, `check-incomplete`: the check could not run; the message says why.
+
+The check is read-only: it reads repository files and runs `git config`, `for-each-ref` and `log`,
+never fetches, pushes or changes configuration, and a failure becomes a warning rather than a
+failed `status`. "On a remote" means a remote-tracking ref known locally, so a push made from
+another clone shows after the next `git fetch`. Fix a warning by pushing the branches (or merging
+them into a pushed branch), adding a remote, or setting `core.bare` back with
+`git config core.bare false` in that checkout. Rooms sharing a repository share one warning. Rooms whose project
+lies inside the Alliance home (`--home`, default `~/.alliance-work`, e.g. room artifacts and candidates) are
+scratch and are not checked.
+
+## Wrong CLI calls
+
+When a call is wrong, the error keeps its first line and adds the correction. An unknown command
+or option names the nearest real one (`Did you mean --title?`), a missing flag or value shows the
+syntax of that command, and the plugin's rejections of well-formed calls (for example a stale
+`--revision`, or an `--evidence` file that is not the JSON a job needs) add what to change. The
+syntax is read from `alliance-work --help`, so a command added there is covered. Exit codes do not
+change.
 
 ## Non-interrupting coordination policy
 
@@ -562,6 +818,20 @@ Stage and test candidates separately. Activation still requires all native agent
 scripts to be idle, uses the owned installer and preserves daemon/process history. External jobs
 must also be observed before/after; if any impact is uncertain, leave the candidate staged.
 
+
+## Disk hygiene
+
+Role instructions tell members to keep scratch (builds, clones, installs, test data) in the
+session's `$TMPDIR` (`$ALLIANCE_SCRATCH`) and, before handback, to delete what is rebuildable
+(`alliance-work scratch clean`) while keeping what their manifest or report names until the
+decision is final. A candidate holds reports, manifests, hashes and short logs; large data stays in
+scratch with its path and sha256 in the manifest. Briefs name the scratch location and how long
+the data is kept. After acceptance, [rebuildable bytes may be cleaned](verification.md#proof-of-integrated-contributions).
+
+Alliance deletes nothing by age. Scratch and worktrees of archived sessions are only listed as
+cleanable (`alliance-work disk`, `alliance-work cleanup worktrees`); deleting needs `--apply`. A
+worktree is removed only when clean and merged, never with `--force`. Release retention is in
+[Updates and recovery](#updates-and-recovery).
 
 ## Durable wakeups (0.1.9)
 
@@ -674,6 +944,21 @@ runtime report bound to the current candidate and a JSON statement:
 ```sh
 alliance-work accept --agent LEAD_ID --report /absolute/runtime/report.json --product /absolute/journey.json
 ```
+
+A live HQ in the member's responsible owner chain can record a Human-authorized member decision:
+
+```sh
+alliance-work accept --agent MEMBER_ID --report /absolute/report.json --for-human --source NATIVE_MESSAGE_ID --at 2026-11-14T08:00:00.000Z
+alliance-work reject --agent MEMBER_ID --reason 'Needs revision' --for-human --source NATIVE_MESSAGE_ID --at 2026-11-14T08:00:00.000Z
+```
+
+Use the exact user-message ID and timestamp from HQ's native chat. HQ remains the decider and
+attests Human authorization; the plugin checks that the source exists and excludes known agent
+and control messages. Paseo does not expose trusted Human-origin metadata for this check. Evidence
+requirements still apply. A caller without an agent identity is recorded as unknown. The CLI
+refuses an older plugin before sending the decision. If a plugin reload between that check and
+the decision loses attribution support, the CLI reports that attribution was not confirmed;
+inspect the saved disposition before retrying after an upgrade.
 
 Test/analysis reports cannot accept a product journey. Runtime PASS is necessary, not sufficient:
 the reviewer must inspect the actual journey and state its limits. The command records this
@@ -829,6 +1114,15 @@ the budget, and that is the owner's or the Human's decision: an `active` checkpo
 again at the next round. Since 0.1.19 two continuations in a row that end without a checkpoint
 hand the last final message to the owner as a review instead of a third.
 
+A provider that is signed out ("Antigravity authentication failed", "Not logged in", "Failed to
+authenticate", 401) fails every prompt the same way. After three such failures of one member Alliance
+stops prompting it (autonomy retries, wakeups) for 30 minutes, then 1 h, 2 h up to 6 h each time a later
+try fails again. The member's `signIn.reason` in `status` (and the Rooms panel) names the harness, the
+host and the login command, and its nearest live owner gets one notice per streak. A completed turn of
+the same harness on that host lifts every such hold at once. This does not stop Paseo 0.15.4's own
+finish-subscription retry, which resends a notice to a signed-out caller every ~7 s without limit: only
+signing in again or archiving that agent ends it.
+
 Since 0.1.19 a failure that names a provider quota or a reset time waits for that time instead (30
 minutes for a quota that names none): one retry at the reset plus a minute, without using the budget, at most
 three waits in a row before it is blocked. Claude Code answers a refused request with a notice as
@@ -843,8 +1137,17 @@ after the notice leaves the native outcome unchanged, with a warning in the turn
 plugin log for inspection. Claude prints a reset less than a day away as its minute alone,
 so a printed time up to five minutes past is that reset (retried a minute later), not tomorrow's.
 Until a limit lifts, Alliance prompts no member of that harness on the host: no continuation, retry
-or wake batch. The plugin cannot tell which login a role uses, so it holds them all, which is
-conservative. A wake batch whose turn ended on the limit is sent again after it lifts; a turn
+or wake batch. A Claude limit records the account its turn ran on (the launch receipt, checked
+against the live process) and holds only members known to run the other named account free: a
+5x limit does not hold a 20x agent. Members whose account is unknown (no verified receipt, an
+older process) or `legacy`, and limits that recorded none, still hold the whole harness. Since
+0.1.52 a member record carries `limited.account` and `claudeAccounts`; older releases ignore
+both and keep holding everyone, so a mixed-version rollout or rollback only loses the narrowing.
+When one named account is limited for five minutes or more, the other is provisioned and Alliance
+has recorded no limit on it, the Human's contact (the room's HQ, else the highest live owner not
+held by the same limit) gets one idle notice per limit and host: which account is spent until
+when, the members held, and how to switch (`alliance-work accounts select ...` or the project
+Claude account setting). The other account's quota is never read and nothing is switched. A wake batch whose turn ended on the limit is sent again after it lifts; a turn
 Claude Code started by itself has no prompt of its own, so its limit sends no earlier batch again.
 The owner hears once per limit, owner and harness, only for a wait of five minutes or longer; that
 notice lapses at the retry time, so an owner held by the same limit never gets it. Cancellation
@@ -878,8 +1181,9 @@ Archive follows the owner's decision for every Alliance agent, including session
 autonomy existed; continuation remains opt-in for those. The rules:
 
 - Only an agent in the member's responsible owner chain, or the Human, may accept or reject. The
-  CLI sends the caller's `PASEO_AGENT_ID`; outside an agent session the caller is the Human. An
-  agent cannot accept itself, and a sibling or child cannot accept its owner.
+  CLI sends the caller's `PASEO_AGENT_ID`; a terminal caller without one retains terminal decision
+  authority but has unknown attribution. An agent cannot accept itself, and a sibling or child
+  cannot accept its owner.
 - A Peer or Lens closes on its owner's technical acceptance. A Lead, Supervisor or HQ closes on
   product acceptance (`accept --product` with a runtime report) by its owner, or on the Human's
   decision. Decisions recorded before 0.1.16 count by role and by whether their disposition file
@@ -895,23 +1199,46 @@ autonomy existed; continuation remains opt-in for those. The rules:
   agent open until it is started again. While an owner is paused by a cancellation, until its next
   turn, the plugin pushes it no reminders; they wait for `wakeups take`. A `paused` checkpoint or
   an obligation handoff stops only the owner's own continuation; its reminders still reach it.
-- `alliance-work members keep --agent ID` keeps an agent open whatever its decision (`--off`
-  clears it). Its owner chain, the Human or the agent itself may set it. `autonomy start`
-  without `--auto-archive` keeps the previously recorded choice.
+- `alliance-work members keep --agent ID --reason TEXT [--hours N]` keeps an agent open whatever
+  its decision, for follow-up work handed to it; `--off` clears it. Its owner chain, the Human or
+  the agent itself may set it. From 0.1.52 a keep lapses after 24 hours (`--hours`, up to 720) or
+  when its keeper is archived, and `accept` lifts a keep the accepting agent set earlier unless it
+  says `accept --keep` (which keeps an agent with no keep of its own for 24 hours); a keep set by
+  the Human or by another owner, or set after the accept, stays. `accept` also cancels the
+  accepted agent's own reminders that already fired and were never acknowledged (a delivered
+  `wait`, an unread `hq` item); obligation reminders, running jobs, reminders not yet due, repeats
+  with runs left and unknown sends are untouched. Keeps recorded by 0.1.49-0.1.51 have no lifetime
+  and hold until the keeper is archived or lifts them; an older release reads any keep as
+  permanent. `autonomy start` without `--auto-archive` keeps the previously recorded choice.
 - Children archived or deleted natively no longer hold their parent open. An agent restored
   natively after an earlier auto-archive stays open until it gets new work or a new decision.
-- A completed turn nobody decides on for 48 hours wakes the responsible owner once per turn and
-  owner (idle delivery), unless a review reminder for that turn is still to be sent or was sent
-  less than 48 hours ago; so an undecided review is asked again once. At most four such reminders
-  go out per ten-minute scan. Undecided Human-owned work is never prompted; the Human's own
-  acceptance closes it like any other. Records from before 0.1.16 start that clock after
-  upgrade, spread over the following day.
-- The Human is whoever runs the CLI outside an agent session (no `PASEO_AGENT_ID`, no Alliance
-  role variables). The plugin cannot prove that; an agent that deliberately strips its session
-  identity could claim it. Treat agent instructions, not the CLI, as that boundary.
+- A completed turn nobody decides on for 48 hours wakes the responsible owner, and again every 24
+  hours until that owner was reminded three times; then the next owner up the chain that is not
+  archived is reminded the same way. A review reminder for that turn that is still to be sent or
+  was sent less than a day ago counts as the reminder. Undecided work that no owner can be asked
+  about (Human-owned, or no unambiguous living room coordinator can review an archived owner
+  chain), or whose reviewers were all reminded, is flagged: `lifecycle.needsHuman` in `alliance-work status` (with `since`, `ageHours` and the
+  reason) and a "Needs the Human" line on the board. The plugin only reminds and flags; it never
+  accepts or archives. A rejection that no new turn followed for 24 hours reminds its owner once.
+  At most four such reminders go out per ten-minute scan, and records already more than three days
+  overdue when this first runs (and rejections more than two days old) start their schedule at a
+  point spread over the following day. Records from before 0.1.16 start that clock after upgrade,
+  spread over the following day.
+- A prompt the plugin itself sent to an accepted agent (a wakeup batch) does not count as new work
+  after the decision: the sweep reads the agent's native messages since the decision and ignores
+  them only when every one carries the ID of a prompt the plugin recorded sending. Any other
+  message, or a timeline it cannot read, still holds the archive.
+- Terminal decision authority remains available outside an agent session (no `PASEO_AGENT_ID`, no
+  Alliance role variables). That absence does not prove Human identity; the recorded decider is
+  unknown. An agent that deliberately strips its session identity could claim terminal authority.
+  Treat agent instructions, not the CLI, as that boundary.
 
 `alliance-work status` shows `lifecycle.state` (`archivable`, `held`, `awaiting-decision`,
 `rejected`, `archived`) and the blockers for each member, plus `decisionBy` and `decisionScope`.
+Blockers include native children that are not Alliance members and each blocking wakeup with its
+key, age and expiry. `lifecycleSummary` counts open members by state and held ones by cause
+(`keep`, `wakeup`, `child`, `job`, `obligation`, `agent-state`, `new-work`, `paused`,
+`product-acceptance`, `permission`, `other`).
 
 Finished wakeups (acknowledged, canceled, expired) are removed seven days after their last change,
 except a reminder that still names the member's current turn and anything linked to an open
@@ -969,13 +1296,16 @@ canceled instead of sent. A review ends with a decision on that turn:
 
 ```sh
 alliance-work accept --agent ID --report /absolute/report.json   # the report verify printed
-alliance-work reject --agent ID --reason 'What the handback lacks'
+alliance-work reject --agent ID --reason 'What the handback lacks' [--rework 'What to change']
 alliance-work wakeups defer --key KEY --owner OWNER --revision N --minutes 30
 ```
 
 `accept` takes the report `alliance-work verify` wrote for the candidate, never the turn file the
 review names; anything else is refused with that advice. Rework is a prompt to the agent; its new
-turn replaces the review. A decision on that turn (`accept` or `reject`) closes the review by
+turn replaces the review. `reject --rework TEXT` records the rejection and sends the agent the
+reason and that rework as an ordinary prompt in one step (not a wakeup, so its turn reopens the
+handback); if the agent cannot take it now the rejection stands and the command says so. A
+rejection never archives. A decision on that turn (`accept` or `reject`) closes the review by
 itself; an archived owner's reviews are canceled. An `ack` after the decision succeeds without changing anything and says the
 decision closed it; wake batches say that only their other items need an ack. Before a decision,
 a newer turn, or the agent being archived, kept or re-owned, `ack` on a review is refused and
@@ -1042,8 +1372,8 @@ It records when it first sees each request: from Paseo's `agent.permission_reque
 from the first sweep that lists it (a request already pending when the plugin loads). Five
 minutes later it denies the request through Paseo (`respondToPermission`, `behavior` `deny`);
 it never allows one. The message tells the member to redo the step without anything that needs
-approval, for example to write into a fresh `mktemp -d` directory instead of running `rm -rf`
-with a glob, and to go on; Claude reads it as the denied call's result and its turn continues.
+approval, for example to clean its scratch with `alliance-work scratch clean` instead of running
+`rm -rf` with a glob, and to go on; Claude reads it as the denied call's result and its turn continues.
 This covers every Alliance member, root chats included, and no other Paseo agent. `status` shows
 the last denial (`members[].denied`: request id, tool, command and time). The nearest live member
 owner is not woken: it gets a pull item, listed in its next Alliance prompt, that lapses after six
@@ -1086,6 +1416,12 @@ until the obligation closes. Source fingerprints bind these receipts to the test
 
 ## Cost-aware roles (0.1.13)
 
+HQ is the Human's point of contact and delegates substantive implementation, investigation,
+test execution and integration to Leads or Peers. Use HQ → Peer for bounded work, or HQ → Lead →
+Peer when a workstream needs technical integration ownership. Supervisor is optional for coordinating
+independent workstreams. HQ retains scope, priorities, product critique and acceptance; a bounded
+implementation exception requires an explicit Human assignment and a recorded scope and reason.
+Reuse existing owners and preserve WIP, model restrictions, budgets and acceptance conditions.
 New launches use Peer for substantive implementation by instruction; extra coordination roles
 are justified by integration, multiple workstreams or cross-project decisions. This is a
 responsibility default, not a role quota or capability ban. HQ/Supervisor/Lead omitted models
@@ -1094,22 +1430,80 @@ uses the standard band and cannot fall through to a frontier route because a che
 unavailable. Explicit saved room policies remain authoritative. Existing native sessions retain
 their model and prompt; use policy read at their next work boundary, with no broadcast or restart.
 
+## Token usage and estimated cost (`usage`)
+
+```bash
+alliance-work usage                       # last 7 days, by provider and role
+alliance-work usage --days 14 --by provider,role,model
+alliance-work usage --days 14 --by gap       # Claude main-chain cold-wake estimates
+alliance-work usage --since 2026-11-01 --until 2026-11-08 --by day --json
+```
+
+`usage` reads this host's Claude Code, Codex, agy and Pi usage records and Paseo agent records,
+then prints requests, input-side tokens, cache read/write, output, cache hit and estimated cost. It is
+read-only, uses no network and never reads conversation text into its output: only usage
+counters, model, time and ids are taken from a log line. It does not touch the daemon and writes
+nothing, including under the Alliance home.
+
+- Input side is Claude input + cache read + cache write; for Codex it is `input_tokens`, which
+  already includes cached tokens. Cache hit is cache read divided by input side for both.
+- Claude lines that repeat one response (same message id and request id, in any file) count once, with the
+  copy that has the largest output. Codex counts one request per response id, compaction calls included;
+  cumulative totals are never added.
+- The cost is a conversion at public API list prices of the tokens counted. It is not an invoice
+  or a subscription charge. Models without a listed price are named in the output and left out of
+  the cost, which is then shown with `≥`.
+- A session gets its role from the Paseo agent record (provider `alliance-<harness>-<role>` and
+  the native session id), otherwise from the Alliance profile directory it sits in. Sessions that
+  match neither are not Alliance work: they are listed as excluded (`--include-other` counts them)
+  and the output states how much of the requests each source covered.
+- agy counters come from conversation databases; Pi counters include assistant, compaction and branch
+  records. Missing timestamps, unknown model prices and unreadable files are reported as coverage gaps.
+  Alliance supports Node 24.0+; full SQLite usage reporting needs Node 24.16+ and a stable
+  database/WAL snapshot no larger than 256 MiB per file. Older Node still reports other usage,
+  names each unavailable SQLite section with the running Node version in JSON/text, and exits 2.
+  Unsupported, changing or corrupt snapshots are unavailable; the command never opens source SQLite
+  files through SQLite, changes SHM bytes, or copies their contents to disk.
+- Cold wakes and rebuild tokens/USD estimate Claude main-chain cache loss, excluding subagents,
+  model changes and large context shrink. `--by gap` separates the idle intervals. These are list-price
+  estimates, not measured subscription savings.
+- Weekly friction reports `review.wait`, `review.superseded`, `review.reject`, `review.defer` and
+  `human.waiting` with the basis and coverage for each. Terminal wakeups are retained for seven days;
+  older missing history is unavailable. Defer counts are retained cumulative counters grouped by
+  latest update, and Human waiting is a current stored-state estimate, not historical or live readback.
+- Wake-source counts use recorded turn markers refined by native readback. They are not joined to
+  token costs without verified transcript identities; `native.plain` does not identify a Human.
+- Windows are `[since, until)` on the record's own time, dates in UTC (`--tz` shifts day buckets).
+  Defaults: `--home` the Alliance home, `--user-home` the user's home, `--paseo-home` from the
+  installation.
+
+Prices are in `server/usage-pricing.json` with the date they were fetched; a release ships a
+refreshed copy. To correct or add a model on one host without editing managed files, create
+`<alliance home>/usage-pricing.json` (or pass `--pricing FILE`) with the same layout, for example
+`{"anthropic": {"claude-new-1": {"input": 3, "cache_write_5m": 3.75, "cache_write_1h": 6, "cache_read": 0.3, "output": 15}}}`
+(USD per million tokens; Codex models under `openai` take `input`, `cache_read`, `output`). Entries replace the
+bundled entry of the same model. Batch, fast-mode, regional and long-context surcharges are not modelled
+beyond what a table entry lists.
+
 ## Peer and Lens model lists (0.1.18)
 
 Each route now names its role. Peer and Lens have separate ordered lists; every release-default
-route serves all four difficulties, so the order alone expresses the Human's preference:
+route serves all four difficulties, so the order alone expresses the Human's preference.
+The release-default routes are listed once, in the [Vietnamese quickstart](quickstart.vi.md#model-theo-room);
+`alliance-work models show` prints what a room uses.
 
-- Peer: claude `claude-sonnet-5-5` high, claude `claude-sonnet-5-5` medium, codex `gpt-6.1-sol`
-  high, pi `antigravity/gemini-4-argon` medium, pi `antigravity/gemini-3.8-flash` medium,
-  pi `zai/glm-5.3` high, pi `izno-vps/ds/deepseek-v4.1-flash` high.
-- Lens: claude `claude-opus-5-5` medium, codex `gpt-6-astra` medium,
-  pi `antigravity/gemini-4-argon` high, pi `antigravity/gemini-3.8-flash` high.
+The Human can opt a room into Claude owner keepwarm with
+`alliance-work keepwarm --room ROOM on [--max N]` (default 3, maximum 5).
+Use `alliance-work keepwarm --room ROOM status` or `alliance-work status` to inspect it,
+and `alliance-work keepwarm --room ROOM off` to stop it. A safety stop appears with its
+reason; only the Human can enable the room again. Existing rooms start with keepwarm off.
 
 The gate matches the target role's list exactly. An omitted model takes the harness's first
 standard route that the live catalog offers, so a missing Pi provider falls to the next Pi route
 and never to another harness. A refusal lists the routes the room allows for that harness and role.
-Pi routes need the provider in the Pi Peer role: `zai` credentials in its `auth.json` and the
-`izno-vps` provider (with `ds/deepseek-v4.1-flash`) in its unmanaged `models.json`.
+Pi routes need the corresponding provider credentials in the Pi role's `auth.json`.
+Operator-added API providers also need an explicit entry in that role's unmanaged `models.json`;
+this release does not configure a personal endpoint or placeholder provider by default.
 
 A policy saved before 0.1.18 has no roles; each of its routes applies to both Peer and Lens and is
 written in the per-role form on the next save. `alliance-work models show [--room ID]` prints each
@@ -1129,6 +1523,27 @@ exists and names it; reset it or remove the duplicate first. Release defaults an
 readable by older releases. Running sessions keep the list in their system prompt, while the gate
 always reads the current list.
 
+To edit a room's routes from the CLI, export its current revision and policy, edit the JSON,
+then save outside an agent session:
+
+```sh
+alliance-work models show --room ROOM_ID --json | jq '.[0] | {revision, policy}' > room-models.json
+alliance-work models save --room ROOM_ID --file room-models.json
+```
+
+Saving checks the exported revision; reload after another editor changes it. For a Hydrogen
+pilot, add a route with `harness: "agy"`, the exact Hydrogen ID from that role's live Models
+catalog (for example `gemini-4-hydrogen-medium`), `role: "peer"`, `effort: "medium"`,
+an explicit priority and the desired `difficulties` array. Save only the pilot room. To select
+it by default for that room's standard AGY Peer launches, include `"standard"` and put its
+priority ahead of other standard AGY Peer routes. The release defaults stay unchanged.
+
+Fable needs an explicit selection, a frontier-only worker route, and a nonempty
+`policy.fable.rationale` written by the Human in the same settings file. The rationale applies
+to the room; it is not evidence of a separate assessment for each launch. `models show` and
+`status` report refused saved routes, including Carbon, without removing them. Use the Models
+page or this edit/save flow to remove those routes; reset replaces the entire saved list.
+
 ## AGY role profiles
 
 When `agy` is on the installation PATH, preparation adds `agy-hq`, `agy-supervisor`,
@@ -1138,6 +1553,10 @@ role homes and saved room policies. A refresh refuses to remove an existing AGY
 role set if its executable becomes unavailable.
 
 Sign in through `alliance-work login agy peer` using a dedicated Alliance account.
+This opens the native interactive CLI in the isolated Peer home. After `/logout`,
+reopen the same source role to authenticate again: only that interactive source
+profile may start with its credential missing. Other roles and agent launches
+continue to require the shared credential.
 To share that login across this installation's five roles, run:
 
 ```sh
@@ -1147,8 +1566,13 @@ alliance-work auth agy --from ~/.agy-alliance-work/peer/os-home/.gemini/antigrav
 Only the native credential file is linked. Native AGY manages refresh; HOME,
 configuration, skills and history remain separate. Existing different role credentials
 are never overwritten. No daily configuration, plugins, instructions or skills are imported.
-Repeat login independently on each host. To keep accounts separate per role instead,
-omit the shared-source command and log in to each role.
+On macOS, Alliance launches that use the selected file block AGY's Keychain helper
+for the lifetime of that process, including catalog queries, new sessions, and
+resumes. This keeps OAuth refresh on the selected file. For an interactive login
+over SSH, AGY prints a URL and accepts the browser's authorization code in the
+same terminal. Plain `agy` uses the macOS user's normal Keychain.
+Repeat login independently on each host. On headless Linux, AGY uses its native
+file fallback when no session D-Bus keyring is available.
 
 The Alliance provider reuses the Antigravity driver from the exact pinned Paseo
 0.12.0 dependency, registers each role directly, and creates a private native
@@ -1174,11 +1598,9 @@ preapproval requests fail rather than being silently ignored. Native AGY owns
 compaction; the 300k policy verified for the other harnesses is not claimed for
 AGY. Only Full access is exposed, matching the pinned native provider.
 
-The 0.1.14 qualification on macOS and Linux (Ryzen) passed native agent discovery,
-concurrent Lead/Peer sessions and a model-driven owner → peer → owner handback on
-Paseo 0.11.2. The peer wrote its proof file, notified its owner through native Paseo
-MCP, and the owner read the file before writing the reviewed result. The Mac also
-passed this flow on 0.12.0. Disposable daemons were stopped after qualification.
+Qualification on another machine or release does not establish current-host readiness.
+Use a disposable instance for native discovery and a separately authorized model-driven
+owner → peer → owner handback, retaining receipts and cleaning up the owned test daemon.
 
 ## User MCP: Mobbin
 
@@ -1235,16 +1657,16 @@ change the selection; **Save selection** persists it. Other projects retain thei
 The manifest records disabled bundle names in `disabledBundled`; omission means bundled defaults.
 CLI project-skill edits and GitHub imports preserve that bundled selection.
 
-The public edition uses the existing pinned Seatwork resources. Additional private same-name
-adaptations are not included. Updating or rolling back preserves operator edits by refusing
-to overwrite modified managed assets.
+The public edition ships the existing pinned Seatwork resources without the fourteen
+unpublished same-name adaptations. The 23 catalog names, role assignments and toggle keys remain.
+Optional operator-authored overrides are supported when a manifest is supplied; without one,
+profiles install the pinned resources. Tests exercise replacement, rollback and edit protection
+with locally authored synthetic fixtures. Updating or rolling back refuses to overwrite modified
+managed assets. Provenance verification checks the pinned source bytes in either mode.
 
-Adaptations use current Alliance ownership and handback operations, risk-based review, and
-complete candidate snapshots. Source validation and native discovery tests do not establish
-efficiency. Assess a skill change with comparable real code/artifact tasks, unchanged model,
-effort and acceptance, and record actual outputs, tool use, usage and failure cases. Compare
-effort only alongside quality; fewer checks can also mean missing proof. Keep original results
-when correcting a scorer, and distinguish an isolated task result from live product delivery.
+Assess skill changes with comparable real tasks, unchanged model, effort and acceptance. Record
+outputs, tool use, usage and failures alongside quality; source validation alone does not prove
+efficiency or product delivery. Preserve original results when correcting a scorer.
 
 Fresh runtimes use one effective selection for their instruction catalog and native discovery.
 Claude disables implicit setting-source discovery and loads a selected-only skill plugin;
@@ -1397,3 +1819,27 @@ The first upgrade from 0.14 still closes terminals; Alliance does not perform th
 Recovery remains operator-controlled to avoid duplicate continuation with Alliance wakeups.
 Qualification uses a disposable daemon and the native install/rollback test, including project
 MCP read/save/preview and stale-revision rejection; it does not prove a paid model turn.
+
+
+### Daemon-wide model defaults and project overrides
+
+In Models, choose **Global · this daemon** to edit the defaults inherited by projects on that host. A project with no saved override reads the current global policy; without a saved global policy it reads release defaults. Existing saved project policies remain overrides. Choose **Inherit global settings** to remove a project override (the previous policy is retained in the policy audit table). Global changes affect future launches, not running sessions.
+
+Choose **This project** and save to customize that project's complete policy. Global settings are local to one daemon, not synchronized between machines. In the live catalog, select multiple supported reasoning efforts and use **Add selected**; existing routes and their difficulty restrictions are preserved. Peer release defaults include Pi Antigravity Gemini 3.8 Flash high alongside medium.
+
+## Job results and archive
+
+`jobs settle` records an explicit `succeeded`, `failed`, `superseded`, or `unverified` outcome. Supply `--key`, `--revision`, `--outcome`, `--reason`, and `--evidence` (absolute JSON file). The proof must bind `key`, `pid`, `processIdentity`, `outcome`, and matching `reason`. Verified outcomes require nonempty `artifacts` with absolute `path` and `sha256`; the operator remains responsible for interpreting their result. Unverified means no success claim. Running and unknown processes are refused. Only the recorded owner chain or Human may write. Revisions reject stale changes.
+
+`jobs archive --key KEY --revision N` requires settlement and a freshly observed exit. `jobs restore` makes history visible again without restarting anything. Both preserve the result; changed settlements retain their previous record. Archived jobs are hidden by default and visible with the existing archive toggle; any running/unknown observation remains visible regardless. `jobs list` retains the complete history. Archival does not close obligations, accept a product, stop services or erase artifacts. Historical cleanup must preserve results needed by unfinished assignments and their pending wakeups.
+
+## Session scratch and disk cleanup
+
+Each Alliance session opens with its own scratch directory under `/var/tmp/alliance-<uid>/<installation>/<room>/<agent>` (owner-only; `ALLIANCE_SCRATCH_ROOT` moves the root, which must be absolute). The plugin sets `TMPDIR` and `ALLIANCE_SCRATCH` to it for every harness on each open, so a resumed session gets the same directory back. If the directory cannot be prepared the session still opens, without it. Nothing is stored: the path follows from the installation home, room and agent IDs, so older releases ignore it.
+
+- `alliance-work scratch clean [PATH]` runs inside an agent session and empties only that session's own scratch, or removes the one subpath PATH of it (relative to the scratch or absolute inside it; a link at PATH is removed, never followed). Before deletion, it checks evidence references and refuses with a reason when evidence still binds the target or the scan cannot establish that removal is safe. There is no override. It recomputes the directory from the session's identity, needs no approval, and refuses (removing nothing) when `ALLIANCE_SCRATCH` is missing or names anything else, including a symlink or a path that resolves elsewhere. Links inside scratch are removed, never followed.
+- `alliance-work disk [--json]` reads scratch size per room and member, marks the scratch of archived members cleanable, lists scratch no member record explains, and lists the worktrees of archived members with their clean, merged and in-use state. It deletes nothing.
+- `alliance-work cleanup worktrees [--base REF]` and `cleanup scratch` list what they would remove. `--apply`, for the Human outside an agent session, removes only items of archived members, each judged again right before removal. A worktree goes only when it is a linked worktree registered with its repository and not locked, `git status --porcelain` is empty, HEAD is an ancestor of the merge target, no member that is not archived uses it, and no process has its working directory inside or names it on its command line; the removal is `git worktree remove` without `--force`. The merge target is the shared default branch (`origin/HEAD`, else `origin/main` or `origin/master`) and the local `main` or `master` only when the repository has no remote default; `--base REF` overrides it. Branches and commits stay. Ignored files (for example `.env`) are not tracked by Git and go with the worktree; `disk` shows how many each has. Scratch of an archived member goes only when no process uses it. Nothing is deleted by age or timer; a member that is reopened stops being cleanable.
+
+- `alliance-work cleanup artifacts [--scope own-scratch|archived|archived-scratch|archived-worktrees] [--older 1d] [--include-primary] [--apply]` finds rebuildable directories (`node_modules`, `.next` and similar caches next to a `package.json`; `.venv`, `.tox`, `.nox` next to a Python manifest; `__pycache__` and tool caches; `target` next to `Cargo.toml` or `pom.xml`; Gradle `build` and `.gradle`; Swift `.build`; Zig caches) by name and manifest, never by guessing. It lists by default. A session's scope is its own scratch and it may `--apply` there; the Human's default is the scratch and worktrees of archived members, and `--include-primary` adds the rooms' primary checkouts. `--older` (default `1d`) is the age of the newest write inside the directory. A directory stays when it is a symlink, when any process has its working directory in it or in its project directory or names either on its command line (or that cannot be told), when it lies in or above the Alliance home, an installation or the running code, or, in a checkout, when Git tracks files in it or does not ignore it. Everything is judged again right before removal. Alliance does not use `kondo` (v0.9): it has no process check and no way to limit it to a scope.
+- Evidence protection: acceptance, integration proofs and the archive recheck re-hash every artifact a verification report names. The Human-run `cleanup scratch|worktrees|artifacts --apply` read each room's `evidence/*/report.json` and `dispositions/*.json` and keep anything under the target that a pending member, or a member whose owner chain is not archived yet, names (or a document no member claims), and the listing says which file and whose evidence. Documents elsewhere (a `verify --output` outside the room, or a report not yet saved by `verify`) are not visible to it.

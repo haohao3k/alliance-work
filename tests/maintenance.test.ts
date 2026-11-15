@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { isNewerRelease, verifyChecksum } from "../scripts/distribution.mjs";
 import { restore, snapshot } from "../scripts/maintenance.mjs";
-import { requireCompatibleDaemon, requireIdleState, verifyRuntime } from "../scripts/paseo.mjs";
+import { reloadPlugin, requireCompatibleDaemon, requireIdleState, verifyRuntime } from "../scripts/paseo.mjs";
 import { loadManifest, prepareProfiles, projectRoot, verifyProfile } from "../scripts/profiles.mjs";
 import { Autonomy } from "../server/autonomy";
 import { AllianceRuntime } from "../server/runtime";
@@ -15,6 +15,7 @@ import { RoomStore } from "../server/store";
 import { Wakeups } from "../server/wakeups";
 import { temporary } from "./temp";
 
+// Synthetic regression fixtures use invented agent IDs and fixed test clocks.
 const executables = { codex: "/usr/bin/false", claude: "/usr/bin/false", pi: "/usr/bin/false" };
 async function fixture() {
   const dir = await temporary("alliance-maintenance-");
@@ -80,7 +81,9 @@ test("role instructions stay within their word budget; Peer and Lens carry no ow
   const f = await fixture();
   // Every session pays for these words on every turn; owner duties are written for owner roles only.
   const worker = (role: string) => ["peer", "lens"].includes(role);
-  const budget = (role: string) => (worker(role) ? 2000 : 3200);
+  // Measured at 0.1.53 (HQ 3399, Peer 2095 words), including the disk hygiene rules and engineering
+  // law 12; a few words of slack so that growth is a decision, not drift.
+  const budget = (role: string) => (worker(role) ? 2105 : 3410);
   const duties = await readFile(join(projectRoot, "room/policies/owner-duties.md"), "utf8");
   for (const [id, profile] of Object.entries(f.manifest.profiles)) {
     const text = await readFile(join(profile.home, "root-instructions.md"), "utf8");
@@ -166,13 +169,13 @@ test("rollback below 0.1.19 removes the records that only routed handbacks and k
 });
 
 test("rollback below 0.1.19 sets an assignment back on the handback its member stands on, which older releases review", async () => {
-  // Mac mini, 2026-10-22: Lead c3f72b0b, owned by HQ d34294ec, waited from its 00:39:14 checkpoint,
+  // synthetic host, 2026-10-22: Lead 00000017, owned by HQ 00000019, waited from its 00:39:14 checkpoint,
   // handed back in autonomous-turn-27 (review at 02:19:35), and Claude Code started turns 28, 30 and
   // 31 by itself. 0.1.18 asks the owner about the assignment's turn; Wakeups.add, unchanged since,
   // takes only the member's current turn, so every 0.1.18 sweep failed on "Turn is no longer current".
   const { dropHandbackRecords } = await import("../scripts/rollback-compat.mjs");
   const f = await fixture();
-  const [hq, lead] = ["d34294ec", "c3f72b0b"];
+  const [hq, lead] = ["00000019", "00000017"];
   const runtime = await new AllianceRuntime(f.home).ready();
   const agent = (id: string, role: string, parentAgentId: string | null) =>
     ({ id, provider: `alliance-claude-${role}`, cwd: f.dir, parentAgentId }) as never;
@@ -191,12 +194,12 @@ test("rollback below 0.1.19 sets an assignment back on the handback its member s
     await turn(
       "foreground-turn-21",
       "waiting",
-      "pilot: chờ Peer offline (U7c, U7b tích hợp) + máy test bật lại (HQ báo)",
+      "pilot: waiting for fixture peer and required test service",
     );
     await turn(
       "autonomous-turn-27",
       "review",
-      "pilot: SANDBOX run2 đã chạy xong, kết quả và evidence ghi trong handback — HQ quyết accept U4; Lead tiếp tục L2 run4 đang chạy",
+      "pilot: fixture result and evidence are ready for owner review",
     );
     for (const turnId of ["autonomous-turn-28", "autonomous-turn-30", "autonomous-turn-31"])
       await turn(turnId);
@@ -290,6 +293,51 @@ test("a runtime check survives the daemon resetting the idle connection it reuse
   }
 });
 
+test("a plugin reload is retried only while the plugin misses Paseo's initialize deadline", async () => {
+  const root = await temporary("alliance-reload-retry-");
+  // The release's Paseo CLI: a stand-in that fails each reload with the next scripted error.
+  const paseoCli = join(root, "node_modules/@getpaseo/cli/bin/paseo");
+  await mkdir(dirname(paseoCli), { recursive: true });
+  const script = join(root, "errors.json"),
+    calls = join(root, "calls");
+  await writeFile(
+    paseoCli,
+    `import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+appendFileSync(${JSON.stringify(calls)}, "x");
+const [error, ...rest] = JSON.parse(readFileSync(${JSON.stringify(script)}, "utf8"));
+writeFileSync(${JSON.stringify(script)}, JSON.stringify(rest));
+if (error) { console.error(error); process.exit(1); }
+console.log("{}");\n`,
+  );
+  // As the synthetic host's Paseo 0.15.4 reported a reload whose child missed the 30 s initialize deadline.
+  const late = `Paseo plugin reload alliance-work failed: ${JSON.stringify({
+    error: {
+      name: "DaemonRpcError",
+      requestType: "plugin.reload.request",
+      code: "handler_error",
+      message:
+        "Request failed: Plugin alliance-work did not initialize requestType=plugin.reload.request code=handler_error",
+    },
+  })}`;
+  const attempts = async (errors: (string | null)[]) => {
+    await writeFile(script, JSON.stringify(errors));
+    await writeFile(calls, "");
+    try {
+      await reloadPlugin(join(root, "paseo"), root, [1, 1, 1]);
+      return { calls: (await readFile(calls, "utf8")).length };
+    } catch (error) {
+      return { calls: (await readFile(calls, "utf8")).length, error: (error as Error).message };
+    }
+  };
+  assert.deepEqual(await attempts([late, late, null]), { calls: 3 });
+  const exhausted = await attempts([late, late, late, late, null]);
+  assert.equal(exhausted.calls, 4, "three retries after the first reload, then the failure stands");
+  assert.match(exhausted.error ?? "", /did not initialize/);
+  const other = await attempts(["Plugin alliance-work exited during initialization", null]);
+  assert.equal(other.calls, 1, "a plugin that fails on its own is not reloaded again");
+  assert.match(other.error ?? "", /exited during initialization/);
+});
+
 test("release corruption is rejected before extraction/activation", () => {
   assert.equal(
     isNewerRelease("v0.1.0", "0.1.1"),
@@ -305,7 +353,7 @@ test("release corruption is rejected before extraction/activation", () => {
   );
 });
 
-test("update --check uses the private edition without creating or changing installation state", async () => {
+test("update --check uses the public edition without creating or changing installation state", async () => {
   const dir = await temporary("alliance-update-check-");
   const bin = join(dir, "bin"),
     home = join(dir, "home");
@@ -318,7 +366,7 @@ test("update --check uses the private edition without creating or changing insta
     `#!/bin/sh
 case " $* " in
   *" --repo haohao3k/alliance-work "*) ;;
-  *) echo 'Refusing a release request outside the private edition' >&2; exit 1 ;;
+  *) echo 'Refusing a release request outside the public edition' >&2; exit 1 ;;
 esac
 printf '%s\\n' '{"tagName":"v0.1.1","url":"https://github.com/haohao3k/alliance-work/releases/tag/v0.1.1"}'
 `,
@@ -534,13 +582,13 @@ test("native Codex project trust survives profile verification and refresh witho
 });
 
 test("daemon compatibility accepts only the pinned runtime and the validated newer host", () => {
-  requireCompatibleDaemon("0.15.3", "0.15.3");
-  for (const version of ["0.11.2", "0.12.0", "0.14.0", "0.15.2", "0.16.0-beta.1"])
-    assert.throws(() => requireCompatibleDaemon(version, "0.15.3"), /not validated/);
+  requireCompatibleDaemon("0.15.4", "0.15.4");
+  for (const version of ["0.11.2", "0.12.0", "0.14.0", "0.15.2", "0.15.3", "0.16.0-beta.1"])
+    assert.throws(() => requireCompatibleDaemon(version, "0.15.4"), /not validated/);
 });
 
 test("stable updates accept installed host prereleases without downgrading a newer base", () => {
-  assert.equal(isNewerRelease("v0.1.5", "0.1.4-ryzen.1"), true);
+  assert.equal(isNewerRelease("v0.1.5", "0.1.4-host-alpha.1"), true);
   assert.equal(isNewerRelease("v0.1.4", "0.1.4-host.2"), true);
   assert.equal(isNewerRelease("v0.1.4", "0.1.5-host.1"), false);
 });

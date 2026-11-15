@@ -1,8 +1,24 @@
 import { defineRpc } from "@getpaseo/plugin";
 import { z } from "zod";
-import { ClaudeAccounts } from "./claude-accounts.mjs";
+import { ClaudeAccountId, ClaudeAccounts } from "./claude-accounts.mjs";
 
-const state = z.object({ config: ClaudeAccounts, revision: z.string() });
+const state = z.object({
+  config: ClaudeAccounts,
+  revision: z.string(),
+  sessions: z
+    .array(
+      z.object({
+        agentId: z.string(),
+        title: z.string(),
+        role: z.string(),
+        current: z.string().nullable(),
+        selected: z.string(),
+        reason: z.string().optional(),
+        state: z.enum(["current", "pending", "ready", "unsupported", "unknown"]),
+      }),
+    )
+    .optional(),
+});
 export const claudeQuotaRead = defineRpc({
   name: "claude.accounts.quota",
   input: z.object({}),
@@ -33,4 +49,27 @@ export const claudeAccountsSelect = defineRpc({
     revision: z.string(),
   }),
   output: state,
+});
+
+const projectSelection = z.enum(["inherit", "5x", "20x"]);
+const projectAccountState = z.object({
+  account: projectSelection,
+  accounts: z.array(ClaudeAccountId),
+  revision: z.string(),
+});
+export const projectClaudeAccountRead = defineRpc({
+  name: "claude.accounts.project.read",
+  input: z.object({ roomId: z.string() }),
+  output: projectAccountState,
+});
+export const projectClaudeAccountSelect = defineRpc({
+  name: "claude.accounts.project.select",
+  input: z.object({ roomId: z.string(), account: projectSelection, revision: z.string() }),
+  output: projectAccountState,
+});
+
+export const claudeAccountsSwitchNow = defineRpc({
+  name: "claude.accounts.switch",
+  input: z.object({ agentId: z.string(), selected: z.enum(["legacy", "5x", "20x"]) }),
+  output: z.object({ status: z.string() }),
 });

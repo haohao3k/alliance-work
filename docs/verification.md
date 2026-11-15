@@ -62,6 +62,14 @@ invalidates the proof. Reaccepting identical child bytes is still a new decision
 rechecks stored integrated evidence and current contributor identities; status reports dependency
 changes without rehashing the whole project. Unresolved native turn input also holds the decision.
 
+The proof binds the hashes, not the bulk bytes behind them. A report's artifacts (`--artifact`, its
+log) are read and rehashed at acceptance, integration and archive recheck, and a missing one counts
+as changed: keep them until the decision and its parents are final. Make the artifact a manifest
+(path and sha256 of each large file), not the data itself. After accept, rebuildable bytes the
+manifest records (installs, build output, datasets, a full tree copy) may be cleaned while the
+report, hashes and manifest remain; rerun verification from the pinned commit or inputs to
+reproduce them. A superseded attempt keeps its evidence, not its bytes.
+
 Technical acceptance remains available without integration metadata. Older reports need another
 verification with contribution scope before serving as integrated code evidence. Existing historical
 dispositions are preserved; they are not retroactively labeled as having integration proof.

@@ -23,8 +23,12 @@ Gửi việc mới, tiếp tục, xử lý permission và kiểm tra bàn giao t
 có nghĩa không chạy lượt hiện tại; không đồng nghĩa công việc đã được nghiệm thu. Assignment,
 kết quả và các quyết định cũ vẫn nằm dưới `~/.alliance-work/rooms/<room-id>/`.
 
-Một owner chịu trách nhiệm giao phẩm đầy đủ; mặc định tự làm, chỉ dùng Peer có phạm vi rõ khi
-có ích. Tự đánh giá ở mốc bàn giao, lỗi hoặc trước rerun phải chỉ ra bằng chứng và hành động
+Một owner chịu trách nhiệm giao phẩm đầy đủ. HQ là đầu mối chat với Human, giao thực thi đáng kể
+(code, điều tra, chạy test và tích hợp) cho Lead/Peer: HQ → Peer cho việc gọn, HQ → Lead → Peer
+khi cần owner tích hợp; Supervisor chỉ thêm khi nhiều workstream cần điều phối. HQ giữ scope,
+ưu tiên, critique sản phẩm và nghiệm thu; ngoại lệ tự thực thi cần Human giao rõ phạm vi và lý do.
+Tái dùng owner hiện có, giữ WIP và điều kiện nghiệm thu. Tự đánh giá ở mốc bàn giao, lỗi hoặc
+trước rerun phải chỉ ra bằng chứng và hành động
 tiếp theo. Không tự hạ scope, tiêu chí, mẫu số, model hay budget để gọi là tiến bộ; kết quả âm
 hoặc chưa kết luận vẫn phải giữ nguyên. Chỉ hỏi Human phần thực sự thiếu quyền, ý định hoặc
 truy cập, đồng thời làm tiếp phần độc lập đã được phép.
@@ -45,19 +49,23 @@ của bản phát hành hay bản đã lưu. **Reset defaults** chỉ sửa bả
 Muốn room quay lại theo mặc định của bản phát hành (kể cả các lần cập nhật sau), chạy
 `alliance-work models reset --room ID` (hoặc `--all`); `alliance-work models show` xem danh sách.
 
-Mặc định từ 0.1.18:
+Mặc định public 0.1.55 (route ghi dạng `harness/model effort`; các route Gemini chạy qua Pi
+`antigravity`, không có route `agy` mặc định):
 
 | Vai | Thứ tự (cao → thấp) |
 |---|---|
-| Peer | claude Sonnet 5.5 high → claude Sonnet 5.5 medium → codex gpt-6.1-sol high → agy gemini-4-argon-medium → pi zai/glm-5.3 high → pi izno-vps/ds/deepseek-v4.1-flash high |
-| Lens | claude Opus 5.5 medium → codex gpt-6-astra medium → agy gemini-4-argon-high |
+| Peer | `claude/claude-sonnet-5-5 high` → `claude/claude-sonnet-5-5 medium` → `codex/gpt-6.1-sol high` → `pi/antigravity/gemini-4-argon medium` → `pi/antigravity/gemini-3.8-flash medium` → `pi/antigravity/gemini-3.8-flash high` → `pi/zai/glm-5.3 high` |
+| Lens | `claude/claude-opus-5-5 medium` → `codex/gpt-6-astra medium` → `pi/antigravity/gemini-4-argon high` → `pi/antigravity/gemini-3.8-flash high` |
 
 Lead chọn route cuối cùng trong danh sách của vai đó, đi từ trên xuống, bỏ qua route không có
 trong catalog hoặc hết quota và ghi lý do; Supervisor/HQ có thể can thiệp bằng lý do và bằng
-chứng. Không có classifier tự đọc prompt để định độ khó, và không tự đổi model đang chạy.
+chứng. Prompt của owner (và của Peer, khi Peer giao lại việc) mô tả khi nào dùng từng route mặc định
+và dặn chọn route/effort nhẹ nhất vẫn đủ cho việc; thứ tự và allowlist vẫn do Human quyết, route
+Human tự thêm không có mô tả. Không có classifier tự đọc prompt để định độ khó, và không tự đổi model đang chạy.
 HQ/Supervisor/Lead giữ lựa chọn model độc lập với danh sách Peer/Lens.
 
-HQ/Supervisor/Lead không ghi model thì dùng **GPT-6.1 Sol hoặc Claude Sonnet 5.5**; được chọn
+HQ/Supervisor/Lead không ghi model thì dùng **GPT-6.1 Sol, Claude Sonnet 5.5 hoặc Gemini 3.8 Flash
+qua Pi** (Gemini 4 Argon cho việc Gemini đòi hỏi cao); được chọn
 tường minh model/effort khác trong catalog thật (Astra/Opus khi task cần, ghi lý do). Đây không phải
 điều kiện chặn tạo owner; danh sách Peer/Lens không giới hạn model của owner. Settings cho chỉnh effort ưu tiên khi không chỉ định.
 Nếu model không hỗ trợ effort ưu tiên thì dùng mặc định khả dụng của model. Model/effort được
@@ -73,8 +81,11 @@ Settings áp dụng cho **launch mới**. Phiên đang mở giữ context cũ; S
 chặn đổi model/effort ngay trong phiên. Khi đổi policy, owner cần bàn giao assignment sang phiên
 mới; không coi đây là giới hạn chi phí cưỡng chế cho mọi lệnh native/harness. Không tự ngắt phiên.
 
-Policy chung của Alliance nằm trong `room/policies/agent-ownership.md`, `operating-contract.md`
-và `model-selection.md`, được nạp cho mọi role. Đây là phần tương đương general policy; vendor
+Policy chung của Alliance nằm trong `room/policies/agent-ownership.md`, `engineering-laws.md` và
+`operating-contract.md`, được nạp cho mọi role; `owner-duties.md`, `seatwork-mapping.md` và
+`model-selection.md` chỉ nạp cho HQ/Supervisor/Lead. Peer nhận danh sách route kèm mô tả khi dùng,
+Lens (chỉ đọc, không chọn model) chỉ nhận một dòng về allowlist, và hai vai này nhận hướng dẫn đặt
+tên rút gọn (chỉ đổi tên session của mình). Đây là phần tương đương general policy; vendor
 Seatwork giữ nguyên. [Nguyên tắc chọn model và nguồn OpenAI/Anthropic](../room/policies/model-selection.md).
 
 ## HQ nhiều host
@@ -91,7 +102,7 @@ alliance-work auth status
 alliance-work doctor
 alliance-work update --check
 alliance-work update
-alliance-work deploy --host ryzen --host i5 --host build-mac --remember  # từ máy có gh
+alliance-work deploy --host host-alpha --host host-beta --host host-gamma --remember  # từ máy có gh
 alliance-work deploy --wait-idle 240 --detach   # lần sau: dùng lại danh sách máy đã lưu
 alliance-work deploy --wait-idle 240 --hold --detach   # máy đang bận
 ```
@@ -276,15 +287,20 @@ host, rồi retry một lần mà không tốn budget; batch nhắc việc bị 
 Bàn giao là lưu kết quả, checkpoint `review` (hoặc `blocked`) rồi kết thúc lượt, không gửi prompt
 bàn giao riêng. Khoảng 2 phút sau owner được đánh thức và phải quyết định cho từng child:
 `alliance-work accept`, gửi rework (hoặc câu trả lời cho `blocked`),
-`alliance-work reject --agent ID --reason TEXT` (chỉ ghi lý do, không báo cho child: sau đó gửi
-rework hoặc archive child), hoặc `wakeups defer --minutes M` (tối đa 3 lần, chỉ khi quyết định còn
+`alliance-work reject --agent ID --reason TEXT [--rework TEXT]` (có `--rework` thì lý do và yêu cầu
+làm lại tới child ngay trong một bước; không có thì chỉ ghi lý do: sau đó gửi rework hoặc archive child), hoặc `wakeups defer --minutes M` (tối đa 3 lần, chỉ khi quyết định còn
 chờ một kết quả chưa có).
 Quyết định tự đóng review, không cần ack; chỉ ack mà chưa quyết định thì bị từ chối.
 Hủy một lượt sẽ pause. Không ai duyệt approval prompt cho member Alliance: agent tránh lệnh cần
-duyệt (ví dụ `rm -rf` với glob; dùng thư mục mới từ `mktemp -d` thay vì xóa sạch thư mục cũ).
+duyệt (ví dụ `rm -rf` với glob; dọn scratch bằng `alliance-work scratch clean` thay vì xóa sạch thư mục).
 Yêu cầu duyệt chờ quá 5 phút thì Alliance tự từ chối (không bao giờ cho phép), kèm cách làm lại bước
 đó mà không cần duyệt; member tiếp tục lượt của mình. Owner không bị đánh thức, chỉ có một mục pull;
 `status` ghi lần từ chối gần nhất.
+
+`alliance-work status` mở đầu bằng `workSafety`: cảnh báo khi kết quả của một room chỉ nằm trên một ổ
+đĩa (thư mục không có VCS, repo không có remote, nhánh có commit chưa lên remote nào, `core.bare`
+bị bật trong checkout thường). Mỗi cảnh báo nêu room, đường dẫn và con số cụ thể. Lệnh chỉ đọc, không
+fetch/push/sửa cấu hình. Gọi CLI sai thì lỗi kèm gợi ý flag gần nhất và cú pháp đúng của lệnh đó.
 
 Archive chỉ diễn ra sau `accept` có bằng chứng gắn với candidate, khi agent idle và không còn
 child, trách nhiệm, job hay wakeup chưa xử lý. Từ 0.1.16 quy tắc này áp dụng cho mọi agent
@@ -294,7 +310,9 @@ owner accept kèm `--product` (bằng chứng runtime đúng yêu cầu của Hu
 Quyết định gắn với lượt đã review: không accept được khi agent đang chạy việc mới, và việc mới sẽ
 mở lại quyết định; lượt chỉ giữ nguyên phase (xem trên) thì không. Lượt bị hủy thì pause; gửi lượt mới cho agent đó là tự chạy lại. Bàn giao xong mà
 48 giờ không ai quyết định thì owner được nhắc một lần (tối đa 4 lời nhắc mỗi 10 phút). Muốn giữ
-chat sau nghiệm thu: `alliance-work members keep --agent ID` (bỏ giữ: thêm `--off`), hoặc
+chat sau nghiệm thu vì đã giao việc tiếp theo: `alliance-work members keep --agent ID --reason TEXT [--hours N]`
+(tự hết sau 24 giờ hoặc khi người đặt bị archive; bỏ giữ: `--off`; `accept --keep` giữ ngay lúc accept).
+`accept` gỡ keep do chính người accept đặt trước đó và dọn các reminder đã bắn của agent. Hoặc
 `--auto-archive false` khi start. Không reset budget mỗi lượt. `status` hiển thị state/counter;
 `uncertain` cần kiểm tra native history trước khi checkpoint lại, tránh thực hiện trùng side effect.
 Chi tiết giới hạn và bài test agent thật ở [operations](operations.md#autonomous-assignments-0112).
@@ -307,10 +325,11 @@ không auto-archive, kể cả reminder đã ACK/hết hạn. Bàn giao cho Huma
 
 ### Chọn role/model từ 0.1.13
 
-Giao implementation cho Peer với Sol/Sonnet; chỉ thêm Lead khi cần framing/integration/acceptance,
-Supervisor khi có nhiều workstream và HQ khi có quyết định hoặc dependency xuyên project.
-Không cần tạo đủ các tầng. Owner có thể sửa nhỏ hoặc xử lý quyết định khó trực tiếp; việc build
-kéo dài giao lại Peer. Model mặc định của owner là Sol/Sonnet; Astra/Opus phải chọn rõ với lý do.
+HQ là đầu mối Human cho sản phẩm/portfolio, giao thực thi cho Lead/Peer; Supervisor chỉ dùng khi
+cần điều phối nhiều workstream. Giao implementation và test cho Peer với Sol/Sonnet; Lead giữ
+framing, tích hợp và acceptance kỹ thuật. Không cần tạo đủ các tầng. Ngoại lệ sửa nhỏ/xử lý quyết
+định khó của Lead/Supervisor theo role vẫn áp dụng; HQ chỉ tự thực thi khi Human giao ngoại lệ rõ
+phạm vi và lý do. Model mặc định của owner là Sol/Sonnet; Astra/Opus phải chọn rõ với lý do.
 Worker không chỉ định model/difficulty dùng band standard, không tự rơi xuống model frontier.
 Room policy đã lưu và model của session đang tồn tại được giữ nguyên.
 
@@ -335,7 +354,12 @@ Có thể yêu cầu tìm màn hình, flow hoặc section tham khảo bằng Mob
 Xem [cấu hình và auth](operations.md#user-mcp-mobbin).
 
 
-## Chọn Claude account theo host/role
+## Chọn Claude account theo project, host hoặc role
+
+Trong **Models → This project → Claude account**, chọn **Claude 5x**, **Claude 20x** hoặc
+**Inherit**. Account riêng áp dụng cho mọi role Claude của project. **Inherit** dùng account
+của role trên host, rồi đến **Host default**. Model và effort có thể kế thừa Global dù project
+đã chọn account riêng.
 
 Trong **Alliance Work → Claude accounts**, chọn **Host default** là 5x/20x và override từng
 HQ/Supervisor/Lead/Peer/Lens khi cần. Mỗi host có cấu hình riêng. Chạy `alliance-work accounts import 5x`
@@ -370,7 +394,7 @@ Settings của project chứa Models, Skills và MCP; Settings trên cùng chứ
 
 ### Tên workspace và agent
 
-Workspace dùng tên dự án, ví dụ **Sleek Radar**; máy **Ryzen** nằm trong ngữ cảnh host của Paseo.
+Workspace dùng tên dự án, ví dụ **Example Workspace**; máy **host-alpha** nằm trong ngữ cảnh host của Paseo.
 Khi gắn một workspace chưa có tên, Alliance đặt tên dự án. Tên workspace đã được Human đặt
 luôn được giữ. Room mới theo dõi tên native khi người dùng đổi tên trong Paseo; room cũ hoặc
 room có tên riêng khác bản native đã ghi nhận được giữ nguyên để Human đối chiếu.
@@ -379,12 +403,21 @@ Agent mới chưa được đặt tên nhận **Dự án · Vai trò**, ví dụ
 Yêu cầu không được chép tự động vào sidebar để tránh lộ dữ liệu riêng tư.
 Paseo không đưa prompt đầu tiên vào create hook, nên chat tạo trực tiếp chỉ có tên dự án/vai trò
 ban đầu. Sau khi đọc yêu cầu đầu tiên, agent được hướng dẫn dùng native `update_agent` một lần để làm rõ tên tự động,
-ví dụ **Sleek Radar · Lead · Hoàn thiện dashboard**. Không gọi thêm model chỉ để đặt tên.
+ví dụ **Example Workspace · Lead · Hoàn thiện dashboard**. Không gọi thêm model chỉ để đặt tên.
 Tên do Human nhập được giữ nguyên; chỉ đổi khi Human yêu cầu rõ ràng.
 
 Agent chỉ tự đổi tên bằng ID của chính mình, đọc lại tên hiện tại trước khi ghi, và dừng nếu
 khác tên tự động dự kiến. Chỉ owner chịu trách nhiệm dự án dùng `rename_workspace` cho workspace
-của mình khi Human yêu cầu; Peer chuyển yêu cầu cho owner. Đây là quy tắc vận hành: Paseo 0.15.3
+của mình khi Human yêu cầu; Peer chuyển yêu cầu cho owner. Đây là quy tắc vận hành: Paseo 0.15.4
 chưa có kiểm tra expected-title nguyên tử hoặc quyền rename theo owner, nên không thể đảm bảo
 Human thắng một lần đổi tên diễn ra đúng đồng thời. Không suy ra thay đổi quyền, model, budget,
 assignment hoặc trạng thái hoàn tất từ tên hiển thị.
+
+### Đổi account Claude
+
+Trong **Claude accounts**, chọn account cho host hoặc từng role. **In use** là account của
+process còn sống; **Selected** là lựa chọn mới. Phiên cũ tự chuyển khi turn và job nền đã xong;
+tin nhắn tiếp theo dùng account mới và giữ lịch sử. **Unknown** không có nghĩa là đã chuyển.
+Nếu hiện **Daemon update required**, cần bảo trì daemon lúc idle; không reload phiên đang chạy.
+
+Đóng job: dùng `jobs settle` với outcome `succeeded|failed|superseded|unverified`, reason và evidence JSON gắn đúng key/PID/processIdentity. Sau đó `jobs archive` bằng revision mới; `jobs restore` hiện lại lịch sử. Job còn chạy/không rõ trạng thái bị từ chối. Thiếu bằng chứng thì ghi `unverified`; không suy thành công từ process exit. Chi tiết tại docs/operations.md.

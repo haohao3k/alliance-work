@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -51,6 +52,78 @@ async function fixture(native = false) {
   cases.push(...[root, unrelated, prefix, escapedCwd].map((cwd) => ({ cwd, allowed: false })));
   return { root, home, roots, manifest, cases };
 }
+
+test("project account RPC and the native Claude reopen hook use the same Alliance project", async () => {
+  const f = await fixture();
+  const handlers = new Map<string, (input: unknown, context: unknown) => Promise<unknown>>();
+  const hooks = new Map<string, (input: unknown, context: unknown) => Promise<unknown>>();
+  const dispose = contribute({
+    registerProvider() {},
+    registerUsageSource() {},
+    registerSettings: () => ({
+      read: async () => ({ status: "ready", values: { home: f.home } }),
+      subscribe: () => () => {},
+    }),
+    handle: (
+      rpc: { name: string; input: { parse(value: unknown): unknown } },
+      handler: (input: unknown, context: unknown) => Promise<unknown>,
+    ) => handlers.set(rpc.name, (input, context) => handler(rpc.input.parse(input), context)),
+    addHook: (name: string, handler: (input: unknown, context: unknown) => Promise<unknown>) =>
+      hooks.set(name, handler),
+  } as unknown as PluginServerContext);
+  const workspace = (id: string) => ({
+    id,
+    refresh: async () => ({ title: null }),
+    setTitle: async () => ({}),
+  });
+  const paseo = {
+    agents: { ref: () => ({ refresh: async () => ({ agent: { model: "claude-sonnet-5-5" } }) }) },
+    workspaces: { open: async () => workspace("fixture-workspace"), ref: workspace },
+  };
+  const context = { paseo };
+  function call(name: string, input: unknown) {
+    const method = handlers.get(name) ?? hooks.get(name);
+    assert(method, `${name} is registered`);
+    return method(input, context);
+  }
+  try {
+    const { id: roomId } = (await call("rooms.create", { cwd: f.roots[0] })) as { id: string };
+    const { id: otherId } = (await call("rooms.create", { cwd: f.roots[1] })) as { id: string };
+    const read = (id: string) =>
+      call("claude.accounts.project.read", { roomId: id }) as Promise<{ account: string; revision: string }>;
+    assert.equal((await read(roomId)).account, "inherit");
+    await assert.rejects(read(randomUUID()), /Unknown room/);
+
+    // Seed labels only: the RPC can read and clear these without obtaining either credential.
+    await writeFile(
+      join(f.home, "claude-project-accounts.json"),
+      JSON.stringify({
+        version: 1,
+        projects: { [roomId]: "20x", [otherId]: "5x" },
+      }),
+      { mode: 0o600 },
+    );
+    const account = await read(roomId);
+    assert.equal(account.account, "20x");
+    const policyBefore = await call("models.read", { roomId });
+    const opened = (await call("agent.open.before", {
+      request: {
+        agentId: "claude-reopen",
+        workspaceId: "fixture-workspace",
+        provider: "alliance-claude-peer",
+        cwd: f.roots[0],
+        env: { ALLIANCE_CLAUDE_ROOM: otherId },
+      },
+    })) as { env: Record<string, string> };
+    assert.equal(opened.env.ALLIANCE_CLAUDE_ROOM, roomId);
+    await call("claude.accounts.project.select", { roomId, account: "inherit", revision: account.revision });
+    assert.equal((await read(roomId)).account, "inherit");
+    assert.equal((await read(otherId)).account, "5x");
+    assert.deepEqual(await call("models.read", { roomId }), policyBefore);
+  } finally {
+    await dispose();
+  }
+});
 
 test("scoped servers survive Claude launch, Codex per-thread config and AGY session config only for canonical project sessions", async () => {
   const f = await fixture();

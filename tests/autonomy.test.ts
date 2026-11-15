@@ -3,13 +3,14 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { PaseoApi } from "@getpaseo/client";
-import { Autonomy } from "../server/autonomy";
+import { Autonomy, providerNotice, quotaReset } from "../server/autonomy";
 import { Lifecycle } from "../server/lifecycle";
 import { Obligations } from "../server/obligations";
 import { newTurn, RoomStore } from "../server/store";
 import { Wakeups } from "../server/wakeups";
 import { temporary } from "./temp";
 
+// Synthetic regression fixtures use invented agent IDs and fixed test clocks.
 async function fixture() {
   const home = await temporary("alliance-autonomy-");
   const store = new RoomStore(home);
@@ -384,7 +385,7 @@ test("failed turns retry with a bound, while cancellation and permission do not 
   }
 });
 
-test("a provider quota failure waits for its reset without using retries and tells the owner once", async () => {
+test("a provider quota failure waits without using retries or duplicating runtime account notices", async () => {
   const f = await fixture();
   try {
     const retries = () => f.prompts().filter((p) => p.startsWith("Alliance retry")).length;
@@ -403,10 +404,7 @@ test("a provider quota failure waits for its reset without using retries and tel
     await f.wakes.tick(f.api);
     await f.wakes.tick(f.api);
     const notices = f.wakes.list().filter((w) => w.ownerId === "owner");
-    assert.equal(notices.length, 1, "the owner is told once");
-    assert.equal(notices[0].state, "delivered");
-    const told = f.prompts().find((p) => p.startsWith("Alliance wakeups for owner owner"));
-    assert.doesNotMatch(told ?? "", /wakeups ack/, "a notice that lapses by itself asks for no ack");
+    assert.equal(notices.length, 0, "runtime owns account-scoped quota notices");
     f.advance(4 * 3600000);
     await f.autonomy.tick(f.api);
     assert.equal(retries(), 1);
@@ -427,7 +425,7 @@ test("a provider quota failure waits for its reset without using retries and tel
   }
 });
 
-test("a provider quota that does not lift ends blocked after a few waits; its owner hears once", async () => {
+test("a provider quota that does not lift ends blocked after a few waits", async () => {
   const f = await fixture();
   try {
     f.autonomy.start("worker");
@@ -441,7 +439,7 @@ test("a provider quota that does not lift ends blocked after a few waits; its ow
     }
     assert.equal(f.autonomy.get("worker")?.phase, "blocked", "a quota that does not lift needs a decision");
     assert.ok(f.prompts().length <= 3, `${f.prompts().length} retries`);
-    assert.equal(f.wakes.list().filter((w) => w.key.startsWith("quota-")).length, 1, "one notice per pause");
+    assert.equal(f.wakes.list().filter((w) => w.key.startsWith("quota-")).length, 0);
   } finally {
     f.store.close();
   }
@@ -862,7 +860,7 @@ test("an obligation handed off or fulfilled binds no longer: the agent starts ag
 });
 
 test("an assignment bound to an obligation that is no longer open is not continued by its next turn", async () => {
-  // Mac mini: Codex Lead f0602bea is bound to proj-cycle1-20261021, fulfilled at 13:32Z, and
+  // synthetic host: Codex Lead 0000001b is bound to proj-cycle1-20261021, fulfilled at 13:32Z, and
   // sits in review. A message to it reopens the review; that turn ends without a checkpoint.
   const f = await fixture();
   try {
@@ -875,7 +873,7 @@ test("an assignment bound to an obligation that is no longer open is not continu
         roomId: "room",
         ownerId: "worker",
         assignment: "brief",
-        authority: "HQ fbbeb8af",
+        authority: "HQ 0000001c",
         nextAction: "hand back cycle1",
         closeWhen: "HQ accepts the cycle1 handback",
       },
@@ -942,7 +940,7 @@ test("wait keeps a handback or a pause it finds, and repeating wait --minutes in
     f.autonomy.checkpoint("worker", "paused", "Operator pause before an update");
     await wait("CI");
     assert.equal(f.autonomy.get("worker")?.phase, "paused");
-    assert.equal(said.length, 3, "each kept state is reported");
+    assert.equal(said.filter((line) => /stands/.test(line)).length, 3, "each kept state is reported");
   } finally {
     f.store.close();
   }
@@ -979,12 +977,12 @@ test("handing off an obligation keeps a Human's cancellation hold on the old own
   }
 });
 
-/** A pilot room on the Mac mini: HQ d34294ec owns Claude Lead c3f72b0b. Times are UTC on `day`. */
+/** A pilot room on the synthetic host: HQ 00000019 owns Claude Lead 00000017. Times are UTC on `day`. */
 async function pilot(day: string) {
   const f = await fixture();
-  seat(f.store, "d34294ec", null, null, "hq", "claude");
-  seat(f.store, "c3f72b0b", "d34294ec", null, "lead", "claude");
-  f.autonomy.start("c3f72b0b");
+  seat(f.store, "00000019", null, null, "hq", "claude");
+  seat(f.store, "00000017", "00000019", null, "lead", "claude");
+  f.autonomy.start("00000017");
   const at = (time: string) => f.advance(Date.parse(`${day}T${time}Z`) - f.now());
   return {
     ...f,
@@ -1004,20 +1002,20 @@ async function pilot(day: string) {
      */
     turn: (turnId: string, start: string, end: string, checkpoint?: () => void) => {
       at(start);
-      f.autonomy.started("c3f72b0b", turnId);
-      if (!f.autonomy.carrying("c3f72b0b")) f.store.updateMember("c3f72b0b", newTurn(turnId));
+      f.autonomy.started("00000017", turnId);
+      if (!f.autonomy.carrying("00000017")) f.store.updateMember("00000017", newTurn(turnId));
       checkpoint?.();
       at(end);
-      if (!f.autonomy.carrying("c3f72b0b"))
-        f.store.updateMember("c3f72b0b", { lastOutcome: "completed", resultPath: `${turnId}.json` });
-      f.autonomy.ended("c3f72b0b", turnId, "completed");
+      if (!f.autonomy.carrying("00000017"))
+        f.store.updateMember("00000017", { lastOutcome: "completed", resultPath: `${turnId}.json` });
+      f.autonomy.ended("00000017", turnId, "completed");
     },
-    asksHq: () => f.prompts().filter((p) => p.startsWith("Alliance wakeups for owner d34294ec")).length,
+    asksHq: () => f.prompts().filter((p) => p.startsWith("Alliance wakeups for owner 00000019")).length,
   };
 }
 
 test("a turn Claude Code starts by itself keeps the handback it found: its owner is asked, it is not continued", async () => {
-  // Mac mini, 2026-10-22: the Lead checkpointed review in autonomous-turn-52 (04:06:00, ended
+  // synthetic host, 2026-10-22: the Lead checkpointed review in autonomous-turn-52 (04:06:00, ended
   // 04:06:14). Monitor events then started autonomous-turn-53, -55, -56 and -57 (ended 04:06:17,
   // 04:07:19, 04:07:53, 04:09:24; each about 3 s long). 0.1.18 reopened the review, continued the
   // Lead with its own handback text, and HQ never heard of it.
@@ -1026,7 +1024,7 @@ test("a turn Claude Code starts by itself keeps the handback it found: its owner
     f.turn("autonomous-turn-52", "04:05:50", "04:06:14", () => {
       f.at("04:06:00");
       f.autonomy.checkpoint(
-        "c3f72b0b",
+        "00000017",
         "review",
         "U3 runtime passed; handback written",
         "autonomous-turn-52",
@@ -1040,7 +1038,7 @@ test("a turn Claude Code starts by itself keeps the handback it found: its owner
     await f.rounds("04:09:21");
     f.turn("autonomous-turn-57", "04:09:21", "04:09:24");
     await f.rounds("04:12:00");
-    assert.equal(f.autonomy.get("c3f72b0b")?.phase, "review", "the handback stands");
+    assert.equal(f.autonomy.get("00000017")?.phase, "review", "the handback stands");
     assert.deepEqual(
       f.prompts().filter((p) => p.startsWith("Alliance continue")),
       [],
@@ -1053,17 +1051,17 @@ test("a turn Claude Code starts by itself keeps the handback it found: its owner
 });
 
 test("a blocker asks its owner once while later turns leave it standing", async () => {
-  // Mac mini, 2026-10-21: the Lead checkpointed blocked at 15:55:34 (foreground-turn-8, ended
+  // synthetic host, 2026-10-21: the Lead checkpointed blocked at 15:55:34 (foreground-turn-8, ended
   // 15:55:44) with this reason. A task-notification turn (autonomous-turn-9) and two turns started
   // by plugin wake batches (foreground-turn-10, -11) followed without a checkpoint, and HQ got a
   // review of the same blocker after each of them, until it asked for an urgent fix of the loop.
   const reason =
-    "pilot: test host unreachable since 22:48 — likely a scheduled shutdown; need the Human to start it. 4 Peers working offline. See results/pilot/STATUS.md.";
+    "fixture: required test service is unavailable; owner action needed. See results/fixture/STATUS.md.";
   const f = await pilot("2026-10-21");
   try {
     f.turn("foreground-turn-8", "15:55:30", "15:55:44", () => {
       f.at("15:55:34");
-      f.autonomy.checkpoint("c3f72b0b", "blocked", reason, "foreground-turn-8");
+      f.autonomy.checkpoint("00000017", "blocked", reason, "foreground-turn-8");
     });
     await f.rounds("15:58:46");
     f.turn("autonomous-turn-9", "15:58:46", "15:58:53");
@@ -1072,7 +1070,7 @@ test("a blocker asks its owner once while later turns leave it standing", async 
     await f.rounds("16:03:08");
     f.turn("foreground-turn-11", "16:03:08", "16:03:34");
     await f.rounds("16:06:30");
-    assert.equal(f.autonomy.get("c3f72b0b")?.reason, reason, "the blocker stands");
+    assert.equal(f.autonomy.get("00000017")?.reason, reason, "the blocker stands");
     assert.equal(f.asksHq(), 1, "HQ is asked once");
   } finally {
     f.store.close();
@@ -1080,8 +1078,8 @@ test("a blocker asks its owner once while later turns leave it standing", async 
 });
 
 test("an assignment continued twice without a checkpoint hands its final message back instead of a third continuation", async () => {
-  // ryzen, 2026-10-21: active Sonnet peers were continued about every 30 s and each continuation
-  // turn ended without a checkpoint (5ea0e42d foreground-turn-2 to -21; 79 such turns that day).
+  // primaryHost, 2026-10-21: active Sonnet peers were continued about every 30 s and each continuation
+  // turn ended without a checkpoint (0000000f foreground-turn-2 to -21; 79 such turns that day).
   const f = await fixture();
   try {
     const continued = () => f.prompts().filter((p) => p.startsWith("Alliance continue"));
@@ -1119,15 +1117,15 @@ test("an assignment continued twice without a checkpoint hands its final message
 });
 
 test("a Pi usage limit that says when it resets is retried then, without using the retry budget", async () => {
-  // i5, 2026-10-21: Pi peer dfd68859 (proxy/gpt-6-astra) failed at 21:06:41 with this
+  // i5, 2026-10-21: Pi peer 0000001a (proxy/gpt-6-astra) failed at 21:06:41 with this
   // text. 0.1.18 retried it after 40 s and 75 s and had spent its retry budget 2m09s later.
   const f = await fixture();
   try {
     f.advance(Date.parse("2026-10-21T21:06:41Z") - f.now());
     f.autonomy.start("worker");
-    f.autonomy.started("worker", "5794dbeb-269f-42fc-a5da-e49f519dda7b");
+    f.autonomy.started("worker", "11111111-1111-4111-8111-111111111111");
     f.end(
-      "5794dbeb-269f-42fc-a5da-e49f519dda7b",
+      "11111111-1111-4111-8111-111111111111",
       "failed",
       'proxy API error (503): {"message":"[upstream/gpt-6-astra] [429]: The usage limit has been reached (reset after 29m 43s)"} (stopReason=error, model=proxy/gpt-6-astra)',
     );
@@ -1144,4 +1142,161 @@ test("a Pi usage limit that says when it resets is retried then, without using t
   } finally {
     f.store.close();
   }
+});
+
+// Synthetic provider notices exercise parsing with fixed clocks and public CLI message formats.
+const NOW = Date.parse("2026-11-13T01:00:00Z");
+const MINUTE = 60000;
+
+test("a Claude turn ending on a limit or sign-in notice is recognised as the provider's, not as an answer", () => {
+  for (const notice of [
+    "You've hit your 5-hour limit · resets 4:10am (Asia/Saigon)",
+    "You've hit your weekly limit · resets 11am (Asia/Saigon)",
+    "You've reached your Fable limit. Switch to another model to continue.",
+    "Login expired · Please run /login",
+    "Login reached its time limit · Please run /login",
+    // zerosub (kapybara-org/zerosub@954d699 server/limits.ts): typographic apostrophe, legacy epoch, budgets.
+    "You’ve hit your session limit · resets 9:40pm (Asia/Ho_Chi_Minh)",
+    "You’ve reached your Opus 5 limit",
+    // A model the code has never heard of.
+    "You've hit your Mythos limit · resets 9pm (Asia/Saigon)",
+    "You've hit your Claude 5 limit · resets 9pm (Asia/Saigon)",
+    "Claude AI usage limit reached|1792000000",
+    "You've hit your org's monthly spend limit · contact your admin",
+    "You're out of extra usage · resets Dec 1",
+  ])
+    assert.equal(providerNotice(`${notice}\n`), notice, notice);
+  for (const answer of [
+    "You've hit your GitHub API rate limit, so I stopped the sweep.",
+    "I checked the usage limit page: You've hit your session limit is what Claude prints.",
+    "The Claude AI usage limit reached|1792000000 line comes from the legacy CLI.",
+    "Done. Not logged in · Please run /login is what the user saw.",
+  ])
+    assert.equal(providerNotice(answer), undefined, answer);
+});
+
+// Synthetic Codex quota notices with a fixed calendar boundary.
+const CODEX_LIMIT =
+  "You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at ";
+
+for (const [zone, reset] of [
+  ["Asia/Ho_Chi_Minh", "2026-11-13T21:19:00Z"],
+  ["UTC", "2026-11-14T04:19:00Z"],
+  ["America/New_York", "2026-11-14T09:19:00Z"],
+]) {
+  test(`Codex dated and clock-only resets use the host timezone (${zone})`, () => {
+    const previous = process.env.TZ;
+    process.env.TZ = zone;
+    try {
+      const at = Date.parse(reset);
+      for (const phrase of ["Nov 14th, 2026 4:19 AM.", "4:19 AM."])
+        assert.equal(quotaReset(CODEX_LIMIT + phrase, at - 2 * 3600000), at + MINUTE, phrase);
+      assert.equal(
+        quotaReset(
+          "You've hit your session limit · resets 4:19am (Asia/Ho_Chi_Minh)",
+          Date.parse("2026-11-13T19:00:00Z"),
+        ),
+        Date.parse("2026-11-13T21:20:00Z"),
+        "Claude retains its explicit timezone regardless of the host",
+      );
+    } finally {
+      if (previous === undefined) delete process.env.TZ;
+      else process.env.TZ = previous;
+    }
+  });
+}
+
+test("a Codex clock just past stays in its reset minute, while a later notice waits for tomorrow", () => {
+  const previous = process.env.TZ;
+  process.env.TZ = "Asia/Ho_Chi_Minh";
+  try {
+    const at = Date.parse("2026-11-13T21:19:00Z");
+    assert.equal(quotaReset(`${CODEX_LIMIT}4:19 AM.`, at + 30000), at + 90000);
+    assert.equal(quotaReset(`${CODEX_LIMIT}4:19 AM.`, at + 6 * MINUTE), at + 86400000 + MINUTE);
+    assert.equal(
+      quotaReset(`${CODEX_LIMIT}12:00 AM.`, Date.parse("2026-12-31T16:50:00Z")),
+      Date.parse("2026-12-31T17:01:00Z"),
+      "midnight rolls into the next year in the host timezone",
+    );
+    assert.equal(
+      quotaReset(`${CODEX_LIMIT}12:00 PM.`, Date.parse("2026-11-14T04:00:00Z")),
+      Date.parse("2026-11-14T05:01:00Z"),
+    );
+    assert.equal(
+      quotaReset(`${CODEX_LIMIT}Nov 14th, 2026 4:19 AM.`, at + 6 * MINUTE),
+      at + 7 * MINUTE,
+      "an explicit past date does not roll to tomorrow",
+    );
+  } finally {
+    if (previous === undefined) delete process.env.TZ;
+    else process.env.TZ = previous;
+  }
+});
+
+test("archived members' quota receipts do not hold the active harness", async () => {
+  const f = await fixture();
+  try {
+    for (const harness of ["codex", "claude"]) {
+      seat(f.store, "worker", "owner", null, "peer", harness);
+      seat(f.store, "live-limit", "owner", null, "peer", harness);
+      seat(f.store, "archived-limit", "owner", null, "peer", harness);
+      const live = { until: f.now() + 3600000, messageId: null };
+      const archived = { until: f.now() + 86400000, messageId: null };
+      f.store.updateMember("live-limit", { limited: live });
+      f.store.updateMember("archived-limit", { limited: archived, archivedAt: new Date().toISOString() });
+      assert.equal(f.store.heldUntil("worker", f.now()), live.until);
+      f.store.updateMember("live-limit", { archivedAt: new Date().toISOString() });
+      assert.equal(f.store.heldUntil("worker", f.now()), null);
+      assert.deepEqual(f.store.member("archived-limit")?.limited, archived, "retain the historical receipt");
+      f.store.updateMember("archived-limit", { archivedAt: undefined });
+      assert.equal(f.store.heldUntil("worker", f.now()), archived.until, "reopened members count again");
+    }
+  } finally {
+    f.store.close();
+  }
+});
+
+test("a provider limit is waited out until its stated reset, or half an hour when it states none", () => {
+  const wait = (error: string) => {
+    const until = quotaReset(error, NOW);
+    return until === null ? null : until - NOW;
+  };
+  // The reset is stated.
+  const epoch = NOW / 1000 + 3 * 3600;
+  assert.equal(wait(`Claude AI usage limit reached|${epoch}`), 3 * 3600000 + MINUTE);
+  assert.equal(
+    wait("You have exhausted your capacity on this model. Your quota will reset after 1h0m0s."),
+    61 * MINUTE,
+  );
+  assert.equal(
+    wait(
+      "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h43m29s.",
+    ),
+    (4 * 60 + 43) * MINUTE + 29000 + MINUTE,
+  );
+  assert.equal(wait("The usage limit has been reached (reset after 29m 43s)"), 29 * MINUTE + 43000 + MINUTE);
+  assert.equal(
+    wait(
+      "You’ve hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at Oct 18th, 2026 6:06 PM.",
+    ),
+    MINUTE,
+    "a reset already past is retried in a minute",
+  );
+  // No time is stated: a model or budget limit is retried after half an hour.
+  for (const error of [
+    "You've reached your Fable limit. Switch to another model to continue.",
+    "You’ve reached your Opus 5 limit",
+    "You've hit your Mythos limit",
+    "You've hit your org's monthly spend limit · contact your admin",
+    "You're out of extra usage",
+    "Your workspace is out of credits",
+  ])
+    assert.equal(wait(error), 30 * MINUTE, error);
+  // Not a limit of the account, or no limit at all.
+  for (const error of [
+    "Server is temporarily limiting requests (not your usage limit) · Rate limited",
+    "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)",
+    "Login expired · Please run /login",
+  ])
+    assert.equal(wait(error), null, error);
 });

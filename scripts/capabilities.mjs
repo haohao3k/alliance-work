@@ -3,6 +3,11 @@ import { lstat, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 const required = {
+  "claude-idle-switch": [
+    "server/claude-switch.ts",
+    "server/claude-runtime.mjs",
+    "scripts/paseo-0.15.4-idle-switch.json",
+  ],
   "context-300k": ["scripts/context-policy.mjs", "scripts/pi-context-limit.mjs"],
   "feature-coverage": [
     "server/feature-verification.mjs",

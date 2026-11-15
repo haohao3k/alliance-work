@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { StoreBlockedError, storeAccess } from "../server/store-compat.mjs";
 
 /**
  * 0.1.19 gives each owned member a handback-only record so its handbacks reach its owner. Older
@@ -17,6 +18,9 @@ export function dropHandbackRecords(home) {
   const db = new DatabaseSync(path);
   try {
     db.exec("PRAGMA busy_timeout=5000");
+    // A store a newer release marked is converted by that release's own rollback, not rewritten here.
+    const access = storeAccess(db);
+    if (access.access !== "write") throw new StoreBlockedError(access);
     if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='autonomy'").get()) return 0;
     const removed = Number(
       db.prepare("DELETE FROM autonomy WHERE json_extract(data, '$.handbackOnly') = 1").run().changes,

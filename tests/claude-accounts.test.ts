@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
-import { chmod, readFile, symlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { chmod, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
-import { profileEnvironment } from "../scripts/launch.mjs";
+import { launchPlan, profileEnvironment } from "../scripts/launch.mjs";
+import { prepareProfiles } from "../scripts/profiles.mjs";
 import {
   claudeAccountsState,
   importClaudeAccount,
   osCredentialStore,
+  projectClaudeAccountState,
   selectClaudeAccount,
   selectedClaudeCredentials,
+  selectProjectClaudeAccount,
 } from "../server/claude-accounts.mjs";
 import { temporary } from "./temp";
 
@@ -76,6 +80,80 @@ test("missing/locked credentials, stale edits and tampered files fail closed", a
   const linked = await temporary("claude-accounts-link-");
   await symlink(file, join(linked, "claude-accounts.json"));
   await assert.rejects(claudeAccountsState(linked), /Cannot read/);
+});
+
+test("a bound Claude resume fails closed on an unavailable project credential", async () => {
+  const root = await temporary("claude-project-launch-");
+  const home = join(root, "home");
+  const cwd = join(root, "repo");
+  const roomId = randomUUID();
+  const workspaceRoom = randomUUID();
+  await mkdir(cwd);
+  await prepareProfiles({
+    home,
+    isolatedRoot: join(root, "profiles"),
+    executables: { codex: "/usr/bin/false", claude: "/usr/bin/false", pi: "/usr/bin/false" },
+  });
+  await writeFile(
+    join(home, "claude-project-accounts.json"),
+    JSON.stringify({ version: 1, projects: { [roomId]: "20x" } }),
+    { mode: 0o600 },
+  );
+  const env = {
+    ALLIANCE_CLAUDE_ROOM: roomId,
+    ALLIANCE_BOUND_ROOM: workspaceRoom,
+    ALLIANCE_WORKSPACE_CWD: cwd,
+  };
+  await assert.rejects(
+    launchPlan(home, "claude-hq", ["--resume", "session"], { ...env, PASEO_AGENT_ID: "retained" }, cwd),
+    /not provisioned/,
+  );
+  const terminal = await launchPlan(home, "claude-hq", ["--resume", "session"], env, cwd);
+  assert.equal("claudeAccount" in terminal && terminal.claudeAccount, "legacy");
+});
+
+test("project account selection uses the host revision and Inherit restores the role or default", async () => {
+  const home = await temporary("claude-project-accounts-");
+  const store = fixtureStore();
+  const project = randomUUID();
+  const other = randomUUID();
+  const initial = await projectClaudeAccountState(home, project);
+  assert.equal(initial.account, "inherit");
+  await assert.rejects(selectProjectClaudeAccount(home, project, "5x", initial.revision, store), /Provision/);
+  await importClaudeAccount(home, "5x", "private-five", store);
+  const imported = await importClaudeAccount(home, "20x", "private-twenty", store);
+  const host = await selectClaudeAccount(home, "default", "20x", imported.revision, store);
+  const role = await selectClaudeAccount(home, "peer", "5x", host.revision, store);
+  const hostPath = join(home, "claude-accounts.json");
+  const hostBytes = await readFile(hostPath, "utf8");
+  const selected = await selectProjectClaudeAccount(home, project, "5x", role.revision, store);
+  assert.equal(selected.account, "5x");
+  assert.notEqual(selected.revision, role.revision);
+  assert.equal(await readFile(hostPath, "utf8"), hostBytes, "older releases can still read host settings");
+  const updated = await selectProjectClaudeAccount(home, project, "20x", selected.revision, store);
+  assert.deepEqual(await projectClaudeAccountState(home, project), updated);
+  assert.equal((await projectClaudeAccountState(home, other)).account, "inherit");
+  assert.deepEqual(await selectedClaudeCredentials(home, "peer", store, project), {
+    CLAUDE_CODE_OAUTH_TOKEN: "private-twenty",
+  });
+  assert.deepEqual(await selectedClaudeCredentials(home, "peer", store, other), {
+    CLAUDE_CODE_OAUTH_TOKEN: "private-five",
+  });
+  await assert.rejects(selectClaudeAccount(home, "peer", "20x", role.revision, store), /changed/);
+  const changedHost = await selectClaudeAccount(home, "default", "5x", updated.revision, store);
+  await assert.rejects(
+    selectProjectClaudeAccount(home, project, "inherit", updated.revision, store),
+    /changed/,
+  );
+  store.values.delete("20x");
+  await assert.rejects(selectedClaudeCredentials(home, "peer", store, project), /locked/);
+  const inherited = await selectProjectClaudeAccount(home, project, "inherit", changedHost.revision, store);
+  assert.equal(inherited.account, "inherit");
+  assert.deepEqual((await claudeAccountsState(home)).config.projects, {});
+  assert.deepEqual(await selectedClaudeCredentials(home, "hq", store, project), {
+    CLAUDE_CODE_OAUTH_TOKEN: "private-five",
+  });
+  assert(!JSON.stringify(await projectClaudeAccountState(home, project)).includes("private-"));
 });
 
 test("OS stores pass tokens on stdin, reject command injection and never store plaintext on Linux", async () => {

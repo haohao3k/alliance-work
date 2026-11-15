@@ -2235,7 +2235,12 @@ test("a handback stands through turns Claude Code starts by itself: one ask each
       "Waiting for the SANDBOX fixture.",
       checkpoint("02:06:00", "waiting", "waiting for the fixture peer and test service"),
     );
-    await turn("autonomous-turn-26", "02:13:33.551", "02:14:51.838", "Waiting for another SANDBOX fixture attempt.");
+    await turn(
+      "autonomous-turn-26",
+      "02:13:33.551",
+      "02:14:51.838",
+      "Waiting for another SANDBOX fixture attempt.",
+    );
     const files = [
       await turn(
         "autonomous-turn-27",
@@ -2245,12 +2250,7 @@ test("a handback stands through turns Claude Code starts by itself: one ask each
         checkpoint("02:19:35.774", "review", SANDBOX),
       ),
     ];
-    await turn(
-      "autonomous-turn-28",
-      "02:19:57.600",
-      "02:20:00.114",
-      "The L2 fixture build is running.",
-    );
+    await turn("autonomous-turn-28", "02:19:57.600", "02:20:00.114", "The L2 fixture build is running.");
     await turn("autonomous-turn-30", "02:21:59.257", "02:22:02.040", "The L2 fixture build completed.");
     await turn("autonomous-turn-31", "02:23:01.424", "02:23:14.677", "Bước dựng L2 chạy xong (exit 0).");
     files.push(
@@ -2317,7 +2317,11 @@ test("a review names the turn that handed back, not the Monitor turns that follo
       "03:59:34.923",
       "03:59:48.559",
       "U2 đã xong offline.",
-      checkpoint("03:59:40.453", "waiting", "U2 and U3 fixture artifacts ready; runtime validation is running"),
+      checkpoint(
+        "03:59:40.453",
+        "waiting",
+        "U2 and U3 fixture artifacts ready; runtime validation is running",
+      ),
     );
     for (const [turnId, from, to, final] of [
       ["autonomous-turn-49", "04:00:23.539", "04:00:36.708", "Đã lưu kết quả L2."],
@@ -2330,7 +2334,11 @@ test("a review names the turn that handed back, not the Monitor turns that follo
       "04:04:41.224",
       "04:06:14.584",
       "U3 đã đạt runtime.",
-      checkpoint("04:06:00.872", "review", "U3 fixture runtime and regression checks passed; owner review requested"),
+      checkpoint(
+        "04:06:00.872",
+        "review",
+        "U3 fixture runtime and regression checks passed; owner review requested",
+      ),
     );
     for (const [turnId, from, to, final] of [
       ["autonomous-turn-53", "04:06:14.600", "04:06:17.084", "Chuỗi U2 đang build image."],

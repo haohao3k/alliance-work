@@ -236,7 +236,12 @@ test("omitted worker models take the harness's first choice for that role", () =
   assert.deepEqual(pick("peer", "pi"), { model: "zai/glm-5.3", thinkingOptionId: "high" });
   // A route missing from this host's catalog is skipped for the next one, never substituted.
   assert.throws(
-    () => pick("peer", "pi", catalog.filter((entry) => entry.id !== "zai/glm-5.3")),
+    () =>
+      pick(
+        "peer",
+        "pi",
+        catalog.filter((entry) => entry.id !== "zai/glm-5.3"),
+      ),
     /No allowed/,
   );
   assert.deepEqual(

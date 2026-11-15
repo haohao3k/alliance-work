@@ -191,11 +191,7 @@ test("rollback below 0.1.19 sets an assignment back on the handback its member s
       if (phase) runtime.autonomy.checkpoint(lead, phase, reason);
       await runtime.endTurn(agent(lead, "lead", hq), turnId, { kind: "completed" }, []);
     };
-    await turn(
-      "foreground-turn-21",
-      "waiting",
-      "pilot: waiting for fixture peer and required test service",
-    );
+    await turn("foreground-turn-21", "waiting", "pilot: waiting for fixture peer and required test service");
     await turn(
       "autonomous-turn-27",
       "review",
